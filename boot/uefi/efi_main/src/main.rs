@@ -1,9 +1,11 @@
 #![no_std]
 #![no_main]
+extern crate alloc;
 use uefi::*;
 use uefi::println;
 mod pixelformat;
 mod graphics;
+mod firmware;
 
 #[entry]
 fn main() -> Status {
@@ -13,7 +15,11 @@ fn main() -> Status {
     println!("        SAIOS Bootloader"        );
     println!("================================");
     
-    //firmware::print();
+    let firmware = firmware::initialize().unwrap();
+
+    println!("Vendor   : {}", firmware.vendor);
+    println!("Firmware : {}", firmware.firmware_revision);
+    println!("UEFI     : {}", firmware.uefi_revision);
 
     
     let framebuffer = graphics::initialize().unwrap();
