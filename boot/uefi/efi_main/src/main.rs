@@ -16,7 +16,7 @@ fn main() -> Status {
     println!("================================");
     
     let firmware = firmware::initialize().unwrap();
-
+    
     println!("Vendor   : {}", firmware.vendor);
     println!("Firmware : {}", firmware.firmware_revision);
     println!("UEFI     : {}", firmware.uefi_revision);
@@ -42,6 +42,7 @@ fn main() -> Status {
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
+    println!("Panic occurred!");
     loop {
         core::hint::spin_loop();
     }
