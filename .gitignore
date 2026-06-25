@@ -3,3 +3,4 @@
 **/disk
 **/efiboot.img
 **/*.iso
+**/seriallog.txt
