@@ -1,0 +1,12 @@
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H================================
+        SAIOS Bootloader
+================================
+Vendor   : EDK II
+Firmware : 65536
+UEFI     : 2.7
+Framebuffer: 1024x768
+Framebuffer base address: 0xe0000000
+Framebuffer size: 3145728 bytes
+Framebuffer stride: 1024 pixels
+Framebuffer pixel format: Bgr
+1024x768
