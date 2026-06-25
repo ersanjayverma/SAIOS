@@ -1,42 +1,41 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use uefi::*;
 use uefi::println;
-mod pixelformat;
-mod graphics;
-mod firmware;
+use uefi::*;
 
+mod acpi;
+mod cpu;
+mod firmware;
+mod graphics;
+mod lib;
+mod memorymap;
+mod pixelformat;
+mod smbios;
+use lib::*;
 #[entry]
 fn main() -> Status {
-     uefi::helpers::init().unwrap();
+    uefi::helpers::init().unwrap();
 
     println!("================================");
-    println!("        SAIOS Bootloader"        );
+    println!("        SAIOS Bootloader");
     println!("================================");
-    
-    let firmware = firmware::initialize().unwrap();
-    
-    println!("Vendor   : {}", firmware.vendor);
-    println!("Firmware : {}", firmware.firmware_revision);
-    println!("UEFI     : {}", firmware.uefi_revision);
+    let boot_info = SaiosBootInfo {
+        magic: SAIOS_BOOT_MAGIC,
+        version: 1,
+        size: core::mem::size_of::<SaiosBootInfo>() as u32,
 
-    
-    let framebuffer = graphics::initialize().unwrap();
-    println!("Framebuffer base address: {:#x}", framebuffer.base);
-    println!("Framebuffer size: {} bytes", framebuffer.size);
-    println!("Framebuffer stride: {} pixels", framebuffer.stride);
-    println!("Framebuffer pixel format: {:?}", framebuffer.pixel_format);
-    println!(
-        "{}x{}",
-        framebuffer.width,
-        framebuffer.height
-    );
+        framebuffer: graphics::initialize().expect("Failed to initialize framebuffer"),
+        memorymap: memorymap::initialize().expect("Failed to initialize memory map"),
+        acpi: acpi::initialize().expect("Failed to initialize ACPI info"),
+        smbios: smbios::initialize().expect("Failed to initialize SMBIOS info"),
+        cpu: cpu::initialize().expect("Failed to initialize CPU info"),
+        firmware: firmware::initialize().expect("Failed to initialize firmware info"),
 
-   loop {
-        unsafe {
-            core::arch::asm!("hlt");
-        }
+        reserved: [0; 16],
+    };
+    loop {
+        core::hint::spin_loop();
     }
 }
 

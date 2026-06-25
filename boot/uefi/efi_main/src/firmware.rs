@@ -1,6 +1,8 @@
-use uefi::system;
 use alloc::string::{String, ToString};
+use uefi::println;
+use uefi::system;
 use uefi::table::Revision;
+#[repr(C)]
 pub struct FirmwareInfo {
     pub vendor: String,
     pub firmware_revision: u32,
@@ -13,6 +15,9 @@ pub fn initialize() -> uefi::Result<FirmwareInfo> {
 
     let uefi_revision = system::uefi_revision();
 
+    println!("Vendor   : {}", vendor);
+    println!("Firmware : {}", firmware_revision);
+    println!("UEFI     : {}", uefi_revision);
     Ok(FirmwareInfo {
         vendor,
         firmware_revision,
