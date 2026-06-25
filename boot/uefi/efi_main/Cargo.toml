@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+uefi = { version = "0.38", features = ["alloc", "global_allocator"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
