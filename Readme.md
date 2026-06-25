@@ -166,13 +166,13 @@ Code is the final step—not the first.
 docs/
     architecture/
     contracts/
-    specifications/
+    specs/
     design/
     decisions/
 
 boot/
 
-kernel/
+seed/
 
 drivers/
 
