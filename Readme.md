@@ -171,12 +171,16 @@ docs/
     decisions/
 
 boot/
+    uefi/
+    bios/
+    ...
 
 seed/
+    saios/
 
 drivers/
 
-libraries/
+libs/
 
 tools/
 
