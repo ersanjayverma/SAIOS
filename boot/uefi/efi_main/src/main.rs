@@ -33,7 +33,11 @@ fn main() -> Status {
         framebuffer.height
     );
 
-    Status::SUCCESS
+   loop {
+        unsafe {
+            core::arch::asm!("hlt");
+        }
+    }
 }
 
 #[panic_handler]
