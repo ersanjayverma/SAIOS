@@ -33,13 +33,11 @@ fn main() -> Status {
     println!("========================================");  
     
     
-        // Exit boot services (unsafe)
-    unsafe {
-       let _ = uefi::boot::exit_boot_services(Some(UefiMemoryType::LOADER_DATA));
-    }
-    let _ = Status::SUCCESS;
+    let memory_map = unsafe {
+        uefi::boot::exit_boot_services(Some(uefi::table::boot::MemoryType::LOADER_DATA))
+    };
+   
     self::jump_to_seed(boot_info)
-    
 }
 
 #[panic_handler]
@@ -60,7 +58,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 
 pub fn jump_to_seed(boot_info: efi_main::SaiosBootInfo) -> ! {
-    // Exit boot services first
     // Jump to kernel entry point
     let seed_entry_point = 0x100000 as *const ();
     let seed_fn: extern "C" fn(&efi_main::SaiosBootInfo) -> ! =

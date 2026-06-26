@@ -26,14 +26,10 @@ macro_rules! println {
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info: &SaiosBootInfo) -> ! {
-    let vga_buffer = 0xb8000 as *mut u8;
-    *vga_buffer.offset(0) = b'H';
-    *vga_buffer.offset(1) = 0x0f; // white on black
-    *vga_buffer.offset(2) = b'i';
-    *vga_buffer.offset(3) = 0x0f;
-    println!("Hello, SAIOS!");
+
+
      loop {
-        core::hint::spin_loop();
+        core::arch::asm!("hlt");
     }
 }
 
