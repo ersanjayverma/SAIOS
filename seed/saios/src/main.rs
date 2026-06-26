@@ -26,7 +26,7 @@ macro_rules! println {
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
-    // Kernel initialization code here
+    println!("Hello, SAIOS!");
      loop {
         core::hint::spin_loop();
     }

@@ -11,15 +11,17 @@ pub mod acpi;
 pub mod smbios;
 pub mod cpu;
 pub mod firmware;
+use uefi::boot::MemoryType as UefiMemoryType;
+use core::prelude::*;
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
 
     println!("================================");
-    println!("        SAIOS Bootloader");
+    println!("        SAIOS Bootloader"        );
     println!("================================");
     let boot_info = self::initialize_boot_info();
-          println!("========================================");
+    println!("========================================");
     println!("          SAIOS BOOT INFORMATION        ");
     println!("========================================");
     
@@ -38,9 +40,13 @@ fn main() -> Status {
     println!("{:#?}", boot_info.firmware);
     
     println!("========================================");  
-    loop {
-        core::hint::spin_loop();
+    self::jump_to_seed(boot_info);
+        // Exit boot services (unsafe)
+    unsafe {
+        uefi::boot::exit_boot_services(Some(UefiMemoryType::LOADER_DATA));
     }
+
+    Status::SUCCESS
 }
 
 #[panic_handler]
@@ -89,4 +95,9 @@ pub fn initialize_boot_info() -> SaiosBootInfo {
 
         reserved: [0; 16],
     }
+}
+pub fn jump_to_seed(boot_info: SaiosBootInfo) {
+    let seed_entry_point = 0x100000 as *const ();
+    let seed_fn: extern "C" fn(&SaiosBootInfo) -> ! = unsafe { core::mem::transmute(seed_entry_point) };
+    seed_fn(&boot_info);
 }

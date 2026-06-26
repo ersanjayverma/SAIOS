@@ -6,7 +6,7 @@ ROOT=$(pwd)
 ISO_DIR="$ROOT/disk"
 EFI_IMG="$ROOT/efiboot.img"
 ISO_OUT="$ROOT/saios.iso"
-
+BOOTLOADER="$ROOT/boot/uefi/efi_main/target/x86_64-unknown-uefi/release/efi_main.efi"
 rm -f "$EFI_IMG"
 rm -f "$ISO_OUT"
 
@@ -26,11 +26,9 @@ mmd -i "$EFI_IMG" ::/EFI/BOOT
 #
 # Copy bootloader
 #
-mcopy -i "$EFI_IMG" \
-    "$ISO_DIR/EFI/BOOT/BOOTX64.EFI" \
-    ::/EFI/BOOT/
+mcopy -i "$EFI_IMG" "$BOOTLOADER" ::/EFI/BOOT/BOOTX64.EFI
 cp "$EFI_IMG" "$ISO_DIR/efiboot.img"
-
+cp "$ROOT/seed/saios/target/x86_64-unknown-none/release/saios" "$ISO_DIR/seed.elf"
 xorriso \
     -as mkisofs \
     -iso-level 3 \
