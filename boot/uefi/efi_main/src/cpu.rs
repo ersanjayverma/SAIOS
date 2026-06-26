@@ -1,5 +1,6 @@
 use core::arch::x86_64::__cpuid_count;
 #[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct CpuInfo {
     pub vendor: [u8; 13],
     pub brand: [u8; 49],
@@ -20,6 +21,7 @@ pub struct CpuInfo {
     pub hypervisor: HypervisorInfo,
 }
 #[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct HypervisorInfo {
     pub present: bool,
     pub vendor: [u8; 13],

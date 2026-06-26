@@ -4,6 +4,7 @@ use uefi::boot::{self, SearchType};
 use uefi::println;
 use uefi::proto::console::gop::GraphicsOutput;
 #[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct FramebufferInfo {
     pub base: u64,
     pub size: usize,
@@ -40,7 +41,7 @@ pub fn initialize() -> uefi::Result<FramebufferInfo> {
         pixel_format: convert_pixel_format(mode.pixel_format()),
     })
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(C)]
 pub enum PixelFormat {
     Rgb,

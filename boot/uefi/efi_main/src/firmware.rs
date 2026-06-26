@@ -4,6 +4,7 @@ use uefi::println;
 use uefi::system;
 use uefi::table::Revision;
 #[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirmwareInfo {
     pub vendor: String,
     pub firmware_revision: u32,

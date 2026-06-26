@@ -1,4 +1,5 @@
 #[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SmbiosInfo {
     pub entry_point: u64,
     pub version_major: u8,
@@ -11,6 +12,7 @@ pub struct SmbiosInfo {
     pub is_64bit: bool,
 }
 #[repr(C, packed)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SmbiosEntryPoint32 {
     pub anchor: [u8; 4], // "_SM_"
     pub checksum: u8,
@@ -28,6 +30,7 @@ pub struct SmbiosEntryPoint32 {
     pub bcd_revision: u8,
 }
 #[repr(C, packed)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SmbiosEntryPoint64 {
     pub anchor: [u8; 5], // "_SM3_"
     pub checksum: u8,

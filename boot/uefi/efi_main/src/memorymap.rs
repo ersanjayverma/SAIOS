@@ -4,11 +4,13 @@ use uefi::boot::MemoryType as UefiMemoryType;
 use uefi::mem::memory_map::MemoryMap;
 use uefi::println;
 #[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct MemoryMapInfo {
     pub entries: *const MemoryRegion,
     pub entry_count: usize,
 }
 #[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct MemoryRegion {
     pub base: u64,
     pub length: u64,
