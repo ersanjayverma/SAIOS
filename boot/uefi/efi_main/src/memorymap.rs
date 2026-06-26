@@ -1,3 +1,4 @@
+extern crate alloc;
 use alloc::vec::Vec;
 use uefi::boot::MemoryType as UefiMemoryType;
 use uefi::mem::memory_map::MemoryMap;

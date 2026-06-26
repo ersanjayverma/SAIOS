@@ -1,4 +1,4 @@
-use crate::pixelformat::{PixelFormat, convert_pixel_format};
+use uefi::proto::console::gop::PixelFormat as UefiPixelFormat;
 use uefi::Identify;
 use uefi::boot::{self, SearchType};
 use uefi::println;
@@ -39,4 +39,21 @@ pub fn initialize() -> uefi::Result<FramebufferInfo> {
         stride: mode.stride(),
         pixel_format: convert_pixel_format(mode.pixel_format()),
     })
+}
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub enum PixelFormat {
+    Rgb,
+    Bgr,
+    Bitmask,
+    BltOnly,
+}
+
+pub fn convert_pixel_format(fmt: UefiPixelFormat) -> PixelFormat {
+    match fmt {
+        UefiPixelFormat::Rgb => PixelFormat::Rgb,
+        UefiPixelFormat::Bgr => PixelFormat::Bgr,
+        UefiPixelFormat::Bitmask => PixelFormat::Bitmask,
+        UefiPixelFormat::BltOnly => PixelFormat::BltOnly,
+    }
 }
