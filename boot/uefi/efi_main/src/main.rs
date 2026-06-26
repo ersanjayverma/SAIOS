@@ -109,7 +109,7 @@ let mut buffer = vec![0u8; 1024 * 1024 * 10]; // 1 MB buffer
 
     println!("Parse ELF header");
     let entry_point = parse_elf_header(&buffer[..size]);
-
+    println!("found entry point: {:#x}", entry_point );
     Ok(Loader { entry_point })
 }
 
