@@ -22,13 +22,14 @@ mkfs.fat "$EFI_IMG"
 #
 mmd -i "$EFI_IMG" ::/EFI
 mmd -i "$EFI_IMG" ::/EFI/BOOT
-
+mmd -i "$EFI_IMG" ::/SAIOS
 #
 # Copy bootloader
 #
 mcopy -i "$EFI_IMG" "$BOOTLOADER" ::/EFI/BOOT/BOOTX64.EFI
+mcopy -i "$EFI_IMG" "$ROOT/seed/saios/target/x86_64-unknown-none/release/saios" ::/SAIOS/seed.elf
 cp "$EFI_IMG" "$ISO_DIR/efiboot.img"
-cp "$ROOT/seed/saios/target/x86_64-unknown-none/release/saios" "$ISO_DIR/seed.elf"
+
 xorriso \
     -as mkisofs \
     -iso-level 3 \

@@ -25,11 +25,13 @@ macro_rules! println {
     })
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start(boot_info: &SaiosBootInfo) -> ! {
-
-
+pub unsafe extern "C" fn _start(boot_info:*const SaiosBootInfo) -> ! {
+    unsafe {
+        core::ptr::write_volatile(0xb8000 as *mut u16, 0x0f4b);
+    }
+    
      loop {
-        core::arch::asm!("hlt");
+        core::arch::asm!("cli; hlt");
     }
 }
 
