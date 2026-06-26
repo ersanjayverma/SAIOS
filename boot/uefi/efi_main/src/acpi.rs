@@ -84,7 +84,11 @@ fn search_region(start: usize, end: usize) -> Option<&'static RsdpDescriptor> {
 
 unsafe fn validate_checksum(ptr: *const RsdpDescriptor) -> bool {
     // ACPI 1.0 structures are validated by checking the first 20 bytes
-    let bytes = core::slice::from_raw_parts(ptr as *const u8, 20);
-    let sum: u8 = bytes.iter().fold(0, |acc, &x| acc.wrapping_add(x));
-    sum == 0
+    unsafe{
+        let bytes = core::slice::from_raw_parts(ptr as *const u8, 20);
+        let sum: u8 = bytes.iter().fold(0, |acc, &x| acc.wrapping_add(x));
+        sum == 0
+    }
+   
+    
 }
