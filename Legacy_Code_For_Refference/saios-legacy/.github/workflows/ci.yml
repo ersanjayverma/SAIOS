@@ -1,0 +1,214 @@
+name: SAIOS CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  KERNEL_TARGET: x86_64-unknown-none
+  KERNEL_BUILD_STD: -Z build-std=core,compiler_builtins,alloc -Z build-std-features=compiler-builtins-mem
+
+jobs:
+  check:
+    name: Cargo Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          target: x86_64-unknown-none
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+          target: x86_64-unknown-none
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run cargo check
+        run: cargo check --no-default-features --target $KERNEL_TARGET $KERNEL_BUILD_STD
+
+      - name: Run cargo test
+        run: cargo test --no-default-features
+
+      - name: Run cargo check --release
+        run: cargo check --no-default-features --release --target $KERNEL_TARGET $KERNEL_BUILD_STD
+
+      - name: Check formatting
+        run: rustup run nightly cargo fmt --check
+
+      - name: Run clippy
+        run: rustup run nightly cargo clippy --no-default-features --target $KERNEL_TARGET $KERNEL_BUILD_STD -- -D warnings
+
+      - name: Check release metadata consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/.*SAIOS_VERSION:.*"\([^"]*\)".*/\1/p' shared_version.rs)
+          tag=$(sed -n 's/.*SAIOS_VERSION_TAG:.*"\([^"]*\)".*/\1/p' shared_version.rs)
+          cargo_version=$(grep -A 5 '^\[workspace\.package\]' Cargo.toml | sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -n 1 | tr -d '\r')
+          expected_readme_line=$(printf 'Runtime version: `%s`' "$tag")
+
+          test -n "$version"
+          test -n "$tag"
+          test -n "$cargo_version"
+          test "$tag" = "v$version"
+          test "$cargo_version" = "$version"
+          test -f "RELEASE_NOTES_${tag}.md"
+          grep -Fq "$expected_readme_line" README.md
+
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+          target: x86_64-unknown-none
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build kernel
+        run: cargo build --release --no-default-features --target $KERNEL_TARGET $KERNEL_BUILD_STD
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build
+          path: target/x86_64-unknown-none/release/saios
+          retention-days: 7
+
+  test:
+    name: Verify Test Assets
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-build
+          path: target/x86_64-unknown-none/release/
+
+      - name: Verify kernel artifact is present
+        run: test -f target/x86_64-unknown-none/release/saios
+
+      - name: Check test coverage
+        if: always()
+        run: |
+          echo "Test suite includes:"
+          echo "- Memory tests: frame_allocator, paging, cow, address_space"
+          echo "- Filesystem tests: ext4, vfs, block"
+          echo "- Total tests: $(grep -r 'fn test_' tests/ | wc -l)"
+
+      - name: Verify testsaios architecture validation coverage
+        run: |
+          set -euo pipefail
+          grep -Fq '[testsaios] === architecture validation ===' src/shell/commands/process.rs
+          grep -Fq 'KDS validation' src/shell/commands/process.rs
+          grep -Fq 'SAIRU validation' src/shell/commands/process.rs
+          grep -Fq 'freeze diagnostics validation' src/shell/commands/process.rs
+          grep -Fq 'Observability Contract initialized' src/shell/commands/process.rs
+
+  lint:
+    name: Lint and Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for TODO/FIXME
+        run: |
+          TODO_COUNT=$(grep -r -i "TODO" src/ | wc -l)
+          FIXME_COUNT=$(grep -r -i "FIXME" src/ | wc -l)
+          echo "TODOs found: $TODO_COUNT"
+          echo "FIXMEs found: $FIXME_COUNT"
+          if [ "$TODO_COUNT" -gt 10 ]; then
+            echo "Warning: More than 10 TODOs found"
+          fi
+
+      - name: Documentation check
+        run: |
+          set -euo pipefail
+          # Check only authoritative core documentation.
+          test -f "docs/core/SAIOS_SSOT.md"
+          test -f "docs/core/SAIOS_SSOT_Part2.md"
+          test -f "docs/core/Implementation/DOC-01_SAIOS_Kernel_Constitution.md"
+          test -f "docs/core/Implementation/DOC-04_Boot_Sequence_Specification.md"
+          test -f "docs/core/Implementation/DOC-10_KDS_ObservabilityContract.md"
+          test -f "docs/core/Implementation/DOC-16_ReliabilityContract_Red_Ring.md"
+          test -f "docs/core/Implementation/DOC-17_SAIRU_Intelligence_Architecture.md"
+          grep -Fq "SAIRU" docs/core/SAIOS_SSOT.md
+          grep -Fq "KDS" docs/core/Implementation/DOC-10_KDS_ObservabilityContract.md
+          grep -Fq "Flight Recorder" docs/core/SAIOS_SSOT.md
+          grep -Fq "Red Ring" docs/core/Implementation/DOC-16_ReliabilityContract_Red_Ring.md
+          echo "Documentation check complete"
+
+      - name: Architecture consistency check
+        run: |
+          set -euo pipefail
+          grep -Fq "SAIRU" docs/core/SAIOS_SSOT.md
+          grep -Fq "KDS" docs/core/SAIOS_SSOT.md
+          grep -Fq "SecurityContract" docs/core/SAIOS_SSOT.md
+          grep -Fq "ReliabilityContract" docs/core/SAIOS_SSOT.md
+          if grep -R -E "saios <task>|Autonomous SAIOS Agent Command|SAIRU Shell|Create SAIRU Shell|obsolete AI shell" docs/core src; then
+            echo "Stale architecture reference found"
+            exit 1
+          fi
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run security audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for unsafe usage
+        run: |
+          UNSAFE_COUNT=$(grep -r "unsafe" src/ | wc -l)
+          echo "Unsafe blocks found: $UNSAFE_COUNT"
+          if [ "$UNSAFE_COUNT" -gt 500 ]; then
+            echo "Note: Large number of unsafe blocks - expected for kernel code"
+          fi

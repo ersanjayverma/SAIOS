@@ -3,16 +3,7 @@
 extern crate alloc;
 use uefi::println;
 use uefi::*;
-pub const SAIOS_BOOT_MAGIC: u64 = 0x5341_494F_5342_4F4F; // Choose your preferred value
-pub const SAIOS_BOOT_VERSION: u32 = 1;
-pub mod graphics;
-pub mod memorymap;
-pub mod acpi;
-pub mod smbios;
-pub mod cpu;
-pub mod firmware;
 use uefi::boot::MemoryType as UefiMemoryType;
-use core::prelude::*;
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
@@ -20,13 +11,13 @@ fn main() -> Status {
     println!("================================");
     println!("        SAIOS Bootloader"        );
     println!("================================");
-    let boot_info = self::initialize_boot_info();
+    let boot_info = efi_main::initialize_boot_info();
     println!("========================================");
     println!("          SAIOS BOOT INFORMATION        ");
     println!("========================================");
     
     // Print metadata fields explicitly for validation
-    println!("Magic Check:   0x{:X} (Expected: 0x{:X})", boot_info.magic, SAIOS_BOOT_MAGIC); 
+    println!("Magic Check:   0x{:X} (Expected: 0x{:X})", boot_info.magic, efi_main::SAIOS_BOOT_MAGIC); 
     println!("Boot Version:  {}.{}", boot_info.version >> 16, boot_info.version & 0xFFFF);
     println!("Struct Size:   {} bytes", boot_info.size);
     println!("----------------------------------------");
@@ -40,13 +31,15 @@ fn main() -> Status {
     println!("{:#?}", boot_info.firmware);
     
     println!("========================================");  
-    self::jump_to_seed(boot_info);
+    
+    
         // Exit boot services (unsafe)
     unsafe {
-        uefi::boot::exit_boot_services(Some(UefiMemoryType::LOADER_DATA));
+       let _ = uefi::boot::exit_boot_services(Some(UefiMemoryType::LOADER_DATA));
     }
-
-    Status::SUCCESS
+    let _ = Status::SUCCESS;
+    self::jump_to_seed(boot_info)
+    
 }
 
 #[panic_handler]
@@ -64,40 +57,14 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         core::hint::spin_loop();
     }
 }
-#[repr(C)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SaiosBootInfo {
-    pub magic: u64,
-    pub version: u32,
-    pub size: u32,
 
-    pub framebuffer: graphics::FramebufferInfo,
-    pub memorymap: memorymap::MemoryMapInfo,
-    pub acpi: acpi::AcpiInfo,
-    pub smbios: smbios::SmbiosInfo,
-    pub cpu: cpu::CpuInfo,
-    pub firmware: firmware::FirmwareInfo,
 
-    pub reserved: [u64; 16],
-}
-pub fn initialize_boot_info() -> SaiosBootInfo {
-    SaiosBootInfo {
-        magic: SAIOS_BOOT_MAGIC,
-        version: SAIOS_BOOT_VERSION,
-        size: core::mem::size_of::<SaiosBootInfo>() as u32,
-
-        framebuffer: graphics::initialize().expect("Failed to initialize framebuffer"),
-        memorymap: memorymap::initialize().expect("Failed to initialize memory map"),
-        acpi: acpi::initialize().expect("Failed to initialize ACPI info"),
-        smbios: smbios::initialize().expect("Failed to initialize SMBIOS info"),
-        cpu: cpu::initialize().expect("Failed to initialize CPU info"),
-        firmware: firmware::initialize().expect("Failed to initialize firmware info"),
-
-        reserved: [0; 16],
-    }
-}
-pub fn jump_to_seed(boot_info: SaiosBootInfo) {
+pub fn jump_to_seed(boot_info: efi_main::SaiosBootInfo) -> ! {
+    // Exit boot services first
+    // Jump to kernel entry point
     let seed_entry_point = 0x100000 as *const ();
-    let seed_fn: extern "C" fn(&SaiosBootInfo) -> ! = unsafe { core::mem::transmute(seed_entry_point) };
-    seed_fn(&boot_info);
+    let seed_fn: extern "C" fn(&efi_main::SaiosBootInfo) -> ! =
+        unsafe { core::mem::transmute(seed_entry_point) };
+
+    seed_fn(&boot_info) 
 }
