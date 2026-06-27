@@ -66,7 +66,7 @@ pub fn clear_framebuffer() {
             (*BOOT_INFO).framebuffer.stride * (*BOOT_INFO).framebuffer.height;
 
         for i in 0..pixels {
-            fb.add(i).write_volatile(0x00800000); // SAIOS Blue (BGR)
+            fb.add(i).write_volatile(0x00000088); // SAIOS Blue (BGR)
         }
     }
 }
@@ -74,33 +74,33 @@ pub fn clear_framebuffer() {
 pub unsafe extern "C" fn _start(boot_info:*const SaiosBootInfo) -> ! {
     BOOT_INFO = boot_info;
     clear_framebuffer(); // Clear framebuffer to blue
+    println!("HELLO");
+    // println!("========================================");
+    // println!("          SAIOS BOOT INFORMATION        ");
+    // println!("========================================");
+    //   // Print metadata fields explicitly for validation
+    // println!(
+    //     "Magic Check:   0x{:X} (Expected: 0x{:X})",
+    //     (&*BOOT_INFO).magic,
+    //     efi_main::SAIOS_BOOT_MAGIC
+    // );
+    // println!(
+    //     "Boot Version:  {}.{}",
+    //     (&*BOOT_INFO).version >> 16,
+    //     (&*BOOT_INFO).version & 0xFFFF
+    // );
+    // println!("Struct Size:   {} bytes", (&*BOOT_INFO).size);
+    // println!("----------------------------------------");
 
-    println!("========================================");
-    println!("          SAIOS BOOT INFORMATION        ");
-    println!("========================================");
-      // Print metadata fields explicitly for validation
-    println!(
-        "Magic Check:   0x{:X} (Expected: 0x{:X})",
-        (&*BOOT_INFO).magic,
-        efi_main::SAIOS_BOOT_MAGIC
-    );
-    println!(
-        "Boot Version:  {}.{}",
-        (&*BOOT_INFO).version >> 16,
-        (&*BOOT_INFO).version & 0xFFFF
-    );
-    println!("Struct Size:   {} bytes", (&*BOOT_INFO).size);
-    println!("----------------------------------------");
+    // // Print the sub-structures using the derived Debug trait
+    // println!("{:#?}", (&*BOOT_INFO).framebuffer);
+    // println!("{:#?}", (&*BOOT_INFO).memorymap);
+    // println!("{:#?}", (&*BOOT_INFO).acpi);
+    // println!("{:#?}", (&*BOOT_INFO).smbios);
+    // println!("{:#?}", (&*BOOT_INFO).cpu);
+    // println!("{:#?}", (&*BOOT_INFO).firmware);
 
-    // Print the sub-structures using the derived Debug trait
-    println!("{:#?}", (&*BOOT_INFO).framebuffer);
-    println!("{:#?}", (&*BOOT_INFO).memorymap);
-    println!("{:#?}", (&*BOOT_INFO).acpi);
-    println!("{:#?}", (&*BOOT_INFO).smbios);
-    println!("{:#?}", (&*BOOT_INFO).cpu);
-    println!("{:#?}", (&*BOOT_INFO).firmware);
-
-    println!("========================================");
+    // println!("========================================");
 
 
     loop {
