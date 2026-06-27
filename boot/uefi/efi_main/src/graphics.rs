@@ -1,8 +1,8 @@
-use uefi::proto::console::gop::PixelFormat as UefiPixelFormat;
 use uefi::Identify;
 use uefi::boot::{self, SearchType};
 use uefi::println;
 use uefi::proto::console::gop::GraphicsOutput;
+use uefi::proto::console::gop::PixelFormat as UefiPixelFormat;
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct FramebufferInfo {

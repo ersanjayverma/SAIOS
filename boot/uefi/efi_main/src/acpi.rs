@@ -53,10 +53,10 @@ fn search_ebda() -> Option<&'static RsdpDescriptor> {
     // The 16-bit segment address of EBDA is located at 0x40E
     let ebda_ptr = 0x40E as *const u16;
     let ebda_segment = unsafe { core::ptr::read_volatile(ebda_ptr) } as usize;
-    
+
     // Convert segment address to absolute physical address
     let ebda_base = ebda_segment << 4;
-    
+
     if ebda_base > 0 {
         // Scan the first 1 KiB of EBDA
         return search_region(ebda_base, ebda_base + 1024 - 1);
@@ -67,7 +67,7 @@ fn search_ebda() -> Option<&'static RsdpDescriptor> {
 fn search_region(start: usize, end: usize) -> Option<&'static RsdpDescriptor> {
     // RSDP is guaranteed to be aligned to a 16-byte boundary
     let scan_start = (start + 15) & !15;
-    
+
     for addr in (scan_start..=end).step_by(16) {
         let rsdp_ptr = addr as *const RsdpDescriptor;
         unsafe {
@@ -84,11 +84,9 @@ fn search_region(start: usize, end: usize) -> Option<&'static RsdpDescriptor> {
 
 unsafe fn validate_checksum(ptr: *const RsdpDescriptor) -> bool {
     // ACPI 1.0 structures are validated by checking the first 20 bytes
-    unsafe{
+    unsafe {
         let bytes = core::slice::from_raw_parts(ptr as *const u8, 20);
         let sum: u8 = bytes.iter().fold(0, |acc, &x| acc.wrapping_add(x));
         sum == 0
     }
-   
-    
 }
