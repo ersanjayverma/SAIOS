@@ -4,22 +4,61 @@
 use core::fmt::{self, Write};
 use efi_main::SaiosBootInfo;
 static mut BOOT_INFO: *const SaiosBootInfo = core::ptr::null();
-struct Writer;
+static mut CURSOR: usize = 0;
+
+pub struct Writer;
 
 impl Write for Writer {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         unsafe {
             let fb = (*BOOT_INFO).framebuffer.base as *mut u32;
+            let stride = (*BOOT_INFO).framebuffer.stride;
+            let width = (*BOOT_INFO).framebuffer.width;
+            let height = (*BOOT_INFO).framebuffer.height;
 
-            for b in s.bytes() {
-                fb.write_volatile(b as u32);
+            for byte in s.bytes() {
+                match byte {
+                    b'\n' => {
+                        CURSOR = ((CURSOR / stride) + 1) * stride;
+                    }
+                    _ => {
+                        if CURSOR < stride * height {
+                            // White pixel for now
+                            fb.add(CURSOR).write_volatile(0x00FFFFFF);
+                            CURSOR += 1;
+                        }
+                    }
+                }
             }
         }
 
         Ok(())
     }
 }
-pub fn clear_framebuffer(color: u32) {
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {{
+        use core::fmt::Write;
+        let mut writer = Writer;
+        let _ = writer.write_fmt(format_args!($($arg)*));
+    }};
+}
+
+#[macro_export]
+macro_rules! println {
+    () => {
+        $crate::print!("\n");
+    };
+
+    ($fmt:expr) => {
+        $crate::print!(concat!($fmt, "\n"));
+    };
+
+    ($fmt:expr, $($arg:tt)*) => {
+        $crate::print!(concat!($fmt, "\n"), $($arg)*);
+    };
+}
+pub fn clear_framebuffer() {
     unsafe {
         let fb = (*BOOT_INFO).framebuffer.base as *mut u32;
 
@@ -27,56 +66,48 @@ pub fn clear_framebuffer(color: u32) {
             (*BOOT_INFO).framebuffer.stride * (*BOOT_INFO).framebuffer.height;
 
         for i in 0..pixels {
-            fb.add(i).write_volatile(color);
+            fb.add(i).write_volatile(0x00800000); // SAIOS Blue (BGR)
         }
     }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info:*const SaiosBootInfo) -> ! {
     BOOT_INFO = boot_info;
-    clear_framebuffer(0x00FF0000); // Clear framebuffer to red
-    let mut w = Writer;
-    let _ = w.write_str("========================================");
-    let _ = w.write_str("          SAIOS BOOT INFORMATION        ");
-    let _ = w.write_str("========================================");
-    //   // Print metadata fields explicitly for validation
-    // println!(
-    //     "Magic Check:   0x{:X} (Expected: 0x{:X})",
-    //     (&*BOOT_INFO).magic,
-    //     efi_main::SAIOS_BOOT_MAGIC
-    // );
-    // println!(
-    //     "Boot Version:  {}.{}",
-    //     (&*BOOT_INFO).version >> 16,
-    //     (&*BOOT_INFO).version & 0xFFFF
-    // );
-    // println!("Struct Size:   {} bytes", (&*BOOT_INFO).size);
-    // println!("----------------------------------------");
+    clear_framebuffer(); // Clear framebuffer to blue
 
-    // // Print the sub-structures using the derived Debug trait
-    // println!("{:#?}", (&*BOOT_INFO).framebuffer);
-    // println!("{:#?}", (&*BOOT_INFO).memorymap);
-    // println!("{:#?}", (&*BOOT_INFO).acpi);
-    // println!("{:#?}", (&*BOOT_INFO).smbios);
-    // println!("{:#?}", (&*BOOT_INFO).cpu);
-    // println!("{:#?}", (&*BOOT_INFO).firmware);
+    println!("========================================");
+    println!("          SAIOS BOOT INFORMATION        ");
+    println!("========================================");
+      // Print metadata fields explicitly for validation
+    println!(
+        "Magic Check:   0x{:X} (Expected: 0x{:X})",
+        (&*BOOT_INFO).magic,
+        efi_main::SAIOS_BOOT_MAGIC
+    );
+    println!(
+        "Boot Version:  {}.{}",
+        (&*BOOT_INFO).version >> 16,
+        (&*BOOT_INFO).version & 0xFFFF
+    );
+    println!("Struct Size:   {} bytes", (&*BOOT_INFO).size);
+    println!("----------------------------------------");
 
-    // println!("========================================");
+    // Print the sub-structures using the derived Debug trait
+    println!("{:#?}", (&*BOOT_INFO).framebuffer);
+    println!("{:#?}", (&*BOOT_INFO).memorymap);
+    println!("{:#?}", (&*BOOT_INFO).acpi);
+    println!("{:#?}", (&*BOOT_INFO).smbios);
+    println!("{:#?}", (&*BOOT_INFO).cpu);
+    println!("{:#?}", (&*BOOT_INFO).firmware);
+
+    println!("========================================");
 
 
     loop {
         core::hint::spin_loop();
     }
-   
-    BOOT_INFO = boot_info;
 
-let magic = unsafe { (*BOOT_INFO).magic };
-unsafe {
-    let fb = (*BOOT_INFO).framebuffer.base as *mut u32;
-}
-loop {
-    core::hint::spin_loop();
-}
+
 }
 
 #[panic_handler]
