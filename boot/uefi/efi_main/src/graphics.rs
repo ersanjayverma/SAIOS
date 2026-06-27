@@ -32,14 +32,16 @@ pub fn initialize() -> uefi::Result<FramebufferInfo> {
     );
     println!("{}x{}", mode.resolution().0, mode.resolution().1);
 
-    Ok(FramebufferInfo {
+    let fb_info = FramebufferInfo {
         base: fb.as_mut_ptr() as u64,
         size: fb.size(),
         width: mode.resolution().0 as usize,
         height: mode.resolution().1 as usize,
         stride: mode.stride(),
         pixel_format: convert_pixel_format(mode.pixel_format()),
-    })
+    };
+    drop(gop);
+    Ok(fb_info)
 }
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(C)]

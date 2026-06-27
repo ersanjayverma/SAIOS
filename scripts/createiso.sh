@@ -9,11 +9,12 @@ ISO_OUT="$ROOT/saios.iso"
 BOOTLOADER="$ROOT/boot/uefi/efi_main/target/x86_64-unknown-uefi/release/efi_main.efi"
 rm -f "$EFI_IMG"
 rm -f "$ISO_OUT"
+rm -f "$ISO_DIR/efiboot.img"
 
 #
 # Create 16MB FAT EFI image
 #
-dd if=/dev/zero of="$EFI_IMG" bs=1M count=16
+dd if=/dev/zero of="$EFI_IMG" bs=1M count=32
 
 mkfs.fat "$EFI_IMG"
 
@@ -29,7 +30,7 @@ mmd -i "$EFI_IMG" ::/SAIOS
 mcopy -i "$EFI_IMG" "$BOOTLOADER" ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i "$EFI_IMG" "$ROOT/seed/saios/target/x86_64-unknown-none/release/saios" ::/SAIOS/seed.elf
 cp "$EFI_IMG" "$ISO_DIR/efiboot.img"
-
+mdir -i "$EFI_IMG" ::/SAIOS
 xorriso \
     -as mkisofs \
     -iso-level 3 \
