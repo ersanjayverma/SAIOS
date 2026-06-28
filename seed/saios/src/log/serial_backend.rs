@@ -3,9 +3,9 @@ pub fn init() {
 }
 
 pub fn write_str(s: &str) {
-    crate::console::write_str(s);
+    crate::console::write_debug_str(s);
 }
 
 pub fn write_fmt(args: core::fmt::Arguments<'_>) {
-    crate::console::write_fmt(args);
+    crate::console::write_debug_fmt(args);
 }

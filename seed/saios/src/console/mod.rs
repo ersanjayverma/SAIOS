@@ -48,6 +48,11 @@ impl ConsoleState {
             fb.write_str(s);
         }
     }
+
+    fn write_debug_str(&mut self, s: &str) {
+        self.ring.append(s);
+        self.serial.write_str(s);
+    }
 }
 
 struct GlobalCell<T>(UnsafeCell<T>);
@@ -83,6 +88,10 @@ pub fn write_str(s: &str) {
     state().write_str(s);
 }
 
+pub fn write_debug_str(s: &str) {
+    state().write_debug_str(s);
+}
+
 pub fn write_fmt(args: fmt::Arguments<'_>) {
     struct ConsoleFmt;
 
@@ -95,6 +104,20 @@ pub fn write_fmt(args: fmt::Arguments<'_>) {
 
     use fmt::Write;
     let _ = ConsoleFmt.write_fmt(args);
+}
+
+pub fn write_debug_fmt(args: fmt::Arguments<'_>) {
+    struct DebugFmt;
+
+    impl fmt::Write for DebugFmt {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            crate::console::write_debug_str(s);
+            Ok(())
+        }
+    }
+
+    use fmt::Write;
+    let _ = DebugFmt.write_fmt(args);
 }
 
 pub fn panic_prelude(info: &core::panic::PanicInfo<'_>) {

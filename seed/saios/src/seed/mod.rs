@@ -34,7 +34,6 @@ pub unsafe fn init(boot_info: *const SaiosBootInfo) {
     arch::install_exception_handlers();
 
     let boot_info = unsafe { &*boot_info };
-    crate::console::attach_framebuffer(boot_info.framebuffer);
     let mut init = KernelInit::new(boot_info);
     init.stage0_cpu();
     init.stage1_exceptions();
