@@ -12,3 +12,4 @@ pub const MAX_SLAB_RECYCLED_BLOCKS: usize = 128;
 pub const SMALL_HEAP_LIMIT: usize = 1024;
 pub const USER_SPACE_END: u64 = 0x0000_7fff_ffff_ffff;
 pub const KERNEL_SPACE_START: u64 = 0xffff_8000_0000_0000;
+pub const FLAG_MASK: u64 = 0xfff | (1u64 << 63);

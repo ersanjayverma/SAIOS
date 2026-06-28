@@ -1,17 +1,20 @@
-use crate::memory::{MmuHal, PageFlags, PagingRoot, PhysAddr, VirtAddr};
+use crate::memory::{MmuHal, PageFlags, PagingRoot, PhysAddr, VirtAddr, contracts};
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("hal::memory::x86_64 currently supports only x86_64");
 
 #[derive(Debug, Copy, Clone, Default)]
-pub struct X64Paging;
-
-impl X64Paging {
-    pub const fn new() -> Self {
-        Self
-    }
+pub struct X64Paging {
+    features: contracts::CpuFeatures,
 }
 
+impl X64Paging {
+    pub fn new() -> Self {
+        Self {
+            features: contracts::detect_cpu_features(),
+        }
+    }
+}
 impl MmuHal for X64Paging {
     fn active_root(&self) -> PagingRoot {
         let value: u64;
@@ -20,7 +23,9 @@ impl MmuHal for X64Paging {
         }
         PagingRoot::new(PhysAddr::new(value & !0xfff))
     }
-
+    fn cpu_features(&self) -> contracts::CpuFeatures {
+        self.features
+    }
     /// # Safety
     ///
     /// The supplied root must reference a valid, fully initialized page-table
@@ -54,40 +59,13 @@ impl MmuHal for X64Paging {
         4096
     }
 
-    fn supports_nx(&self) -> bool {
-        let extended_max = core::arch::x86_64::__cpuid(0x8000_0000).eax;
-        if extended_max < 0x8000_0001 {
-            return false;
-        }
-
-        let leaf = core::arch::x86_64::__cpuid(0x8000_0001);
-        (leaf.edx & (1 << 20)) != 0
-    }
-
-    fn supports_huge_pages(&self) -> bool {
-        self.supports_1g_pages()
-    }
-
-    fn supports_1g_pages(&self) -> bool {
-        let extended_max = core::arch::x86_64::__cpuid(0x8000_0000).eax;
-        if extended_max < 0x8000_0001 {
-            return false;
-        }
-
-        let leaf = core::arch::x86_64::__cpuid(0x8000_0001);
-        (leaf.edx & (1 << 26)) != 0
-    }
-
-    fn supports_pcid(&self) -> bool {
-        let leaf = core::arch::x86_64::__cpuid(1);
-        (leaf.ecx & (1 << 17)) != 0
-    }
-
     fn sanitize_page_flags(&self, requested: PageFlags) -> PageFlags {
         let mut bits = requested.bits();
-        if !self.supports_nx() {
+
+        if !self.features.nx {
             bits &= !PageFlags::NO_EXECUTE.bits();
         }
+
         PageFlags::from_bits(bits)
     }
 }

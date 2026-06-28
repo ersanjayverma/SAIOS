@@ -1,13 +1,13 @@
-use core::cell::UnsafeCell;
-
 use crate::memory::constants::{MAX_VMM_MAPPINGS, PAGE_SIZE};
 use crate::memory::errors::{MemoryError, MemoryResult};
+use crate::memory::page_table::mapper::MappingEntry;
 use crate::memory::types::{
     AddressSpaceId, PhysAddr, PhysAddrExt, PhysicalFrame, VirtAddr, VirtAddrExt,
 };
 use crate::memory::vmm::VirtualMemoryManager;
 use crate::memory::vmm::paging::{PagingRoot, active_root as arch_active_root, switch_root};
 use crate::memory::vmm::tlb;
+use core::cell::UnsafeCell;
 use hal::memory::PageFlags;
 
 struct GlobalVmm(UnsafeCell<KernelVirtualMemoryManager>);
@@ -57,31 +57,10 @@ fn manager() -> &'static mut KernelVirtualMemoryManager {
     unsafe { &mut *VMM.0.get() }
 }
 
-#[derive(Debug, Copy, Clone)]
-struct MappingRecord {
-    active: bool,
-    owner: AddressSpaceId,
-    virt: VirtAddr,
-    frame: PhysicalFrame,
-    flags: PageFlags,
-}
-
-impl MappingRecord {
-    const fn empty() -> Self {
-        Self {
-            active: false,
-            owner: AddressSpaceId::new(0),
-            virt: VirtAddr::new(0),
-            frame: PhysicalFrame::new(0),
-            flags: PageFlags::empty(),
-        }
-    }
-}
-
 pub struct KernelVirtualMemoryManager {
     initialized: bool,
     active_root: PagingRoot,
-    mappings: [MappingRecord; MAX_VMM_MAPPINGS],
+    mappings: [MappingEntry; MAX_VMM_MAPPINGS],
 }
 
 impl KernelVirtualMemoryManager {
@@ -89,7 +68,7 @@ impl KernelVirtualMemoryManager {
         Self {
             initialized: false,
             active_root: PagingRoot::new(PhysAddr::new(0)),
-            mappings: [MappingRecord::empty(); MAX_VMM_MAPPINGS],
+            mappings: [MappingEntry::empty(); MAX_VMM_MAPPINGS],
         }
     }
 
@@ -107,7 +86,7 @@ impl KernelVirtualMemoryManager {
         self.mappings.iter().position(|entry| {
             entry.active
                 && entry.owner == owner
-                && entry.virt.as_u64() == virt.align_down().as_u64()
+                && entry.virt.as_u64() == virt.align_down(PAGE_SIZE).as_u64()
         })
     }
 
@@ -154,7 +133,7 @@ impl VirtualMemoryManager for KernelVirtualMemoryManager {
         }
 
         let slot = self.first_free_slot().ok_or(MemoryError::OutOfFrames)?;
-        self.mappings[slot] = MappingRecord {
+        self.mappings[slot] = MappingEntry {
             active: true,
             owner,
             virt,
@@ -169,15 +148,17 @@ impl VirtualMemoryManager for KernelVirtualMemoryManager {
         let slot = self
             .find_mapping_index(owner, virt)
             .ok_or(MemoryError::MappingNotFound)?;
-        self.mappings[slot] = MappingRecord::empty();
-        tlb::flush(virt.align_down());
+        self.mappings[slot] = MappingEntry::empty();
+        tlb::flush(virt.align_down(PAGE_SIZE));
         Ok(())
     }
 
     fn translate(&self, virt: VirtAddr) -> Option<PhysAddr> {
         self.mappings
             .iter()
-            .find(|entry| entry.active && entry.virt.as_u64() == virt.align_down().as_u64())
+            .find(|entry| {
+                entry.active && entry.virt.as_u64() == virt.align_down(PAGE_SIZE).as_u64()
+            })
             .map(|entry| {
                 PhysAddr::new(entry.frame.start_address().as_u64() + virt.page_offset() as u64)
             })
@@ -193,7 +174,7 @@ impl VirtualMemoryManager for KernelVirtualMemoryManager {
             .find_mapping_index(owner, virt)
             .ok_or(MemoryError::MappingNotFound)?;
         self.mappings[slot].flags = flags | PageFlags::PRESENT;
-        tlb::flush(virt.align_down());
+        tlb::flush(virt.align_down(PAGE_SIZE));
         Ok(())
     }
 

@@ -1,43 +1,49 @@
+pub use hal::memory::PageFlags;
+pub use hal::memory::PagingRoot;
 use hal::memory::x86_64::X64Paging;
 use hal::memory::{MmuHal, VirtAddr};
 
-pub use hal::memory::PagingRoot;
-pub use hal::memory::PageFlags;
+static PAGING: spin::Once<X64Paging> = spin::Once::new();
 
-static PAGING: X64Paging = X64Paging::new();
+pub fn init() {
+    PAGING.call_once(X64Paging::new);
+}
+fn paging() -> &'static X64Paging {
+    PAGING.get().expect("Paging not initialized")
+}
 
 pub fn active_root() -> PagingRoot {
-    PAGING.active_root()
+    paging().active_root()
 }
 
 pub unsafe fn switch_root(root: PagingRoot) {
-    unsafe { PAGING.switch_root(root) }
+    unsafe { paging().switch_root(root) }
 }
 
 pub fn flush(address: VirtAddr) {
-    PAGING.flush(address);
+    paging().flush(address);
 }
 
 pub fn flush_all() {
-    PAGING.flush_all();
+    paging().flush_all();
 }
 
 pub fn page_size() -> usize {
-    PAGING.page_size()
+    paging().page_size()
 }
 
 pub fn supports_nx() -> bool {
-    PAGING.supports_nx()
+    paging().cpu_features().nx
 }
 
 pub fn supports_huge_pages() -> bool {
-    PAGING.supports_huge_pages()
+    paging().cpu_features().huge_pages
 }
 
 pub fn supports_1g_pages() -> bool {
-    PAGING.supports_1g_pages()
+    paging().cpu_features().page1g
 }
 
 pub fn supports_pcid() -> bool {
-    PAGING.supports_pcid()
+    paging().cpu_features().pcid
 }

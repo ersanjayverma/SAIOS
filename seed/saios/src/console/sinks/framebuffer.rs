@@ -4,7 +4,7 @@ use crate::graphics::Color;
 use crate::graphics::fonts::bitmap::BitmapFont;
 
 const FG: Color = Color::rgb(235, 240, 255);
-const BG: Color = Color::rgb(14, 60, 128);
+const BG: Color = Color::rgb(7, 32, 70);
 
 pub struct FramebufferSink {
     fb: FramebufferInfo,

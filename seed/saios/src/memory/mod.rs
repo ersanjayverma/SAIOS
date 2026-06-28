@@ -3,10 +3,10 @@ pub mod constants;
 pub mod errors;
 pub mod heap;
 pub mod ownership;
+pub mod page_table;
 pub mod pmm;
 pub mod types;
 pub mod vmm;
-
 use efi_main::SaiosBootInfo;
 
 use crate::memory::address_space::AddressSpace;

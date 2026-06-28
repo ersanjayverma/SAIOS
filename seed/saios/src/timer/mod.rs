@@ -1,8 +1,8 @@
 use core::cell::UnsafeCell;
 
-use hal::timer::TimerHal;
 use hal::timer::tsc::TscTimer;
 use hal::timer::uefi::UefiTimer;
+use hal::timer::{ClockEvent, ClockSource};
 
 pub mod clock;
 pub mod deadline;
@@ -12,36 +12,48 @@ pub mod types;
 pub mod uptime;
 
 pub struct TimerManager {
-    system_timer: &'static mut dyn TimerHal,
+    clock_source: &'static mut dyn ClockSource,
+    clock_event: &'static mut dyn ClockEvent,
     boot_counter: u64,
 }
 
 impl TimerManager {
     pub fn new() -> Self {
-        let timer = choose_best_timer();
-        timer.enable();
-        let boot_counter = timer.counter();
+        let clock_source = Self::choose_clock_source();
+        let clock_event = Self::choose_clock_event();
+        clock_source.init();
+        clock_event.enable();
+        let boot_counter = clock_source.counter();
         Self {
-            system_timer: timer,
+            clock_source,
+            clock_event,
             boot_counter,
         }
     }
 
     pub fn initialize_timers(&mut self) {
-        self.system_timer.enable();
+        self.clock_event.enable();
+    }
+   
+fn choose_clock_source() -> &'static mut dyn ClockSource {
+    let tsc = unsafe { &mut *TSC_TIMER.get() };
+
+    tsc.init();
+
+    if tsc.frequency_hz() != 0 {
+        return tsc;
     }
 
-    pub fn calibrate(&mut self) {}
+    unsafe { &mut *UEFI_TIMER.get() }
+}       
 
-    pub fn choose_best_timer(&mut self) {
-        self.system_timer = choose_best_timer();
-        self.system_timer.enable();
-        self.boot_counter = self.system_timer.counter();
-    }
-
+fn choose_clock_event() -> &'static mut dyn ClockEvent {
+    // Temporary until PIT/LAPIC exist.
+   panic!("No clock event source available. Please implement PIT or LAPIC timer support."); 
+}
     pub fn monotonic_ns(&self) -> u64 {
-        let freq = self.system_timer.frequency_hz();
-        let delta = self.system_timer.counter().wrapping_sub(self.boot_counter);
+        let freq = self.clock_source.frequency_hz();
+        let delta = self.clock_source.counter().wrapping_sub(self.boot_counter);
         if freq == 0 {
             return delta;
         }
@@ -54,11 +66,11 @@ impl TimerManager {
     }
 
     pub fn system_timer_name(&self) -> &'static str {
-        self.system_timer.name()
+        self.clock_source.name()
     }
 
     pub fn system_timer_hz(&self) -> u64 {
-        self.system_timer.frequency_hz()
+        self.clock_source.frequency_hz()
     }
 }
 
@@ -80,15 +92,7 @@ static TSC_TIMER: GlobalCell<TscTimer> = GlobalCell::new(TscTimer::new());
 static UEFI_TIMER: GlobalCell<UefiTimer> = GlobalCell::new(UefiTimer::new());
 static GLOBAL_MANAGER: GlobalCell<Option<TimerManager>> = GlobalCell::new(None);
 
-fn choose_best_timer() -> &'static mut dyn TimerHal {
-    let tsc = unsafe { &mut *TSC_TIMER.get() };
-    tsc.init();
-    if tsc.frequency_hz() != 0 {
-        return tsc;
-    }
 
-    unsafe { &mut *UEFI_TIMER.get() }
-}
 
 pub fn init() {
     let manager = TimerManager::new();

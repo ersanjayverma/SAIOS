@@ -158,4 +158,15 @@ impl DisplayHal for GopDisplay {
             format: self.format,
         }
     }
+    fn capabilities(&self) -> super::DisplayCapabilities {
+        super::DisplayCapabilities {
+            hardware_cursor: false,
+            double_buffer: false,
+            acceleration: false,
+            vsync: false,
+            max_resolution: None,
+            mode_switching: true,
+            hotplug: false,
+        }
+    }
 }

@@ -1,3 +1,4 @@
+use core::ops::{Add, AddAssign, Sub, SubAssign};
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct PhysAddr(u64);
@@ -9,6 +10,25 @@ impl PhysAddr {
 
     pub const fn as_u64(self) -> u64 {
         self.0
+    }
+    pub const fn is_aligned(self, alignment: usize) -> bool {
+        self.0 & (alignment as u64 - 1) == 0
+    }
+
+    pub const fn align_down(self, alignment: usize) -> Self {
+        Self(self.0 & !(alignment as u64 - 1))
+    }
+
+    pub const fn align_up(self, alignment: usize) -> Self {
+        Self((self.0 + (alignment as u64 - 1)) & !(alignment as u64 - 1))
+    }
+
+    pub const fn page_offset(self) -> usize {
+        (self.0 & 0xfff) as usize
+    }
+
+    pub const fn page_number(self) -> usize {
+        (self.0 >> 12) as usize
     }
 }
 
@@ -23,6 +43,25 @@ impl VirtAddr {
 
     pub const fn as_u64(self) -> u64 {
         self.0
+    }
+    pub const fn is_aligned(self, alignment: usize) -> bool {
+        self.0 & (alignment as u64 - 1) == 0
+    }
+
+    pub const fn align_down(self, alignment: usize) -> Self {
+        Self(self.0 & !(alignment as u64 - 1))
+    }
+
+    pub const fn align_up(self, alignment: usize) -> Self {
+        Self((self.0 + (alignment as u64 - 1)) & !(alignment as u64 - 1))
+    }
+
+    pub const fn page_offset(self) -> usize {
+        (self.0 & 0xfff) as usize
+    }
+
+    pub const fn page_number(self) -> usize {
+        (self.0 >> 12) as usize
     }
 }
 
@@ -80,5 +119,74 @@ impl core::ops::BitOr for PageFlags {
 impl core::ops::BitOrAssign for PageFlags {
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
+    }
+}
+impl Add<u64> for PhysAddr {
+    type Output = Self;
+
+    fn add(self, rhs: u64) -> Self {
+        Self(self.0 + rhs)
+    }
+}
+
+impl Sub<u64> for PhysAddr {
+    type Output = Self;
+
+    fn sub(self, rhs: u64) -> Self {
+        Self(self.0 - rhs)
+    }
+}
+
+impl Sub for PhysAddr {
+    type Output = u64;
+
+    fn sub(self, rhs: Self) -> u64 {
+        self.0 - rhs.0
+    }
+}
+impl Add<u64> for VirtAddr {
+    type Output = Self;
+
+    fn add(self, rhs: u64) -> Self {
+        Self(self.0 + rhs)
+    }
+}
+
+impl Sub<u64> for VirtAddr {
+    type Output = Self;
+
+    fn sub(self, rhs: u64) -> Self {
+        Self(self.0 - rhs)
+    }
+}
+
+impl Sub for VirtAddr {
+    type Output = u64;
+
+    fn sub(self, rhs: Self) -> u64 {
+        self.0 - rhs.0
+    }
+}
+impl AddAssign<u64> for PhysAddr {
+    fn add_assign(&mut self, rhs: u64) {
+        self.0 += rhs;
+    }
+}
+
+impl SubAssign<u64> for PhysAddr {
+    fn sub_assign(&mut self, rhs: u64) {
+        self.0 -= rhs;
+    }
+}
+
+impl AddAssign<u64> for VirtAddr {
+    fn add_assign(&mut self, rhs: u64) {
+        self.0 += rhs;
+    }
+}
+
+impl SubAssign<u64> for VirtAddr {
+    fn sub_assign(&mut self, rhs: u64) {
+        self.0 -= rhs;
     }
 }

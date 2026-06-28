@@ -1,7 +1,7 @@
+pub mod flags;
 pub mod mapper;
 pub mod paging;
 pub mod tlb;
-
 use crate::memory::errors::MemoryResult;
 use crate::memory::types::{AddressSpaceId, PhysAddr, VirtAddr};
 use crate::memory::vmm::paging::PagingRoot;

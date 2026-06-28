@@ -1,4 +1,4 @@
-use super::TimerHal;
+use super::{ClockEvent, ClockSource, HalDevice};
 
 pub struct HpetTimer {
     enabled: bool,
@@ -18,19 +18,23 @@ impl HpetTimer {
     }
 }
 
-impl TimerHal for HpetTimer {
-    fn name(&self) -> &'static str {
-        "hpet"
+impl ClockSource for HpetTimer {
+    fn init(&mut self) {
+        self.frequency_hz = 10_000_000; // HPET frequency is typically 10 MHz
     }
-
     fn frequency_hz(&self) -> u64 {
         self.frequency_hz
     }
-
     fn counter(&self) -> u64 {
         0
     }
-
+}
+impl HalDevice for HpetTimer {
+    fn name(&self) -> &'static str {
+        "hpet"
+    }
+}
+impl ClockEvent for HpetTimer {
     fn set_periodic(&mut self, hz: u64) {
         self.periodic_hz = hz;
     }
@@ -46,6 +50,4 @@ impl TimerHal for HpetTimer {
     fn disable(&mut self) {
         self.enabled = false;
     }
-
-    fn acknowledge(&mut self) {}
 }

@@ -75,4 +75,14 @@ pub trait DisplayHal {
     fn surface(&mut self) -> Surface<'_>;
     fn present(&mut self);
     fn current_mode(&self) -> DisplayMode;
+    fn capabilities(&self) -> DisplayCapabilities;
+}
+pub struct DisplayCapabilities {
+    pub hardware_cursor: bool,
+    pub double_buffer: bool,
+    pub acceleration: bool,
+    pub vsync: bool,
+    pub max_resolution: Option<(u32, u32)>,
+    pub mode_switching: bool,
+    pub hotplug: bool,
 }

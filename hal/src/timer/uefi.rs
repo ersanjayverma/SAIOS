@@ -1,51 +1,30 @@
-use super::TimerHal;
+use super::{ClockSource, HalDevice};
 
 pub struct UefiTimer {
-    enabled: bool,
     frequency_hz: u64,
-    periodic_hz: u64,
-    oneshot_ns: u64,
 }
 
 impl UefiTimer {
     pub const fn new() -> Self {
         Self {
-            enabled: false,
             frequency_hz: 1_000_000,
-            periodic_hz: 0,
-            oneshot_ns: 0,
         }
     }
 }
 
-impl TimerHal for UefiTimer {
-    fn name(&self) -> &'static str {
-        "uefi"
+impl ClockSource for UefiTimer {
+    fn init(&mut self) {
+        self.frequency_hz = 1_000_000; // UEFI timer frequency is typically 1 MHz
     }
-
-    fn frequency_hz(&self) -> u64 {
+  fn frequency_hz(&self) -> u64 {
         self.frequency_hz
     }
-
     fn counter(&self) -> u64 {
         0
     }
-
-    fn set_periodic(&mut self, hz: u64) {
-        self.periodic_hz = hz;
+}
+impl HalDevice for UefiTimer {
+    fn name(&self) -> &'static str {
+        "uefi"
     }
-
-    fn set_oneshot(&mut self, ns: u64) {
-        self.oneshot_ns = ns;
-    }
-
-    fn enable(&mut self) {
-        self.enabled = true;
-    }
-
-    fn disable(&mut self) {
-        self.enabled = false;
-    }
-
-    fn acknowledge(&mut self) {}
 }

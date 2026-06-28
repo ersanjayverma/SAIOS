@@ -1,23 +1,17 @@
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::TimerHal;
+use super::{ClockSource, HalDevice};
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("hal::timer::tsc currently supports only x86_64");
 
 pub struct TscTimer {
-    enabled: AtomicBool,
-    periodic_hz: AtomicU64,
-    oneshot_ns: AtomicU64,
-    frequency_hz: AtomicU64,
+ frequency_hz: AtomicU64,
 }
 
 impl TscTimer {
     pub const fn new() -> Self {
         Self {
-            enabled: AtomicBool::new(false),
-            periodic_hz: AtomicU64::new(0),
-            oneshot_ns: AtomicU64::new(0),
             frequency_hz: AtomicU64::new(0),
         }
     }
@@ -30,37 +24,22 @@ impl TscTimer {
     }
 }
 
-impl TimerHal for TscTimer {
-    fn name(&self) -> &'static str {
-        "tsc"
+impl ClockSource for TscTimer {
+    fn init(&mut self) {
+        self.frequency_hz.store(detect_tsc_hz(), Ordering::Relaxed);
     }
-
-    fn frequency_hz(&self) -> u64 {
+  fn frequency_hz(&self) -> u64 {
         self.frequency_hz.load(Ordering::Relaxed)
     }
-
     fn counter(&self) -> u64 {
         // TSC is a free-running cycle counter on x86_64.
         unsafe { core::arch::x86_64::_rdtsc() }
     }
-
-    fn set_periodic(&mut self, hz: u64) {
-        self.periodic_hz.store(hz, Ordering::Relaxed);
+}
+impl HalDevice for TscTimer {
+    fn name(&self) -> &'static str {
+        "tsc"
     }
-
-    fn set_oneshot(&mut self, ns: u64) {
-        self.oneshot_ns.store(ns, Ordering::Relaxed);
-    }
-
-    fn enable(&mut self) {
-        self.enabled.store(true, Ordering::Relaxed);
-    }
-
-    fn disable(&mut self) {
-        self.enabled.store(false, Ordering::Relaxed);
-    }
-
-    fn acknowledge(&mut self) {}
 }
 
 fn detect_tsc_hz() -> u64 {
