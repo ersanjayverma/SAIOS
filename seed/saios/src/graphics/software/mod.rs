@@ -8,3 +8,4 @@ pub mod polygon;
 pub mod rect;
 pub mod renderer;
 pub mod text;
+pub mod verify;

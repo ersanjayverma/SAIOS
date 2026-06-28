@@ -14,6 +14,8 @@ pub mod scheduler;
 
 use core::fmt::{self, Write};
 use efi_main::SaiosBootInfo;
+use hal::display::gop::GopDisplay;
+use hal::display::PixelFormat as HalPixelFormat;
 static mut BOOT_INFO: *const SaiosBootInfo = core::ptr::null();
 static mut CURSOR: usize = 0;
 
@@ -24,7 +26,6 @@ impl Write for Writer {
         unsafe {
             let fb = (*BOOT_INFO).framebuffer.base as *mut u32;
             let stride = (*BOOT_INFO).framebuffer.stride;
-            let width = (*BOOT_INFO).framebuffer.width;
             let height = (*BOOT_INFO).framebuffer.height;
 
             for byte in s.bytes() {
@@ -81,11 +82,36 @@ pub fn clear_framebuffer() {
         }
     }
 }
+
+fn to_hal_pixel_format(fmt: efi_main::graphics::PixelFormat) -> HalPixelFormat {
+    match fmt {
+        efi_main::graphics::PixelFormat::Rgb => HalPixelFormat::Rgb,
+        efi_main::graphics::PixelFormat::Bgr => HalPixelFormat::Bgr,
+        efi_main::graphics::PixelFormat::Bitmask => HalPixelFormat::Rgb,
+        efi_main::graphics::PixelFormat::BltOnly => HalPixelFormat::Rgb,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info:*const SaiosBootInfo) -> ! {
-    BOOT_INFO = boot_info;
-    clear_framebuffer(); // Clear framebuffer to blue
-    println!("HELLO");
+    unsafe {
+        BOOT_INFO = boot_info;
+    }
+
+    let fb = unsafe { (*boot_info).framebuffer };
+    let mut display = unsafe {
+        GopDisplay::from_raw(
+            fb.base as *mut u8,
+            fb.width as u32,
+            fb.height as u32,
+            fb.stride,
+            fb.bpp as u8,
+            to_hal_pixel_format(fb.pixel_format),
+        )
+    };
+    crate::graphics::software::verify::verify_primitives_on_display(&mut display);
+    display.present();
+    display.clear(crate::graphics::Color::rgb(77, 52, 192));
     // println!("========================================");
     // println!("          SAIOS BOOT INFORMATION        ");
     // println!("========================================");
@@ -122,11 +148,7 @@ pub unsafe extern "C" fn _start(boot_info:*const SaiosBootInfo) -> ! {
 }
 
 #[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    // Extract the panic message and file/line location
-    let message = info.message();
-    let location = info.location();
-
+fn panic(_info: &core::panic::PanicInfo) -> ! {
     // if let Some(loc) = location {
     //     let _ = println!("Panic occurred at {}:{}:{}", loc.file(), loc.line(), message);
     // } else {

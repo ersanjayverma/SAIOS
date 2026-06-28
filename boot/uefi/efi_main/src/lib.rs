@@ -189,9 +189,7 @@ pub fn relocation_symbol(info: u64) -> u32 {
 }
 pub fn apply_relocations(load_base: u64, relocations: &[Elf64Rela]) -> Result<(), &'static str> {
     for rela in relocations {
-        let relocation_address = rela.r_offset;
         let relocation_type = relocation_type(rela.r_info);
-        let relocation_symbol = relocation_symbol(rela.r_info);
        
         match relocation_type {
             R_X86_64_RELATIVE => {
