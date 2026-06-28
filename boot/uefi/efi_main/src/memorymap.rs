@@ -1,8 +1,26 @@
 extern crate alloc;
-use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use uefi::boot::MemoryType as UefiMemoryType;
 use uefi::mem::memory_map::MemoryMap;
 use uefi::println;
+/// Maximum number of UEFI memory descriptors
+/// supported during boot.
+///
+/// If firmware returns more than this,
+/// the bootloader aborts.
+const MEMORY_REGION_CAPACITY: usize = 1024;
+struct MemoryRegionBuffer(UnsafeCell<[MemoryRegion; MEMORY_REGION_CAPACITY]>);
+
+unsafe impl Sync for MemoryRegionBuffer {}
+
+static MEMORY_REGIONS: MemoryRegionBuffer = MemoryRegionBuffer(UnsafeCell::new(
+    [MemoryRegion {
+        base: 0,
+        length: 0,
+        region_type: MemoryType::Reserved,
+        attributes: 0,
+    }; MEMORY_REGION_CAPACITY],
+));
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct MemoryMapInfo {
@@ -34,35 +52,35 @@ pub enum MemoryType {
     Framebuffer,
 }
 pub fn initialize() -> uefi::Result<MemoryMapInfo> {
+    // 1. Get the UEFI memory map.
+    // LOADER_DATA is good, but it must have enough capacity so it doesn't reallocate inside.
     let memorymap = uefi::boot::memory_map(UefiMemoryType::LOADER_DATA)?;
     let entries = memorymap.entries();
-    let _entry_count = entries.len();
 
-    println!("Memory Map:");
+    // Safety: Accessing static mut in single-threaded boot environment
+    let regions = unsafe { &mut *MEMORY_REGIONS.0.get() };
+    let mut count = 0;
+
+    // 2. Copy data directly into your fixed, unchangeable static buffer
     for entry in entries {
-        println!(
-            "Base: {:#x}, Length: {:#x}, Type: {:?}, Attributes: {:#x}",
-            entry.phys_start,
-            entry.page_count * 4096,
-            convert_memory_type(entry.ty),
-            entry.att.bits()
-        );
-    }
-    let mut regions: Vec<MemoryRegion> = Vec::new();
+        if count == MEMORY_REGION_CAPACITY {
+            println!("Memory map exceeds {} entries", MEMORY_REGION_CAPACITY);
+            return Err(uefi::Error::from(uefi::Status::BUFFER_TOO_SMALL));
+        }
 
-    for d in memorymap.entries() {
-        regions.push(MemoryRegion {
-            base: d.phys_start,
-            length: d.page_count * 4096,
-            region_type: convert_memory_type(d.ty),
-            attributes: d.att.bits(),
-        });
+        regions[count] = MemoryRegion {
+            base: entry.phys_start,
+            length: entry.page_count * 4096,
+            region_type: convert_memory_type(entry.ty),
+            attributes: entry.att.bits(),
+        };
+        count += 1;
     }
-    let regions = regions.leak();
 
+    // 3. Return the info pointing to the immutable static buffer
     Ok(MemoryMapInfo {
         entries: regions.as_ptr(),
-        entry_count: regions.len(),
+        entry_count: count,
     })
 }
 fn convert_memory_type(ty: UefiMemoryType) -> MemoryType {
