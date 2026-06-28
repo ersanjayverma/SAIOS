@@ -1,15 +1,6 @@
 use crate::graphics::fonts::bitmap::BitmapFont;
 
-pub struct CrashInfo<'a> {
-    pub exception: &'a str,
-    pub cpu: u32,
-    pub rip: u64,
-    pub rsp: u64,
-    pub cr2: u64,
-    pub error_code: u64,
-    pub kernel_version: &'a str,
-    pub panic_message: &'a str,
-}
+use super::context::RRodContext;
 
 const BLACK: (u8, u8, u8) = (0, 0, 0);
 const DARK_RED: (u8, u8, u8) = (36, 0, 0);
@@ -115,7 +106,7 @@ fn to_hex(value: u64, out: &mut [u8; 18]) -> &str {
     core::str::from_utf8(out).unwrap_or("0x0000000000000000")
 }
 
-pub fn show(boot_info: &efi_main::SaiosBootInfo, info: &CrashInfo<'_>) {
+pub fn render(boot_info: &efi_main::SaiosBootInfo, info: &RRodContext) {
     let fb = &boot_info.framebuffer;
     let base = fb.base as *mut u32;
     let width = fb.width;
@@ -138,7 +129,6 @@ pub fn show(boot_info: &efi_main::SaiosBootInfo, info: &CrashInfo<'_>) {
         }
     }
 
-    // Subtle crimson vignette for stronger failure-state contrast.
     let edge_band = (height / 6).max(1);
     for y in 0..height as i32 {
         let from_edge = if (y as usize) < height / 2 {
@@ -190,32 +180,32 @@ pub fn show(boot_info: &efi_main::SaiosBootInfo, info: &CrashInfo<'_>) {
     draw_centered(base, stride, width, height, cy - 26, "a fatal kernel error and cannot", c_gray);
     draw_centered(base, stride, width, height, cy - 16, "continue execution safely.", c_gray);
 
-    let left = cx - 150;
+    let left = cx - 170;
     draw_text(base, stride, width, height, left, cy + 4, "ERROR SUMMARY", c_white);
-    draw_text(base, stride, width, height, left, cy + 18, "Exception:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 18, info.exception, c_white);
+    draw_text(base, stride, width, height, left, cy + 18, "Reason:", c_gray);
+    draw_text(base, stride, width, height, left + 80, cy + 18, info.reason, c_white);
+
+    draw_text(base, stride, width, height, left, cy + 28, "Exception:", c_gray);
+    draw_text(base, stride, width, height, left + 80, cy + 28, info.exception.as_str(), c_white);
 
     let mut hex = [0u8; 18];
-    draw_text(base, stride, width, height, left, cy + 28, "CPU:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 28, if info.cpu == 0 { "0" } else { "Unknown" }, c_white);
-
     draw_text(base, stride, width, height, left, cy + 38, "RIP:", c_gray);
     draw_text(base, stride, width, height, left + 80, cy + 38, to_hex(info.rip, &mut hex), c_white);
 
     draw_text(base, stride, width, height, left, cy + 48, "RSP:", c_gray);
     draw_text(base, stride, width, height, left + 80, cy + 48, to_hex(info.rsp, &mut hex), c_white);
 
-    draw_text(base, stride, width, height, left, cy + 58, "CR2:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 58, to_hex(info.cr2, &mut hex), c_white);
+    draw_text(base, stride, width, height, left, cy + 58, "RBP:", c_gray);
+    draw_text(base, stride, width, height, left + 80, cy + 58, to_hex(info.rbp, &mut hex), c_white);
 
-    draw_text(base, stride, width, height, left, cy + 68, "Error Code:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 68, to_hex(info.error_code, &mut hex), c_white);
+    draw_text(base, stride, width, height, left, cy + 68, "CR2:", c_gray);
+    draw_text(base, stride, width, height, left + 80, cy + 68, to_hex(info.cr2, &mut hex), c_white);
 
-    draw_text(base, stride, width, height, left, cy + 78, "Version:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 78, info.kernel_version, c_white);
+    draw_text(base, stride, width, height, left, cy + 78, "Error Code:", c_gray);
+    draw_text(base, stride, width, height, left + 80, cy + 78, to_hex(info.error_code, &mut hex), c_white);
 
-    draw_text(base, stride, width, height, left, cy + 88, "Message:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 88, info.panic_message, c_white);
+    draw_text(base, stride, width, height, left, cy + 88, "Location:", c_gray);
+    draw_text(base, stride, width, height, left + 80, cy + 88, info.file, c_white);
 
     draw_centered(base, stride, width, height, height as i32 - 34, "SYSTEM HALTED", c_white);
     draw_centered(base, stride, width, height, height as i32 - 22, "REBOOT REQUIRED", c_gray);

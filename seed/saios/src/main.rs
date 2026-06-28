@@ -68,12 +68,12 @@ struct Idtr {
 static mut IDT: [IdtEntry; 256] = [IdtEntry::missing(); 256];
 
 static mut BMP_RGBA_SCRATCH: [u8; 1024 * 768 * 4] = [0; 1024 * 768 * 4];
-static mut LAST_BOOT_INFO: *const SaiosBootInfo = core::ptr::null();
 const SPLASH_BMP: &[u8] = include_bytes!("../../../boot/uefi/efi_main/src/assets/splash.bmp");
 
 unsafe extern "C" {
     fn seed_isr_ud();
     fn seed_isr_gp();
+    fn seed_isr_pf();
 }
 
 core::arch::global_asm!(
@@ -99,6 +99,17 @@ seed_isr_gp:
 2:
     hlt
     jmp 2b
+
+    .global seed_isr_pf
+seed_isr_pf:
+    cli
+    mov rdi, rsp
+    mov esi, 14
+    mov edx, 1
+    call seed_exception_from_stack
+3:
+    hlt
+    jmp 3b
 "#
 );
 
@@ -111,6 +122,7 @@ fn install_exception_handlers() {
     unsafe {
         IDT[6].set_handler(seed_isr_ud as *const () as usize as u64, cs);
         IDT[13].set_handler(seed_isr_gp as *const () as usize as u64, cs);
+        IDT[14].set_handler(seed_isr_pf as *const () as usize as u64, cs);
 
         let idtr = Idtr {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -123,45 +135,9 @@ fn install_exception_handlers() {
 
 #[unsafe(no_mangle)]
 extern "C" fn seed_exception_from_stack(stack: *const u64, vector: u32, has_error_code: u32) -> ! {
-    let (rip, error_code) = unsafe {
-        if has_error_code != 0 {
-            (*stack.add(1), *stack)
-        } else {
-            (*stack, 0)
-        }
-    };
-
-    let rsp = stack as u64;
-    let exception = match vector {
-        6 => "#UD Invalid Opcode",
-        13 => "#GP General Protection",
-        _ => "Unknown",
-    };
-
     drivers::serial::write_str("[SEED] exception trap\n");
-
-    let boot_info = unsafe { LAST_BOOT_INFO };
-    if !boot_info.is_null() {
-        let crash = rrod::CrashInfo {
-            exception,
-            cpu: 0,
-            rip,
-            rsp,
-            cr2: read_cr2(),
-            error_code,
-            kernel_version: "SEED-0.1",
-            panic_message: "CPU exception",
-        };
-        unsafe {
-            rrod::show(&*boot_info, &crash);
-        }
-    }
-
-    loop {
-        unsafe {
-            core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
-        }
-    }
+    let context = rrod::capture::from_exception_stack(stack, vector, has_error_code != 0);
+    rrod::trigger(context)
 }
 
 #[inline]
@@ -199,28 +175,13 @@ fn clear_framebuffer(fb: &efi_main::graphics::FramebufferInfo, color: (u8, u8, u
     }
 }
 
-#[inline]
-fn read_cr2() -> u64 {
-    let value: u64;
-    unsafe {
-        core::arch::asm!(
-            "mov {}, cr2",
-            out(reg) value,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    value
-}
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
     }
 
-    unsafe {
-        LAST_BOOT_INFO = boot_info;
-    }
+    rrod::set_boot_info(boot_info);
 
     install_exception_handlers();
 
@@ -314,57 +275,6 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     drivers::serial::write_str("[SEED] panic entered\n");
 
-    let boot_info = unsafe { LAST_BOOT_INFO };
-    if !boot_info.is_null() {
-        let boot_info = unsafe { &*boot_info };
-        let rsp = {
-            let value: u64;
-            unsafe {
-                core::arch::asm!(
-                    "mov {}, rsp",
-                    out(reg) value,
-                    options(nomem, nostack, preserves_flags)
-                );
-            }
-            value
-        };
-        let rip = {
-            let value: u64;
-            unsafe {
-                core::arch::asm!(
-                    "lea {}, [rip]",
-                    out(reg) value,
-                    options(nomem, nostack, preserves_flags)
-                );
-            }
-            value
-        };
-        let crash = rrod::CrashInfo {
-            exception: "Unknown",
-            cpu: 0,
-            rip,
-            rsp,
-            cr2: read_cr2(),
-            error_code: 0,
-            kernel_version: "SEED-0.1",
-            panic_message: "Kernel panic",
-        };
-        rrod::show(boot_info, &crash);
-    }
-
-    log::fatal!("PANIC");
-    if let Some(location) = info.location() {
-        let _ = location;
-        log::fatal!("Location:<fmt>");
-    }
-    let _ = info;
-    log::fatal!("Message:<fmt>");
-    log::fatal!("CPU:0");
-    let _ = read_cr2();
-    log::fatal!("CR2:<fmt>");
-    loop {
-        unsafe {
-            core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
-        }
-    }
+    let context = rrod::capture::from_panic(info);
+    rrod::trigger(context)
 }
