@@ -1,8 +1,0 @@
-[package]
-name    = "saios-uefi"
-version.workspace = true
-edition.workspace = true
-
-[[bin]]
-name = "saios-uefi"
-path = "src/main.rs"

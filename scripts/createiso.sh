@@ -14,7 +14,7 @@ rm -f "/mnt/c/Users/Black/VirtualBox VMs/SAIOS/SAIOS.nvram"
 #
 # Create 16MB FAT EFI image
 #
-dd if=/dev/zero of="$EFI_IMG" bs=1M count=32
+dd if=/dev/zero of="$EFI_IMG" bs=1M count=64
 
 mkfs.fat "$EFI_IMG"
 

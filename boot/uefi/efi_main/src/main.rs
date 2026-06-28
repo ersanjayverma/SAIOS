@@ -201,7 +201,26 @@ fn main() -> Status {
         boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, stack_pages).unwrap();
 
     let stack_top = stack.as_ptr() as u64 + stack_pages as u64 * 4096;
+    // Rust entry points expect call-compatible stack alignment (rsp % 16 == 8).
+    let kernel_rsp = stack_top - 8;
+
+    let boot_info_pages =
+        (core::mem::size_of::<efi_main::SaiosBootInfo>() as u64 + 4095) / 4096;
+    let boot_info_storage = boot::allocate_pages(
+        AllocateType::AnyPages,
+        MemoryType::LOADER_DATA,
+        boot_info_pages as usize,
+    )
+    .expect("Failed to allocate stable boot info storage");
+    let boot_info_ptr = boot_info_storage.as_ptr() as *mut efi_main::SaiosBootInfo;
+    unsafe {
+        boot_info_ptr.write(boot_info.clone());
+    }
+
     boot_info.memorymap = efi_main::memorymap::initialize().unwrap();
+    unsafe {
+        (*boot_info_ptr).memorymap = boot_info.memorymap;
+    }
     let entry = loader.entry_point;
     drop(loader);
     let p = entry as *const u8;
@@ -227,9 +246,9 @@ fn main() -> Status {
         asm!(
             "mov rsp, {stack}",
             "jmp {entry}",
-            stack = in(reg) stack_top,
+            stack = in(reg) kernel_rsp,
             entry = in(reg) entry,
-            in("rdi") &boot_info,
+            in("rdi") boot_info_ptr,
             options(noreturn)
         );
     }
