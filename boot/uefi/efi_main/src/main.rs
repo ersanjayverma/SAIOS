@@ -4,19 +4,17 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::asm;
-use uefi::boot::{AllocateType, MemoryType};
+use core::time::Duration;
+use uefi::boot::{AllocateType, EventType, MemoryType, TimerTrigger, Tpl};
 use uefi::println;
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::file::{File, FileAttribute, FileMode, FileType};
 use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::*;
+
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
-
-    println!("================================");
-    println!("        SAIOS Bootloader");
-    println!("================================");
     let seed_path = "\\SAIOS\\seed.elf";
     let mut loader = load_seed(seed_path).unwrap();
     let dynamic =
@@ -150,10 +148,27 @@ fn main() -> Status {
     println!("All relocations applied successfully");
     println!("Initializing boot information");
     let mut boot_info = efi_main::initialize_boot_info();
-    println!("========================================");
-    println!("          SAIOS BOOT INFORMATION        ");
-    println!("========================================");
 
+    let mut fb = efi_main::ui::Framebuffer {
+        info: boot_info.framebuffer.clone(),
+    };
+    let bmp = efi_main::ui::Bitmap::from_bytes(efi_main::ui::SPLASH)
+        .expect("Failed to load splash bitmap");
+
+    println!(
+        "BMP: {}x{} {}bpp stride={} pixel_data={}",
+        bmp.width,
+        bmp.height,
+        bmp.bpp,
+        bmp.stride,
+        bmp.pixels.len(),
+    );
+    bmp.draw(&mut fb);
+    println!(
+        "FB: {}x{} stride={} bpp={} size={}",
+        fb.info.width, fb.info.height, fb.info.stride, fb.info.bpp, fb.info.size,
+    );
+    self::sleep(Duration::from_secs(5));
     // Print metadata fields explicitly for validation
     println!(
         "Magic Check:   0x{:X} (Expected: 0x{:X})",
@@ -177,8 +192,6 @@ fn main() -> Status {
 
     println!("========================================");
 
-    
-
     println!("ELF entry = {:#x}", loader.entry_point);
     println!("Jump to kernel entry point");
     let stack_pages = 16;
@@ -191,10 +204,12 @@ fn main() -> Status {
     let entry = loader.entry_point;
     drop(loader);
     let p = entry as *const u8;
-
+    println!("===============================================",);
+    println!("{:#?}", boot_info.memorymap);
+    println!("==============================================");
     unsafe {
         println!(
-            "{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+            "entry bits {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
             *p.add(0),
             *p.add(1),
             *p.add(2),
@@ -217,7 +232,6 @@ fn main() -> Status {
             options(noreturn)
         );
     }
-    
 }
 
 #[panic_handler]
@@ -326,4 +340,13 @@ pub fn load_seed(path: &str) -> uefi::Result<Loader> {
             relocations: Vec::new(),
         },
     })
+}
+pub fn sleep(duration: Duration) -> u16 {
+    let timer =
+        unsafe { boot::create_event(EventType::TIMER, Tpl::APPLICATION, None, None).unwrap() };
+
+    boot::set_timer(&timer, TimerTrigger::Relative(duration)).unwrap();
+    boot::wait_for_event(&mut [timer]).unwrap();
+
+    1
 }

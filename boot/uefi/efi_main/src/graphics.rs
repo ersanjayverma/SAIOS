@@ -12,6 +12,7 @@ pub struct FramebufferInfo {
     pub height: usize,
     pub stride: usize,
     pub pixel_format: PixelFormat,
+    pub bpp: usize, // Bits per pixel
 }
 pub fn initialize() -> uefi::Result<FramebufferInfo> {
     let handle = *boot::locate_handle_buffer(SearchType::ByProtocol(&GraphicsOutput::GUID))?
@@ -39,6 +40,12 @@ pub fn initialize() -> uefi::Result<FramebufferInfo> {
         height: mode.resolution().1 as usize,
         stride: mode.stride(),
         pixel_format: convert_pixel_format(mode.pixel_format()),
+        bpp: match mode.pixel_format() {
+            UefiPixelFormat::Rgb => 32,
+            UefiPixelFormat::Bgr => 32,
+            UefiPixelFormat::Bitmask => 32,
+            UefiPixelFormat::BltOnly => panic!("BLT-only framebuffer not supported"),
+        },
     };
     drop(gop);
     Ok(fb_info)

@@ -66,7 +66,7 @@ pub fn clear_framebuffer() {
             (*BOOT_INFO).framebuffer.stride * (*BOOT_INFO).framebuffer.height;
 
         for i in 0..pixels {
-            fb.add(i).write_volatile(0x00000088); // SAIOS Blue (BGR)
+            fb.add(i).write_volatile(0x00880000); // SAIOS Blue (BGR)
         }
     }
 }

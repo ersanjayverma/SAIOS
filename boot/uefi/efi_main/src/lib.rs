@@ -7,6 +7,7 @@ pub mod firmware;
 pub mod graphics;
 pub mod memorymap;
 pub mod smbios;
+pub mod ui;
 use uefi::println;
 pub const R_X86_64_RELATIVE: u32 = 8;
 #[repr(C)]
