@@ -27,6 +27,16 @@ pub fn stage(name: &'static str) {
     }
 }
 
+pub fn stage_ok(name: &'static str) {
+    crate::console::write_str("[SEED] ");
+    crate::console::write_str(name);
+    crate::console::write_str(" OK\n");
+
+    if LOGGER_READY.load(Ordering::Relaxed) {
+        crate::log::logger::log_str(crate::log::level::LogLevel::Info, name);
+    }
+}
+
 pub fn exception_trap(vector: u32) {
     crate::console::write_fmt(format_args!("[SEED] exception trap vector={}\n", vector));
 }

@@ -30,11 +30,7 @@ impl LogRing {
             return;
         }
 
-        let start = if self.len == RING_BYTES {
-            self.head
-        } else {
-            0
-        };
+        let start = if self.len == RING_BYTES { self.head } else { 0 };
 
         for i in 0..self.len {
             let idx = (start + i) % RING_BYTES;

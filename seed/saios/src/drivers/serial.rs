@@ -1,4 +1,7 @@
 const COM1_BASE: u16 = 0x3F8;
+const LINE_STATUS_PORT: u16 = COM1_BASE + 5;
+const LINE_STATUS_THRE: u8 = 0x20;
+const LINE_STATUS_TEMT: u8 = 0x40;
 
 #[inline]
 fn outb(port: u16, value: u8) {
@@ -37,8 +40,12 @@ pub fn init() {
 }
 
 pub fn write_byte(byte: u8) {
-    while (inb(COM1_BASE + 5) & 0x20) == 0 {}
+    while (inb(LINE_STATUS_PORT) & LINE_STATUS_THRE) == 0 {}
     outb(COM1_BASE, byte);
+}
+
+pub fn flush() {
+    while (inb(LINE_STATUS_PORT) & LINE_STATUS_TEMT) == 0 {}
 }
 
 pub fn write_str(s: &str) {

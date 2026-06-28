@@ -9,6 +9,7 @@ use crate::graphics::contracts::Renderer;
 use crate::graphics::fonts::bitmap::BitmapFont;
 use crate::graphics::software::renderer::SoftwareRenderer;
 use crate::graphics::{Color, Point};
+use crate::memory;
 use crate::rrod;
 use crate::timer::TimerManager;
 const SAIOS_BLUE: Color = Color::rgb(14, 60, 128);
@@ -16,11 +17,15 @@ const SAIOS_BLUE: Color = Color::rgb(14, 60, 128);
 #[unsafe(no_mangle)]
 extern "C" fn seed_exception_from_stack(stack: *const u64, vector: u32, has_error_code: u32) -> ! {
     diagnostics::exception_trap(vector);
-    let context = rrod::capture::from_exception_stack(stack, vector, has_error_code != 0);
+    let context = unsafe { rrod::capture::from_exception_stack(stack, vector, has_error_code != 0) };
     rrod::trigger(context)
 }
 
-pub fn init(boot_info: *const SaiosBootInfo) {
+/// # Safety
+///
+/// `boot_info` must point to a valid boot information block provided by the
+/// bootloader for the lifetime of kernel initialization.
+pub unsafe fn init(boot_info: *const SaiosBootInfo) {
     diagnostics::init_serial();
 
     rrod::set_boot_info(boot_info);
@@ -71,6 +76,7 @@ impl<'a> KernelInit<'a> {
     }
 
     fn stage0_cpu(&mut self) {
+        diagnostics::stage("cpu.begin");
         clear_framebuffer(&self.fb, (14, 60, 128));
 
         self.backbuffer = Some(BackBuffer::new(
@@ -82,23 +88,31 @@ impl<'a> KernelInit<'a> {
         ));
 
         self.dashboard.mark_ok(STEP_CPU);
+        diagnostics::stage_ok("cpu");
 
         if let Some(backbuffer) = self.backbuffer.as_mut() {
             let mut surface = backbuffer.surface();
             let mut renderer = SoftwareRenderer::from_surface(&mut surface);
             let font = BitmapFont::new_5x7();
             self.dashboard.render(&mut renderer, &font);
-            backbuffer.blit_to_framebuffer(self.boot_info.framebuffer.base as *mut u8);
+            unsafe {
+                backbuffer.blit_to_framebuffer(self.boot_info.framebuffer.base as *mut u8);
+            }
         }
     }
 
     fn stage1_exceptions(&mut self) {
+        diagnostics::stage("diag.begin");
         self.dashboard.mark_ok(STEP_EXCEPTIONS);
+        diagnostics::stage_ok("diag");
     }
 
     fn stage2_memory(&mut self) {
+        diagnostics::stage("mem.begin");
+        memory::init(self.boot_info).expect("failed to initialize memory subsystem");
         self.dashboard.mark_ok(STEP_MEMORY);
         self.dashboard.mark_ok(STEP_HEAP);
+        diagnostics::stage_ok("mem");
 
         crate::timer::init();
         self.timer = Some(TimerManager::new());
@@ -167,7 +181,9 @@ impl<'a> KernelInit<'a> {
         }
 
         if let Some(backbuffer) = self.backbuffer.as_ref() {
-            backbuffer.blit_to_framebuffer(self.boot_info.framebuffer.base as *mut u8);
+            unsafe {
+                backbuffer.blit_to_framebuffer(self.boot_info.framebuffer.base as *mut u8);
+            }
         }
     }
 }

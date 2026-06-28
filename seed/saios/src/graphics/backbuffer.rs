@@ -39,7 +39,11 @@ impl BackBuffer {
         }
     }
 
-    pub fn blit_to_framebuffer(&self, fb_base: *mut u8) {
+    /// # Safety
+    ///
+    /// `fb_base` must point to a writable framebuffer region large enough to
+    /// receive the current backbuffer contents.
+    pub unsafe fn blit_to_framebuffer(&self, fb_base: *mut u8) {
         let bytes_per_pixel = (self.bpp as usize) / 8;
         let len = core::cmp::min(
             self.stride_pixels * self.height as usize * bytes_per_pixel,

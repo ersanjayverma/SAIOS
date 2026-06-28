@@ -12,7 +12,9 @@ fn exception_code(exception: Exception) -> u32 {
     }
 }
 
-pub fn flush() {}
+pub fn flush() {
+    crate::drivers::serial::flush();
+}
 
 pub fn dump_report(ctx: &RRodContext) {
     crate::drivers::serial::write_str("\n========== RROD DIAGNOSTIC ==========");
@@ -40,5 +42,9 @@ pub fn dump_report(ctx: &RRodContext) {
     } else {
         crate::drivers::serial::write_str("Thread     : <none>\n");
     }
+    crate::drivers::serial::write_str("--- recent log ring ---\n");
+    crate::console::replay_ring(|b| crate::drivers::serial::write_byte(b));
+    crate::drivers::serial::write_str("\n--- end log ring ---\n");
     crate::drivers::serial::write_str("=====================================\n");
+    crate::drivers::serial::flush();
 }

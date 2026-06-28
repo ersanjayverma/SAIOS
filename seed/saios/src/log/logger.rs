@@ -32,11 +32,7 @@ pub fn log(level: LogLevel, args: Arguments<'_>) {
     serial_backend::write_str(level.tag());
     serial_backend::write_str("] ");
 
-    if let Some(s) = args.as_str() {
-        serial_backend::write_str(s);
-    } else {
-        serial_backend::write_str("<fmt>");
-    }
+    serial_backend::write_fmt(args);
 
     serial_backend::write_str("\n");
 }

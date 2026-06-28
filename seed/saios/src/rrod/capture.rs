@@ -52,7 +52,15 @@ fn read_rip() -> u64 {
     value
 }
 
-pub fn from_exception_stack(stack: *const u64, vector: u32, has_error_code: bool) -> RRodContext {
+/// # Safety
+///
+/// `stack` must point to a valid exception stack frame laid out according to
+/// the current interrupt/exception entry stub.
+pub unsafe fn from_exception_stack(
+    stack: *const u64,
+    vector: u32,
+    has_error_code: bool,
+) -> RRodContext {
     let (rip, error_code) = unsafe {
         if has_error_code {
             (*stack.add(1), *stack)

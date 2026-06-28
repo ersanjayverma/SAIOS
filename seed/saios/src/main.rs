@@ -21,17 +21,20 @@ pub mod timer;
 use efi_main::SaiosBootInfo;
 
 #[unsafe(no_mangle)]
+/// # Safety
+///
+/// `boot_info` must be a valid pointer supplied by the SAIOS bootloader entry
+/// contract and remain valid throughout early kernel initialization.
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     arch::disable_interrupts();
 
-    seed::init(boot_info);
+    unsafe { seed::init(boot_info) };
     seed::run()
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     console::init_serial();
-    console::panic_prelude(info);
     let context = rrod::capture::from_panic(info);
     rrod::trigger(context)
 }

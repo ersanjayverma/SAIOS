@@ -127,3 +127,7 @@ pub fn replay_ring_to_serial() {
     let s = state();
     s.ring.replay(|b| s.serial.write_byte(b));
 }
+
+pub fn replay_ring<F: FnMut(u8)>(emit: F) {
+    state().ring.replay(emit);
+}

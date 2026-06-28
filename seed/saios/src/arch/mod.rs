@@ -1,4 +1,5 @@
 mod interrupts;
+pub mod x86_64;
 
 pub fn init() {}
 
