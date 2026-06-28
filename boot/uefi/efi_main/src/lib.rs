@@ -8,7 +8,6 @@ pub mod graphics;
 pub mod memorymap;
 pub mod smbios;
 pub mod ui;
-use uefi::println;
 pub const R_X86_64_RELATIVE: u32 = 8;
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,10 +192,7 @@ pub fn apply_relocations(load_base: u64, relocations: &[Elf64Rela]) -> Result<()
         let relocation_address = rela.r_offset;
         let relocation_type = relocation_type(rela.r_info);
         let relocation_symbol = relocation_symbol(rela.r_info);
-        println!(
-            "Applying relocation: address=0x{:x}, type={}, symbol={}, addend={}",
-            relocation_address, relocation_type, relocation_symbol, rela.r_addend
-        );
+       
         match relocation_type {
             R_X86_64_RELATIVE => {
                 let new_value = load_base.wrapping_add(rela.r_addend as u64);
