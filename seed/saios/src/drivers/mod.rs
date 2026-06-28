@@ -1,1 +1,5 @@
-pub fn init() {}
+pub mod serial;
+
+pub fn init() {
+	serial::init();
+}

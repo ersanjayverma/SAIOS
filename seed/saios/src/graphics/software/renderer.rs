@@ -1,5 +1,6 @@
 use crate::graphics::contracts::Renderer;
-use crate::graphics::font::PsfFont;
+use crate::graphics::fonts::bitmap::BitmapFont;
+use crate::graphics::fonts::psf::PsfFont;
 use crate::graphics::{Color, Image, Point, Rect, Size, Surface as GraphicsSurface};
 use hal::display::{Color as HalColor, DisplayHal, Point as HalPoint};
 
@@ -254,6 +255,39 @@ impl<T: PixelTarget> Renderer for SoftwareRenderer<T> {
             }
 
             pen_x += glyph_w as i32;
+        }
+    }
+
+    fn draw_text(&mut self, origin: Point, text: &str, font: &BitmapFont, color: Color) {
+        let glyph_w = font.width as i32;
+        let glyph_h = font.height as i32;
+        let mut pen_x = origin.x;
+        let mut pen_y = origin.y;
+
+        for ch in text.chars() {
+            if ch == '\n' {
+                pen_x = origin.x;
+                pen_y += glyph_h + 1;
+                continue;
+            }
+
+            let rows = font.glyph_rows(ch);
+            for (row, bits) in rows.iter().enumerate() {
+                for col in 0..font.width as usize {
+                    let bit = 4usize.saturating_sub(col);
+                    if ((bits >> bit) & 1) != 0 {
+                        self.draw_pixel(
+                            Point {
+                                x: pen_x + col as i32,
+                                y: pen_y + row as i32,
+                            },
+                            color,
+                        );
+                    }
+                }
+            }
+
+            pen_x += glyph_w + 1;
         }
     }
 }

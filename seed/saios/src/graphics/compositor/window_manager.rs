@@ -3,11 +3,16 @@ use crate::graphics::{Color, Rect};
 pub const MAX_WINDOWS: usize = 16;
 
 #[derive(Debug, Copy, Clone)]
+pub struct WindowSurface {
+    pub clear_color: Color,
+}
+
+#[derive(Debug, Copy, Clone)]
 pub struct Window {
 	pub id: u32,
 	pub title: &'static str,
 	pub frame: Rect,
-	pub bg: Color,
+	pub surface: WindowSurface,
 	pub border: Color,
 	pub visible: bool,
 	pub z: u32,
@@ -23,7 +28,9 @@ impl Window {
 			width: 0,
 			height: 0,
 		},
-		bg: Color::rgb(0, 0, 0),
+		surface: WindowSurface {
+			clear_color: Color::rgb(0, 0, 0),
+		},
 		border: Color::rgb(0, 0, 0),
 		visible: false,
 		z: 0,
@@ -62,7 +69,7 @@ impl WindowManager {
 			id,
 			title,
 			frame,
-			bg,
+			surface: WindowSurface { clear_color: bg },
 			border,
 			visible: true,
 			z: self.len as u32,

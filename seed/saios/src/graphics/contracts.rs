@@ -1,4 +1,5 @@
-use crate::graphics::font::PsfFont;
+use crate::graphics::fonts::bitmap::BitmapFont;
+use crate::graphics::fonts::psf::PsfFont;
 use crate::graphics::{Color, Image, Point, Rect, Size, Surface};
 
 pub trait Renderer {
@@ -19,6 +20,7 @@ pub trait Renderer {
         bitmap: &[u8],
         color: Color,
     );
+    fn draw_text(&mut self, origin: Point, text: &str, font: &BitmapFont, color: Color);
     fn draw_text_psf(&mut self, font: &PsfFont<'_>, origin: Point, text: &str, color: Color);
 }
 
