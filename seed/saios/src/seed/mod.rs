@@ -110,7 +110,7 @@ extern "C" fn seed_exception_from_stack(stack: *const u64, vector: u32, has_erro
 
 pub fn init(boot_info: *const SaiosBootInfo) {
     diagnostics::init_serial();
-    diagnostics::stage("Kernel init entry");
+    diagnostics::stage("SEED init entry");
 
     rrod::set_boot_info(boot_info);
 

@@ -92,7 +92,7 @@ pub fn from_panic(info: &core::panic::PanicInfo<'_>) -> RRodContext {
     };
 
     RRodContext {
-        reason: "Kernel panic",
+        reason: "SEED panic",
         exception: Exception::Panic,
         cpu: 0,
         rip: read_rip(),

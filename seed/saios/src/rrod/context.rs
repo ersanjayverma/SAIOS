@@ -19,7 +19,7 @@ impl Exception {
             Self::InvalidOpcode => "#UD Invalid Opcode",
             Self::GeneralProtection => "#GP General Protection",
             Self::PageFault => "#PF Page Fault",
-            Self::Panic => "Kernel Panic",
+            Self::Panic => "SEED Panic",
             Self::Fatal => "Fatal Error",
             Self::Unknown(_) => "Unknown Exception",
         }

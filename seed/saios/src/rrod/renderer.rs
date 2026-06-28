@@ -172,12 +172,12 @@ pub fn render(boot_info: &efi_main::SaiosBootInfo, info: &RRodContext) {
     }
 
     draw_centered(base, stride, width, height, cy - outer + 24, "SEED", c_white);
-    draw_centered(base, stride, width, height, cy - outer + 44, "KERNEL FATAL EXCEPTION", c_red_hi);
+    draw_centered(base, stride, width, height, cy - outer + 44, "SEED FATAL EXCEPTION", c_red_hi);
     draw_centered(base, stride, width, height, cy - outer + 64, "/!\\", c_red);
     draw_centered(base, stride, width, height, cy - outer + 84, "RED RING OF DEATH", c_red);
 
     draw_centered(base, stride, width, height, cy - 36, "The operating system has encountered", c_gray);
-    draw_centered(base, stride, width, height, cy - 26, "a fatal kernel error and cannot", c_gray);
+    draw_centered(base, stride, width, height, cy - 26, "a fatal SEED error and cannot", c_gray);
     draw_centered(base, stride, width, height, cy - 16, "continue execution safely.", c_gray);
 
     let left = cx - 170;

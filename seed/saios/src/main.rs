@@ -8,7 +8,7 @@ pub mod drivers;
 pub mod fs;
 pub mod graphics;
 pub mod ipc;
-pub mod kernel;
+pub mod seed;
 pub mod log;
 pub mod memory;
 pub mod net;
@@ -24,8 +24,8 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
         core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
     }
 
-    kernel::init(boot_info);
-    kernel::run()
+    seed::init(boot_info);
+    seed::run()
 }
 
 #[panic_handler]
