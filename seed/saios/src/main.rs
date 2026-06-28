@@ -1,6 +1,17 @@
 #![no_std]
 #![no_main]
 
+pub mod arch;
+pub mod boot;
+pub mod drivers;
+pub mod fs;
+pub mod graphics;
+pub mod ipc;
+pub mod memory;
+pub mod net;
+pub mod process;
+pub mod scheduler;
+
 use core::fmt::{self, Write};
 use efi_main::SaiosBootInfo;
 static mut BOOT_INFO: *const SaiosBootInfo = core::ptr::null();
