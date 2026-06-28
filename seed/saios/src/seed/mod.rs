@@ -29,6 +29,7 @@ pub fn init(boot_info: *const SaiosBootInfo) {
     arch::install_exception_handlers();
 
     let boot_info = unsafe { &*boot_info };
+    crate::console::attach_framebuffer(boot_info.framebuffer);
     let mut init = KernelInit::new(boot_info);
     init.stage0_cpu();
     init.stage1_exceptions();
@@ -233,8 +234,8 @@ impl BootDashboard {
     }
 
     fn begin(&mut self) {
-        crate::drivers::serial::write_str("SAIOS DEVELOPMENT BUILD\n");
-        crate::drivers::serial::write_str("Initializing...\n");
+        crate::console::write_str("SAIOS DEVELOPMENT BUILD\n");
+        crate::console::write_str("Initializing...\n");
     }
 
     fn mark_ok(&mut self, index: usize) {
@@ -256,21 +257,21 @@ impl BootDashboard {
 
     fn log_step(&self, index: usize) {
         let step = &self.steps[index];
-        crate::drivers::serial::write_str("[BOOT] ");
-        crate::drivers::serial::write_str(step.name);
+        crate::console::write_str("[BOOT] ");
+        crate::console::write_str(step.name);
 
         let dots = 24usize.saturating_sub(step.name.len());
         for _ in 0..dots {
-            crate::drivers::serial::write_str(".");
+            crate::console::write_str(".");
         }
 
-        crate::drivers::serial::write_str(" ");
-        crate::drivers::serial::write_str(match step.state {
+        crate::console::write_str(" ");
+        crate::console::write_str(match step.state {
             BootStepState::Pending => "PENDING",
             BootStepState::Ok => "OK",
             BootStepState::Waiting => "WAITING",
         });
-        crate::drivers::serial::write_str("\n");
+        crate::console::write_str("\n");
     }
 
     fn finish(&mut self, elapsed_ms: u64, elapsed_ns: u64) {
@@ -281,11 +282,11 @@ impl BootDashboard {
         self.mark_waiting(STEP_KEYBOARD);
         self.finalized = true;
 
-        crate::drivers::serial::write_fmt(format_args!(
+        crate::console::write_fmt(format_args!(
             "Boot completed in {} ms ({} ns)\n",
             elapsed_ms, elapsed_ns
         ));
-        crate::drivers::serial::write_str("Waiting for input...\n");
+        crate::console::write_str("Waiting for input...\n");
     }
 
     fn render<T: Renderer>(&self, renderer: &mut T, font: &BitmapFont) {

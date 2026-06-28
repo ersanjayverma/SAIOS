@@ -12,7 +12,7 @@ pub mod types;
 pub mod uptime;
 
 pub struct TimerManager {
-    pub system_timer: &'static mut dyn TimerHal,
+    system_timer: &'static mut dyn TimerHal,
     boot_counter: u64,
 }
 

@@ -3,6 +3,7 @@
 
 pub mod arch;
 pub mod boot;
+pub mod console;
 pub mod diagnostics;
 pub mod drivers;
 pub mod fs;
@@ -29,6 +30,8 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    console::init_serial();
+    console::panic_prelude(info);
     let context = rrod::capture::from_panic(info);
     rrod::trigger(context)
 }
