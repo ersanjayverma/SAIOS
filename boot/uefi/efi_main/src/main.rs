@@ -15,6 +15,28 @@ use uefi::*;
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
+    let mut boot_info = efi_main::initialize_boot_info();
+
+    let mut fb = efi_main::ui::Framebuffer {
+        info: boot_info.framebuffer.clone(),
+    };
+    let bmp = efi_main::ui::Bitmap::from_bytes(efi_main::ui::SPLASH)
+        .expect("Failed to load splash bitmap");
+
+    println!(
+        "BMP: {}x{} {}bpp stride={} pixel_data={}",
+        bmp.width,
+        bmp.height,
+        bmp.bpp,
+        bmp.stride,
+        bmp.pixels.len(),
+    );
+    bmp.draw(&mut fb);
+    println!(
+        "FB: {}x{} stride={} bpp={} size={}",
+        fb.info.width, fb.info.height, fb.info.stride, fb.info.bpp, fb.info.size,
+    );
+    self::sleep(Duration::from_secs(5));
     let seed_path = "\\SAIOS\\seed.elf";
     let mut loader = load_seed(seed_path).unwrap();
     let dynamic =
@@ -147,28 +169,7 @@ fn main() -> Status {
         .expect("Failed to apply relocations");
     println!("All relocations applied successfully");
     println!("Initializing boot information");
-    let mut boot_info = efi_main::initialize_boot_info();
 
-    let mut fb = efi_main::ui::Framebuffer {
-        info: boot_info.framebuffer.clone(),
-    };
-    let bmp = efi_main::ui::Bitmap::from_bytes(efi_main::ui::SPLASH)
-        .expect("Failed to load splash bitmap");
-
-    println!(
-        "BMP: {}x{} {}bpp stride={} pixel_data={}",
-        bmp.width,
-        bmp.height,
-        bmp.bpp,
-        bmp.stride,
-        bmp.pixels.len(),
-    );
-    bmp.draw(&mut fb);
-    println!(
-        "FB: {}x{} stride={} bpp={} size={}",
-        fb.info.width, fb.info.height, fb.info.stride, fb.info.bpp, fb.info.size,
-    );
-    self::sleep(Duration::from_secs(5));
     // Print metadata fields explicitly for validation
     println!(
         "Magic Check:   0x{:X} (Expected: 0x{:X})",
