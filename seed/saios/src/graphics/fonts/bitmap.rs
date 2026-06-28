@@ -5,7 +5,10 @@ pub struct BitmapFont {
 
 impl BitmapFont {
     pub const fn new_5x7() -> Self {
-        Self { width: 5, height: 7 }
+        Self {
+            width: 5,
+            height: 7,
+        }
     }
 
     pub fn glyph_rows(&self, ch: char) -> [u8; 7] {

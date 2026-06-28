@@ -8,15 +8,17 @@ pub struct BackBuffer {
     height: u32,
     stride_pixels: usize,
     bpp: u8,
+    is_bgr: bool,
 }
 
 impl BackBuffer {
-    pub const fn new(width: u32, height: u32, stride_pixels: usize, bpp: u8) -> Self {
+    pub const fn new(width: u32, height: u32, stride_pixels: usize, bpp: u8, is_bgr: bool) -> Self {
         Self {
             width,
             height,
             stride_pixels,
             bpp,
+            is_bgr,
         }
     }
 
@@ -32,6 +34,7 @@ impl BackBuffer {
             height: self.height,
             stride: self.stride_pixels,
             bpp: self.bpp,
+            is_bgr: self.is_bgr,
             pixels,
         }
     }

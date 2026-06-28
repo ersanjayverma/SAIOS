@@ -8,21 +8,20 @@ pub mod drivers;
 pub mod fs;
 pub mod graphics;
 pub mod ipc;
-pub mod seed;
 pub mod log;
 pub mod memory;
 pub mod net;
 pub mod process;
 pub mod rrod;
 pub mod scheduler;
+pub mod seed;
+pub mod timer;
 
 use efi_main::SaiosBootInfo;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
-    unsafe {
-        core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
-    }
+    arch::disable_interrupts();
 
     seed::init(boot_info);
     seed::run()

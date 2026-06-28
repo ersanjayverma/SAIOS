@@ -20,7 +20,5 @@ pub fn fatal(reason: &'static str) -> ! {
 
 #[macro_export]
 macro_rules! rrod {
-    ($reason:expr) => {{
-        $crate::rrod::fatal($reason)
-    }};
+    ($reason:expr) => {{ $crate::rrod::fatal($reason) }};
 }

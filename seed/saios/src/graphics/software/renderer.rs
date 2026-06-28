@@ -27,7 +27,11 @@ impl<'a, 'fb> PixelTarget for &'a mut GraphicsSurface<'fb> {
     }
 
     fn put_pixel(&mut self, point: Point, color: Color) {
-        if point.x < 0 || point.y < 0 || (point.x as u32) >= self.width || (point.y as u32) >= self.height {
+        if point.x < 0
+            || point.y < 0
+            || (point.x as u32) >= self.width
+            || (point.y as u32) >= self.height
+        {
             return;
         }
 
@@ -41,9 +45,9 @@ impl<'a, 'fb> PixelTarget for &'a mut GraphicsSurface<'fb> {
             return;
         }
 
-        self.pixels[offset] = color.r;
+        self.pixels[offset] = if self.is_bgr { color.b } else { color.r };
         self.pixels[offset + 1] = color.g;
-        self.pixels[offset + 2] = color.b;
+        self.pixels[offset + 2] = if self.is_bgr { color.r } else { color.b };
         if bpp > 3 {
             self.pixels[offset + 3] = color.a;
         }
@@ -135,9 +139,23 @@ impl<T: PixelTarget> Renderer for SoftwareRenderer<T> {
 
         let x2 = rect.x + rect.width as i32 - 1;
         let y2 = rect.y + rect.height as i32 - 1;
-        self.draw_line(Point { x: rect.x, y: rect.y }, Point { x: x2, y: rect.y }, color);
+        self.draw_line(
+            Point {
+                x: rect.x,
+                y: rect.y,
+            },
+            Point { x: x2, y: rect.y },
+            color,
+        );
         self.draw_line(Point { x: rect.x, y: y2 }, Point { x: x2, y: y2 }, color);
-        self.draw_line(Point { x: rect.x, y: rect.y }, Point { x: rect.x, y: y2 }, color);
+        self.draw_line(
+            Point {
+                x: rect.x,
+                y: rect.y,
+            },
+            Point { x: rect.x, y: y2 },
+            color,
+        );
         self.draw_line(Point { x: x2, y: rect.y }, Point { x: x2, y: y2 }, color);
     }
 
@@ -148,7 +166,10 @@ impl<T: PixelTarget> Renderer for SoftwareRenderer<T> {
 
         for row in 0..rect.height as i32 {
             self.draw_line(
-                Point { x: rect.x, y: rect.y + row },
+                Point {
+                    x: rect.x,
+                    y: rect.y + row,
+                },
                 Point {
                     x: rect.x + rect.width as i32 - 1,
                     y: rect.y + row,
@@ -164,14 +185,62 @@ impl<T: PixelTarget> Renderer for SoftwareRenderer<T> {
         let mut err = 1 - x;
 
         while x >= y {
-            self.draw_pixel(Point { x: center.x + x, y: center.y + y }, color);
-            self.draw_pixel(Point { x: center.x + y, y: center.y + x }, color);
-            self.draw_pixel(Point { x: center.x - y, y: center.y + x }, color);
-            self.draw_pixel(Point { x: center.x - x, y: center.y + y }, color);
-            self.draw_pixel(Point { x: center.x - x, y: center.y - y }, color);
-            self.draw_pixel(Point { x: center.x - y, y: center.y - x }, color);
-            self.draw_pixel(Point { x: center.x + y, y: center.y - x }, color);
-            self.draw_pixel(Point { x: center.x + x, y: center.y - y }, color);
+            self.draw_pixel(
+                Point {
+                    x: center.x + x,
+                    y: center.y + y,
+                },
+                color,
+            );
+            self.draw_pixel(
+                Point {
+                    x: center.x + y,
+                    y: center.y + x,
+                },
+                color,
+            );
+            self.draw_pixel(
+                Point {
+                    x: center.x - y,
+                    y: center.y + x,
+                },
+                color,
+            );
+            self.draw_pixel(
+                Point {
+                    x: center.x - x,
+                    y: center.y + y,
+                },
+                color,
+            );
+            self.draw_pixel(
+                Point {
+                    x: center.x - x,
+                    y: center.y - y,
+                },
+                color,
+            );
+            self.draw_pixel(
+                Point {
+                    x: center.x - y,
+                    y: center.y - x,
+                },
+                color,
+            );
+            self.draw_pixel(
+                Point {
+                    x: center.x + y,
+                    y: center.y - x,
+                },
+                color,
+            );
+            self.draw_pixel(
+                Point {
+                    x: center.x + x,
+                    y: center.y - y,
+                },
+                color,
+            );
 
             y += 1;
             if err < 0 {
@@ -201,7 +270,13 @@ impl<T: PixelTarget> Renderer for SoftwareRenderer<T> {
                 } else {
                     Color::rgb(src[0], src[1], src[2])
                 };
-                self.draw_pixel(Point { x: point.x + x as i32, y: point.y + y as i32 }, color);
+                self.draw_pixel(
+                    Point {
+                        x: point.x + x as i32,
+                        y: point.y + y as i32,
+                    },
+                    color,
+                );
             }
         }
     }
@@ -223,7 +298,13 @@ impl<T: PixelTarget> Renderer for SoftwareRenderer<T> {
                 }
                 let bit = 7 - (x % 8);
                 if ((bitmap[byte_index] >> bit) & 1) != 0 {
-                    self.draw_pixel(Point { x: point.x + x as i32, y: point.y + y as i32 }, color);
+                    self.draw_pixel(
+                        Point {
+                            x: point.x + x as i32,
+                            y: point.y + y as i32,
+                        },
+                        color,
+                    );
                 }
             }
         }

@@ -4,14 +4,17 @@ static LOGGER_READY: AtomicBool = AtomicBool::new(false);
 
 pub fn init_serial() {
     crate::drivers::serial::init();
-    crate::drivers::serial::write_str("[SEED] D0 serial init\n");
+    crate::drivers::serial::write_str("[SEED] serial init\n");
 }
 
 pub fn init_logger() {
     crate::log::logger::init();
     LOGGER_READY.store(true, Ordering::Relaxed);
-    crate::drivers::serial::write_str("[SEED] D1 logger init\n");
-    crate::log::logger::log_str(crate::log::level::LogLevel::Info, "Diagnostics pipeline online");
+    crate::drivers::serial::write_str("[SEED] logger init\n");
+    crate::log::logger::log_str(
+        crate::log::level::LogLevel::Info,
+        "Diagnostics pipeline online",
+    );
 }
 
 pub fn stage(name: &'static str) {

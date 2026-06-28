@@ -15,10 +15,14 @@ fn exception_code(exception: Exception) -> u32 {
 pub fn flush() {}
 
 pub fn dump_report(ctx: &RRodContext) {
-    crate::drivers::serial::write_str("\n========== RROD DIAGNOSTIC ==========" );
-    crate::drivers::serial::write_str("\n" );
+    crate::drivers::serial::write_str("\n========== RROD DIAGNOSTIC ==========");
+    crate::drivers::serial::write_str("\n");
     crate::drivers::serial::write_fmt(format_args!("Reason     : {}\n", ctx.reason));
-    crate::drivers::serial::write_fmt(format_args!("Exception  : {} (#{})\n", ctx.exception.as_str(), exception_code(ctx.exception)));
+    crate::drivers::serial::write_fmt(format_args!(
+        "Exception  : {} (#{})\n",
+        ctx.exception.as_str(),
+        exception_code(ctx.exception)
+    ));
     crate::drivers::serial::write_fmt(format_args!("CPU        : {}\n", ctx.cpu));
     crate::drivers::serial::write_fmt(format_args!("RIP        : {:#018x}\n", ctx.rip));
     crate::drivers::serial::write_fmt(format_args!("RSP        : {:#018x}\n", ctx.rsp));

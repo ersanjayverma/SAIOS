@@ -32,7 +32,8 @@ fn put_pixel(
         return;
     }
     unsafe {
-        base.add(y as usize * stride + x as usize).write_volatile(color);
+        base.add(y as usize * stride + x as usize)
+            .write_volatile(color);
     }
 }
 
@@ -52,7 +53,15 @@ fn draw_char(
         for col in 0..font.width as usize {
             let bit = 4usize.saturating_sub(col);
             if ((bits >> bit) & 1) != 0 {
-                put_pixel(base, stride, width, height, x + col as i32, y + row as i32, color);
+                put_pixel(
+                    base,
+                    stride,
+                    width,
+                    height,
+                    x + col as i32,
+                    y + row as i32,
+                    color,
+                );
             }
         }
     }
@@ -100,7 +109,11 @@ fn to_hex(value: u64, out: &mut [u8; 18]) -> &str {
     while i < 16 {
         let shift = (15 - i) * 4;
         let nib = ((value >> shift) & 0xF) as u8;
-        out[2 + i] = if nib < 10 { b'0' + nib } else { b'A' + (nib - 10) };
+        out[2 + i] = if nib < 10 {
+            b'0' + nib
+        } else {
+            b'A' + (nib - 10)
+        };
         i += 1;
     }
     core::str::from_utf8(out).unwrap_or("0x0000000000000000")
@@ -171,42 +184,223 @@ pub fn render(boot_info: &efi_main::SaiosBootInfo, info: &RRodContext) {
         }
     }
 
-    draw_centered(base, stride, width, height, cy - outer + 24, "SEED", c_white);
-    draw_centered(base, stride, width, height, cy - outer + 44, "SEED FATAL EXCEPTION", c_red_hi);
+    draw_centered(
+        base,
+        stride,
+        width,
+        height,
+        cy - outer + 24,
+        "SEED",
+        c_white,
+    );
+    draw_centered(
+        base,
+        stride,
+        width,
+        height,
+        cy - outer + 44,
+        "SEED FATAL EXCEPTION",
+        c_red_hi,
+    );
     draw_centered(base, stride, width, height, cy - outer + 64, "/!\\", c_red);
-    draw_centered(base, stride, width, height, cy - outer + 84, "RED RING OF DEATH", c_red);
+    draw_centered(
+        base,
+        stride,
+        width,
+        height,
+        cy - outer + 84,
+        "RED RING OF DEATH",
+        c_red,
+    );
 
-    draw_centered(base, stride, width, height, cy - 36, "The operating system has encountered", c_gray);
-    draw_centered(base, stride, width, height, cy - 26, "a fatal SEED error and cannot", c_gray);
-    draw_centered(base, stride, width, height, cy - 16, "continue execution safely.", c_gray);
+    draw_centered(
+        base,
+        stride,
+        width,
+        height,
+        cy - 36,
+        "The operating system has encountered",
+        c_gray,
+    );
+    draw_centered(
+        base,
+        stride,
+        width,
+        height,
+        cy - 26,
+        "a fatal SEED error and cannot",
+        c_gray,
+    );
+    draw_centered(
+        base,
+        stride,
+        width,
+        height,
+        cy - 16,
+        "continue execution safely.",
+        c_gray,
+    );
 
     let left = cx - 170;
-    draw_text(base, stride, width, height, left, cy + 4, "ERROR SUMMARY", c_white);
-    draw_text(base, stride, width, height, left, cy + 18, "Reason:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 18, info.reason, c_white);
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left,
+        cy + 4,
+        "ERROR SUMMARY",
+        c_white,
+    );
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left,
+        cy + 18,
+        "Reason:",
+        c_gray,
+    );
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left + 80,
+        cy + 18,
+        info.reason,
+        c_white,
+    );
 
-    draw_text(base, stride, width, height, left, cy + 28, "Exception:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 28, info.exception.as_str(), c_white);
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left,
+        cy + 28,
+        "Exception:",
+        c_gray,
+    );
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left + 80,
+        cy + 28,
+        info.exception.as_str(),
+        c_white,
+    );
 
     let mut hex = [0u8; 18];
     draw_text(base, stride, width, height, left, cy + 38, "RIP:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 38, to_hex(info.rip, &mut hex), c_white);
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left + 80,
+        cy + 38,
+        to_hex(info.rip, &mut hex),
+        c_white,
+    );
 
     draw_text(base, stride, width, height, left, cy + 48, "RSP:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 48, to_hex(info.rsp, &mut hex), c_white);
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left + 80,
+        cy + 48,
+        to_hex(info.rsp, &mut hex),
+        c_white,
+    );
 
     draw_text(base, stride, width, height, left, cy + 58, "RBP:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 58, to_hex(info.rbp, &mut hex), c_white);
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left + 80,
+        cy + 58,
+        to_hex(info.rbp, &mut hex),
+        c_white,
+    );
 
     draw_text(base, stride, width, height, left, cy + 68, "CR2:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 68, to_hex(info.cr2, &mut hex), c_white);
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left + 80,
+        cy + 68,
+        to_hex(info.cr2, &mut hex),
+        c_white,
+    );
 
-    draw_text(base, stride, width, height, left, cy + 78, "Error Code:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 78, to_hex(info.error_code, &mut hex), c_white);
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left,
+        cy + 78,
+        "Error Code:",
+        c_gray,
+    );
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left + 80,
+        cy + 78,
+        to_hex(info.error_code, &mut hex),
+        c_white,
+    );
 
-    draw_text(base, stride, width, height, left, cy + 88, "Location:", c_gray);
-    draw_text(base, stride, width, height, left + 80, cy + 88, info.file, c_white);
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left,
+        cy + 88,
+        "Location:",
+        c_gray,
+    );
+    draw_text(
+        base,
+        stride,
+        width,
+        height,
+        left + 80,
+        cy + 88,
+        info.file,
+        c_white,
+    );
 
-    draw_centered(base, stride, width, height, height as i32 - 34, "SYSTEM HALTED", c_white);
-    draw_centered(base, stride, width, height, height as i32 - 22, "REBOOT REQUIRED", c_gray);
+    draw_centered(
+        base,
+        stride,
+        width,
+        height,
+        height as i32 - 34,
+        "SYSTEM HALTED",
+        c_white,
+    );
+    draw_centered(
+        base,
+        stride,
+        width,
+        height,
+        height as i32 - 22,
+        "REBOOT REQUIRED",
+        c_gray,
+    );
 }

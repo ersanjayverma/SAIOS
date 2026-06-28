@@ -43,7 +43,12 @@ impl<'a> DecodedBmp<'a> {
                 let (r, g, b, a) = if src_bpp == 3 {
                     (self.pixels[s + 2], self.pixels[s + 1], self.pixels[s], 255)
                 } else {
-                    (self.pixels[s + 2], self.pixels[s + 1], self.pixels[s], self.pixels[s + 3])
+                    (
+                        self.pixels[s + 2],
+                        self.pixels[s + 1],
+                        self.pixels[s],
+                        self.pixels[s + 3],
+                    )
                 };
 
                 out[d] = r;
@@ -94,7 +99,9 @@ pub fn decode(data: &[u8]) -> Result<DecodedBmp<'_>, BmpError> {
     let width_u = width as u32;
     let src_bpp = (bpp as usize) / 8;
     let row_stride = (width_u as usize * src_bpp + 3) & !3;
-    let total = row_stride.checked_mul(height as usize).ok_or(BmpError::Truncated)?;
+    let total = row_stride
+        .checked_mul(height as usize)
+        .ok_or(BmpError::Truncated)?;
 
     if pixel_offset + total > data.len() {
         return Err(BmpError::Truncated);
