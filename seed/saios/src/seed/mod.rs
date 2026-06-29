@@ -134,7 +134,7 @@ impl<'a> KernelInit<'a> {
 
     fn stage0_cpu(&mut self) {
         diagnostics::stage("cpu.begin");
-        clear_framebuffer(&self.fb, (14, 60, 128));
+        clear_framebuffer(&self.fb, SAIOS_BLUE);
 
         self.backbuffer = Some(BackBuffer::new(
             self.fb.width as u32,
@@ -401,15 +401,14 @@ impl BootDashboard {
 }
 
 #[inline]
-fn pack_pixel(color: (u8, u8, u8), pixel_format: PixelFormat) -> u32 {
-    let (r, g, b) = color;
+fn pack_pixel(color: Color, pixel_format: PixelFormat) -> u32 {
     match pixel_format {
-        PixelFormat::Bgr => ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
-        _ => ((b as u32) << 16) | ((g as u32) << 8) | r as u32,
+        PixelFormat::Bgr => ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32,
+        _ => ((color.b as u32) << 16) | ((color.g as u32) << 8) | color.r as u32,
     }
 }
 
-fn clear_framebuffer(fb: &FramebufferInfo, color: (u8, u8, u8)) {
+fn clear_framebuffer(fb: &FramebufferInfo, color: Color) {
     let base = fb.base as *mut u32;
     let packed = pack_pixel(color, fb.pixel_format);
 
