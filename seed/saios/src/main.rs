@@ -28,6 +28,10 @@ use efi_main::SaiosBootInfo;
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     arch::disable_interrupts();
 
+    // Zero the .bss section to ensure static data is properly initialized
+    // This is necessary because some UEFI bootloaders don't properly zero .bss
+    unsafe { arch::zero_bss() };
+
     unsafe { seed::init(boot_info) };
     seed::run()
 }
@@ -35,6 +39,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     console::init_serial();
+    console::panic_prelude(info);
     let context = rrod::capture::from_panic(info);
     rrod::trigger(context)
 }

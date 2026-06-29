@@ -9,7 +9,7 @@ hal = {path = "../../hal" }
 spin = "0.10"
 
 [profile.dev]
-panic = "abort"
+panic = "unwind"
 
 [profile.release]
-panic = "abort"
+panic = "unwind"

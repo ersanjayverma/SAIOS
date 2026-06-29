@@ -78,41 +78,45 @@ impl BitmapPhysicalMemoryManager {
         Ok(())
     }
 
+    /// Track a physical memory region in the bitmaps.
+    ///
+    /// Only frames within `[0, MAX_TRACKED_FRAMES)` are tracked; frames
+    /// beyond that bound are silently ignored (the system simply won't
+    /// use that memory).  This avoids `TooManyFrames` errors caused by
+    /// high-address MMIO / reserved regions that happen to sit above the
+    /// tracked window.
     fn track_region(
         &mut self,
         start: u64,
         length: u64,
         free: bool,
         reserve_only: bool,
-    ) -> MemoryResult<()> {
-        let start_frame = start as usize / PAGE_SIZE;
-        let end_frame = (start as usize + length as usize + (PAGE_SIZE - 1)) / PAGE_SIZE;
+    ) {
+        let start_frame = (start as usize).saturating_div(PAGE_SIZE);
+        let end_frame = (start as usize)
+            .saturating_add(length as usize)
+            .saturating_add(PAGE_SIZE - 1)
+            .saturating_div(PAGE_SIZE);
 
-        if end_frame > MAX_TRACKED_FRAMES {
-            return Err(MemoryError::TooManyFrames);
+        // Clamp to the tracked window — anything above is ignored.
+        let first = start_frame.min(MAX_TRACKED_FRAMES);
+        let last = end_frame.min(MAX_TRACKED_FRAMES);
+
+        if last > self.highest_frame {
+            self.highest_frame = last;
         }
 
-        if end_frame > self.highest_frame {
-            self.highest_frame = end_frame;
-        }
-
-        for frame_number in start_frame..end_frame {
-            if free {
-                if !self.free.is_set(frame_number) {
-                    self.free.set(frame_number);
-                    self.stats.free_bytes += PAGE_SIZE;
-                }
+        for frame_number in first..last {
+            if free && !self.free.is_set(frame_number) {
+                self.free.set(frame_number).ok();
+                self.stats.free_bytes += PAGE_SIZE;
             }
 
-            if reserve_only {
-                if !self.reserved.is_set(frame_number) {
-                    self.reserved.set(frame_number);
-                    self.stats.reserved_bytes += PAGE_SIZE;
-                }
+            if reserve_only && !self.reserved.is_set(frame_number) {
+                self.reserved.set(frame_number).ok();
+                self.stats.reserved_bytes += PAGE_SIZE;
             }
         }
-
-        Ok(())
     }
 }
 
@@ -128,7 +132,10 @@ impl PhysicalMemoryManager for BitmapPhysicalMemoryManager {
         self.stats = PhysicalMemoryStats::empty();
 
         for entry in memory_map.entries() {
-            let length = entry.length as usize;
+            // Only RAM-type regions participate in frame tracking.
+            // MMIO, ACPI, reserved, and other non-RAM regions are
+            // skipped — they sit at high physical addresses that
+            // would otherwise overflow the fixed-size bitmap.
             let is_ram = matches!(
                 entry.region_type,
                 MemoryType::Usable
@@ -136,16 +143,20 @@ impl PhysicalMemoryManager for BitmapPhysicalMemoryManager {
                     | MemoryType::Loader
                     | MemoryType::Seed
             );
+
+            if !is_ram {
+                continue;
+            }
+
             let is_free = matches!(
                 entry.region_type,
                 MemoryType::Usable | MemoryType::Reclaimable
             );
 
-            if is_ram {
-                self.stats.total_bytes += length;
-            }
+            self.stats.total_bytes += entry.length as usize;
 
-            self.track_region(entry.base, entry.length, is_free, is_ram && !is_free)?;
+            // reserve_only = true for Loader / Seed (kernel, boot info, etc.)
+            self.track_region(entry.base, entry.length, is_free, !is_free);
         }
 
         self.initialized = true;
@@ -158,14 +169,18 @@ impl PhysicalMemoryManager for BitmapPhysicalMemoryManager {
         }
 
         let search_limit = self.highest_frame.min(MAX_TRACKED_FRAMES);
+        if search_limit == 0 {
+            return Err(MemoryError::OutOfFrames);
+        }
+
         for offset in 0..search_limit {
             let frame_number = (self.next_search + offset) % search_limit;
             if self.free.is_set(frame_number)
                 && !self.allocated.is_set(frame_number)
                 && !self.reserved.is_set(frame_number)
             {
-                self.free.clear(frame_number);
-                self.allocated.set(frame_number);
+                self.free.clear(frame_number).ok();
+                self.allocated.set(frame_number).ok();
                 self.stats.free_bytes = self.stats.free_bytes.saturating_sub(PAGE_SIZE);
                 self.stats.allocated_frames += 1;
                 self.next_search = frame_number + 1;
@@ -183,8 +198,8 @@ impl PhysicalMemoryManager for BitmapPhysicalMemoryManager {
             return Err(MemoryError::DoubleFree);
         }
 
-        self.allocated.clear(frame.number());
-        self.free.set(frame.number());
+        self.allocated.clear(frame.number()).ok();
+        self.free.set(frame.number()).ok();
         self.stats.free_bytes += PAGE_SIZE;
         self.stats.allocated_frames = self.stats.allocated_frames.saturating_sub(1);
         self.next_search = frame.number();
@@ -209,12 +224,12 @@ impl PhysicalMemoryManager for BitmapPhysicalMemoryManager {
             }
 
             if self.free.is_set(frame_number) {
-                self.free.clear(frame_number);
+                self.free.clear(frame_number).ok();
                 self.stats.free_bytes = self.stats.free_bytes.saturating_sub(PAGE_SIZE);
             }
 
             if !self.reserved.is_set(frame_number) {
-                self.reserved.set(frame_number);
+                self.reserved.set(frame_number).ok();
                 self.stats.reserved_bytes += PAGE_SIZE;
             }
         }

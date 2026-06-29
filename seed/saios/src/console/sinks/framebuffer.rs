@@ -47,15 +47,32 @@ impl FramebufferSink {
 
     pub fn write_str(&mut self, s: &str) {
         for ch in s.chars() {
-            if ch == '\n' {
-                self.new_line();
-                continue;
-            }
-
-            self.draw_char(ch);
-            self.col += 1;
-            if self.col >= self.cols {
-                self.new_line();
+            match ch {
+                '\n' => {
+                    self.new_line();
+                }
+                '\r' => {
+                    // Carriage return — move cursor to start of line
+                    self.col = 0;
+                }
+                '\t' => {
+                    // Expand tab to 4 spaces
+                    let spaces = 4usize.saturating_sub(self.col % 4);
+                    for _ in 0..spaces {
+                        self.draw_char(' ');
+                        self.col += 1;
+                        if self.col >= self.cols {
+                            self.new_line();
+                        }
+                    }
+                }
+                _ => {
+                    self.draw_char(ch);
+                    self.col += 1;
+                    if self.col >= self.cols {
+                        self.new_line();
+                    }
+                }
             }
         }
     }

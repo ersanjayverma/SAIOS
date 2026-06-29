@@ -1,6 +1,12 @@
 pub const PAGE_SIZE: usize = 4096;
-pub const MAX_TRACKED_FRAMES: usize = 1_048_576;
+
+/// Maximum physical frames the PMM can track.
+///
+/// 8 388 608 frames × 4 KiB = 32 GiB addressable physical memory.
+/// Each of the three bitmaps (free / allocated / reserved) is 1 MiB.
+pub const MAX_TRACKED_FRAMES: usize = 8_388_608;
 pub const FRAME_BITMAP_WORDS: usize = MAX_TRACKED_FRAMES / 64;
+
 pub const MAX_VMM_MAPPINGS: usize = 4096;
 pub const MAX_ADDRESS_SPACES: usize = 32;
 pub const MAX_ADDRESS_SPACE_MAPPINGS: usize = 512;

@@ -56,16 +56,23 @@ fn read_rip() -> u64 {
 ///
 /// `stack` must point to a valid exception stack frame laid out according to
 /// the current interrupt/exception entry stub.
+///
+/// Stack layout (pushed by CPU/handler):
+///   [stack+0] error code (if applicable) or RIP
+///   [stack+1] RIP (if error code) or RBP
+///   [stack+2] RBP (if error code) or saved RBP from interrupt frame
 pub unsafe fn from_exception_stack(
     stack: *const u64,
     vector: u32,
     has_error_code: bool,
 ) -> RRodContext {
-    let (rip, error_code) = unsafe {
+    let (rip, rbp, error_code) = unsafe {
         if has_error_code {
-            (*stack.add(1), *stack)
+            // Stack: [error_code, rip, rbp, ...]
+            (*stack.add(1), *stack.add(2), *stack)
         } else {
-            (*stack, 0)
+            // Stack: [rip, rbp, ...]
+            (*stack, *stack.add(1), 0)
         }
     };
 
@@ -82,7 +89,7 @@ pub unsafe fn from_exception_stack(
         cpu: 0,
         rip,
         rsp: stack as u64,
-        rbp: 0,
+        rbp,
         cr2: read_cr2(),
         error_code,
         file: "<exception>",

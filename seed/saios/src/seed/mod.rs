@@ -38,17 +38,75 @@ pub unsafe fn init(boot_info: *const SaiosBootInfo) {
     let mut init = KernelInit::new(boot_info);
     init.stage0_cpu();
     init.stage1_exceptions();
-    init.stage2_memory();
-    init.stage3_drivers();
-    init.stage4_logging();
+    init.stage2_logging();   // Logging before memory so summary is captured
+    init.stage3_memory();
+    init.stage4_drivers();
     init.stage5_graphics();
     init.stage6_desktop();
     init.stage7_runtime();
 }
 
 pub fn run() -> ! {
+    crate::console::write_str("\n=== SAIOS Console Ready ===\n");
+    crate::console::write_str("Type 'help' for commands.\n\n");
+    crate::console::write_str("> ");
+
     loop {
+        // Poll for console input with line editing and echo
+        if crate::console::poll_line() {
+            // A complete line was entered
+            let line = crate::console::line_str();
+            process_command(line);
+            crate::console::reset_line();
+            crate::console::write_str("> ");
+        }
+
+        // Yield to avoid burning CPU at 100%
         core::hint::spin_loop();
+    }
+}
+
+fn process_command(line: &str) {
+    match line.trim() {
+        "" => {
+            // Empty line — just redisplay prompt
+        }
+        "help" => {
+            crate::console::write_str("Commands: help, info, clear, echo <text>, reboot\n");
+        }
+        "info" => {
+            crate::console::write_fmt(format_args!(
+                "SAIOS dev build\n"
+            ));
+            crate::console::write_fmt(format_args!(
+                "Serial: {}\n",
+                if crate::console::serial_present() { "present" } else { "not detected" }
+            ));
+            crate::console::write_fmt(format_args!(
+                "Memory: {} KB free / {} KB total\n",
+                crate::memory::free_memory() / 1024,
+                crate::memory::total_memory() / 1024,
+            ));
+        }
+        "clear" => {
+            // Send ANSI clear screen
+            crate::console::write_str("\x1B[2J\x1B[H");
+        }
+        "reboot" => {
+            crate::console::write_str("Rebooting...\n");
+            crate::console::flush();
+            crate::rrod::reboot::reboot_now();
+        }
+        s if s.starts_with("echo ") => {
+            let msg = &s[5..];
+            crate::console::write_str(msg);
+            crate::console::write_str("\n");
+        }
+        _ => {
+            crate::console::write_str("Unknown command: ");
+            crate::console::write_str(line);
+            crate::console::write_str("\n");
+        }
     }
 }
 
@@ -64,7 +122,6 @@ impl<'a> KernelInit<'a> {
     fn new(boot_info: &'a SaiosBootInfo) -> Self {
         let mut dashboard = BootDashboard::new();
         dashboard.begin();
-        dashboard.mark_ok(STEP_SERIAL);
 
         Self {
             boot_info,
@@ -89,16 +146,6 @@ impl<'a> KernelInit<'a> {
 
         self.dashboard.mark_ok(STEP_CPU);
         diagnostics::stage_ok("cpu");
-
-        if let Some(backbuffer) = self.backbuffer.as_mut() {
-            let mut surface = backbuffer.surface();
-            let mut renderer = SoftwareRenderer::from_surface(&mut surface);
-            let font = BitmapFont::new_5x7();
-            self.dashboard.render(&mut renderer, &font);
-            unsafe {
-                backbuffer.blit_to_framebuffer(self.boot_info.framebuffer.base as *mut u8);
-            }
-        }
     }
 
     fn stage1_exceptions(&mut self) {
@@ -107,7 +154,13 @@ impl<'a> KernelInit<'a> {
         diagnostics::stage_ok("diag");
     }
 
-    fn stage2_memory(&mut self) {
+    fn stage2_logging(&mut self) {
+        diagnostics::init_logger();
+        self.dashboard.mark_ok(STEP_LOGGER);
+        diagnostics::stage_ok("logger");
+    }
+
+    fn stage3_memory(&mut self) {
         diagnostics::stage("mem.begin");
         memory::init(self.boot_info).expect("failed to initialize memory subsystem");
         self.dashboard.mark_ok(STEP_MEMORY);
@@ -119,14 +172,11 @@ impl<'a> KernelInit<'a> {
         self.dashboard.mark_ok(STEP_CYCLE_CLOCK);
     }
 
-    fn stage3_drivers(&mut self) {
+    fn stage4_drivers(&mut self) {
         self.dashboard.mark_waiting(STEP_KEYBOARD);
     }
 
-    fn stage4_logging(&mut self) {
-        diagnostics::init_logger();
-        self.dashboard.mark_ok(STEP_LOGGER);
-    }
+ 
 
     fn stage5_graphics(&mut self) {
         self.dashboard.mark_ok(STEP_GRAPHICS);
@@ -190,16 +240,15 @@ impl<'a> KernelInit<'a> {
 
 const STEP_CPU: usize = 0;
 const STEP_EXCEPTIONS: usize = 1;
-const STEP_SERIAL: usize = 2;
-const STEP_CYCLE_CLOCK: usize = 3;
-const STEP_LOGGER: usize = 4;
-const STEP_MEMORY: usize = 5;
-const STEP_HEAP: usize = 6;
-const STEP_GRAPHICS: usize = 7;
-const STEP_BACKBUFFER: usize = 8;
-const STEP_BMP_DECODER: usize = 9;
-const STEP_DESKTOP: usize = 10;
-const STEP_KEYBOARD: usize = 11;
+const STEP_LOGGER: usize = 2;
+const STEP_MEMORY: usize = 3;
+const STEP_HEAP: usize = 4;
+const STEP_CYCLE_CLOCK: usize = 5;
+const STEP_GRAPHICS: usize = 6;
+const STEP_BACKBUFFER: usize = 7;
+const STEP_BMP_DECODER: usize = 8;
+const STEP_DESKTOP: usize = 9;
+const STEP_KEYBOARD: usize = 10;
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum BootStepState {
@@ -224,7 +273,7 @@ impl BootStep {
 }
 
 struct BootDashboard {
-    steps: [BootStep; 12],
+    steps: [BootStep; 11],
     finalized: bool,
 }
 
@@ -234,11 +283,10 @@ impl BootDashboard {
             steps: [
                 BootStep::new("CPU"),
                 BootStep::new("Exceptions"),
-                BootStep::new("Serial"),
-                BootStep::new("Cycle Clock"),
                 BootStep::new("Logger"),
                 BootStep::new("Memory"),
                 BootStep::new("Heap"),
+                BootStep::new("Cycle Clock"),
                 BootStep::new("Graphics"),
                 BootStep::new("Backbuffer"),
                 BootStep::new("BMP Decoder"),
