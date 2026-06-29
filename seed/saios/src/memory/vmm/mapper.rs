@@ -1,6 +1,7 @@
 use crate::memory::constants::{MAX_VMM_MAPPINGS, PAGE_SIZE};
 use crate::memory::errors::{MemoryError, MemoryResult};
 use crate::memory::page_table::mapper::MappingEntry;
+use crate::memory::page_table::walker::PageWalker;
 use crate::memory::types::{
     AddressSpaceId, PhysAddr, PhysAddrExt, PhysicalFrame, VirtAddr, VirtAddrExt,
 };
@@ -9,6 +10,12 @@ use crate::memory::vmm::paging::{PagingRoot, active_root as arch_active_root, sw
 use crate::memory::vmm::tlb;
 use core::cell::UnsafeCell;
 use hal::memory::PageFlags;
+
+/// Convert a HAL [`PagingRoot`] to the arch-specific [`crate::arch::x86_64::paging::PagingRoot`]
+/// used by the page-table walker.
+fn to_arch_root(root: PagingRoot) -> crate::arch::x86_64::paging::PagingRoot {
+    crate::arch::x86_64::paging::PagingRoot::new(root.phys_addr())
+}
 
 struct GlobalVmm(UnsafeCell<KernelVirtualMemoryManager>);
 
@@ -99,16 +106,28 @@ impl KernelVirtualMemoryManager {
         source: AddressSpaceId,
         target: AddressSpaceId,
     ) -> MemoryResult<()> {
-        let source_mappings = self.mappings;
-        for mapping in source_mappings
-            .iter()
-            .filter(|entry| entry.active && entry.owner == source)
-        {
+        // Collect the indices of matching entries first, then map them.
+        // We collect indices (u16) instead of full MappingEntry structs to
+        // avoid blowing the kernel stack with a ~160 KB array copy.
+        let mut indices = [0u16; MAX_VMM_MAPPINGS];
+        let mut count = 0;
+        for (i, entry) in self.mappings.iter().enumerate() {
+            if entry.active && entry.owner == source {
+                if count >= MAX_VMM_MAPPINGS {
+                    break;
+                }
+                indices[count] = i as u16;
+                count += 1;
+            }
+        }
+
+        for idx in indices.iter().take(count) {
+            let entry = &self.mappings[*idx as usize];
             self.map(
                 target,
-                mapping.virt,
-                mapping.frame.start_address(),
-                mapping.flags,
+                entry.virt,
+                entry.frame.start_address(),
+                entry.flags,
             )?;
         }
 
@@ -132,6 +151,14 @@ impl VirtualMemoryManager for KernelVirtualMemoryManager {
             return Err(MemoryError::MappingExists);
         }
 
+        // Walk the page table, allocating intermediate tables as needed,
+        // and write the leaf PTE to point to the requested physical frame.
+        let walk = PageWalker::ensure_tables(to_arch_root(self.active_root), virt)?;
+        unsafe {
+            (*walk.leaf).set_frame(phys);
+            (*walk.leaf).set_flags(flags | PageFlags::PRESENT);
+        }
+
         let slot = self.first_free_slot().ok_or(MemoryError::OutOfFrames)?;
         self.mappings[slot] = MappingEntry {
             active: true,
@@ -148,12 +175,32 @@ impl VirtualMemoryManager for KernelVirtualMemoryManager {
         let slot = self
             .find_mapping_index(owner, virt)
             .ok_or(MemoryError::MappingNotFound)?;
+
+        // Clear the hardware page table entry so the CPU can no longer
+        // translate this virtual address.
+        if let Ok(walk) = PageWalker::walk(to_arch_root(self.active_root), virt) {
+            unsafe {
+                (*walk.leaf).clear();
+            }
+        }
+
         self.mappings[slot] = MappingEntry::empty();
         tlb::flush(virt.align_down(PAGE_SIZE));
         Ok(())
     }
 
     fn translate(&self, virt: VirtAddr) -> Option<PhysAddr> {
+        // Walk the hardware page table to resolve the translation.
+        // Falls back to the internal mapping table if the walk fails
+        // (e.g. intermediate tables not present).
+        if let Ok(walk) = PageWalker::walk(to_arch_root(self.active_root), virt) {
+            let entry = unsafe { *walk.leaf };
+            if entry.present() {
+                return Some(PhysAddr::new(entry.frame().as_u64() + virt.page_offset() as u64));
+            }
+        }
+
+        // Fallback: search the internal mapping table.
         self.mappings
             .iter()
             .find(|entry| {
@@ -173,6 +220,14 @@ impl VirtualMemoryManager for KernelVirtualMemoryManager {
         let slot = self
             .find_mapping_index(owner, virt)
             .ok_or(MemoryError::MappingNotFound)?;
+
+        // Update the hardware PTE flags.
+        if let Ok(walk) = PageWalker::walk(to_arch_root(self.active_root), virt) {
+            unsafe {
+                (*walk.leaf).set_flags(flags | PageFlags::PRESENT);
+            }
+        }
+
         self.mappings[slot].flags = flags | PageFlags::PRESENT;
         tlb::flush(virt.align_down(PAGE_SIZE));
         Ok(())

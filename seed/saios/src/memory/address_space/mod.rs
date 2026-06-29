@@ -106,8 +106,30 @@ impl AddressSpaceManager {
             .position(|entry| !entry.used)
             .ok_or(MemoryError::NoAddressSpaceSlots)?;
 
+        // Allocate a fresh PML4 table for the new address space.
+        // The kernel half (entries 256–511) is cloned from the kernel's
+        // PML4 so that kernel mappings are shared across all spaces, while
+        // the user half (entries 0–255) starts empty.
+        let new_pml4_frame = crate::memory::pmm::alloc_frame()?;
+        let kernel_root = self.slots[0].root;
+
+        // Copy the kernel's PML4 entries into the new table.
+        unsafe {
+            let kernel_pml4 = crate::memory::page_table::walker::table_from_phys(
+                kernel_root.phys_addr(),
+            );
+            let new_pml4 = crate::memory::page_table::walker::table_from_phys(
+                new_pml4_frame.start_address(),
+            );
+            // Only copy kernel-half entries (indices 256..512).
+            // User-half entries (0..256) remain zeroed.
+            for i in 256..512 {
+                new_pml4.entries[i] = kernel_pml4.entries[i];
+            }
+        }
+
+        let root = PagingRoot::new(new_pml4_frame.start_address());
         let id = AddressSpaceId::new(slot as u16);
-        let root = self.slots[0].root;
         self.slots[slot] = SpaceSlot {
             used: true,
             id,

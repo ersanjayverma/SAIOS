@@ -85,6 +85,9 @@ impl BitmapPhysicalMemoryManager {
     /// use that memory).  This avoids `TooManyFrames` errors caused by
     /// high-address MMIO / reserved regions that happen to sit above the
     /// tracked window.
+    ///
+    /// Uses word-level bitmap operations so that even multi-GB regions
+    /// complete in microseconds rather than iterating frame-by-frame.
     fn track_region(
         &mut self,
         start: u64,
@@ -106,16 +109,18 @@ impl BitmapPhysicalMemoryManager {
             self.highest_frame = last;
         }
 
-        for frame_number in first..last {
-            if free && !self.free.is_set(frame_number) {
-                self.free.set(frame_number).ok();
-                self.stats.free_bytes += PAGE_SIZE;
-            }
+        if first >= last {
+            return;
+        }
 
-            if reserve_only && !self.reserved.is_set(frame_number) {
-                self.reserved.set(frame_number).ok();
-                self.stats.reserved_bytes += PAGE_SIZE;
-            }
+        if free {
+            let newly_set = self.free.set_range(first, last);
+            self.stats.free_bytes += newly_set * PAGE_SIZE;
+        }
+
+        if reserve_only {
+            let newly_set = self.reserved.set_range(first, last);
+            self.stats.reserved_bytes += newly_set * PAGE_SIZE;
         }
     }
 }
@@ -126,12 +131,17 @@ impl PhysicalMemoryManager for BitmapPhysicalMemoryManager {
             return Err(MemoryError::AlreadyInitialized);
         }
 
+        crate::console::write_debug_str("[PMM] clearing bitmaps\n");
         self.free.clear_all();
         self.allocated.clear_all();
         self.reserved.clear_all();
         self.stats = PhysicalMemoryStats::empty();
+        crate::console::write_debug_str("[PMM] bitmaps cleared\n");
 
-        for entry in memory_map.entries() {
+        let entries = memory_map.entries();
+        crate::console::write_debug_str("[PMM] scanning memory map entries\n");
+
+        for (i, entry) in entries.iter().enumerate() {
             // Only RAM-type regions participate in frame tracking.
             // MMIO, ACPI, reserved, and other non-RAM regions are
             // skipped — they sit at high physical addresses that
@@ -157,8 +167,14 @@ impl PhysicalMemoryManager for BitmapPhysicalMemoryManager {
 
             // reserve_only = true for Loader / Seed (kernel, boot info, etc.)
             self.track_region(entry.base, entry.length, is_free, !is_free);
+
+            // Progress indicator every 16 RAM entries
+            if i % 16 == 0 {
+                crate::console::write_debug_str(".");
+            }
         }
 
+        crate::console::write_debug_str("\n[PMM] scan complete\n");
         self.initialized = true;
         Ok(())
     }
@@ -183,7 +199,11 @@ impl PhysicalMemoryManager for BitmapPhysicalMemoryManager {
                 self.allocated.set(frame_number).ok();
                 self.stats.free_bytes = self.stats.free_bytes.saturating_sub(PAGE_SIZE);
                 self.stats.allocated_frames += 1;
-                self.next_search = frame_number + 1;
+                // Wrap next_search so it never grows unboundedly across
+                // many allocations; the modulo in the search loop already
+                // handles wrapping, but keeping the value small avoids
+                // potential overflow on very long-running systems.
+                self.next_search = (frame_number + 1) % search_limit;
                 return Ok(PhysicalFrame::new(frame_number));
             }
         }
@@ -207,6 +227,10 @@ impl PhysicalMemoryManager for BitmapPhysicalMemoryManager {
     }
 
     fn reserve(&mut self, start: PhysAddr, size: usize) -> MemoryResult<()> {
+        if !self.initialized {
+            return Err(MemoryError::NotInitialized);
+        }
+
         if !start.is_page_aligned() {
             return Err(MemoryError::AddressMisaligned);
         }

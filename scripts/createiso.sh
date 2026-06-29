@@ -10,7 +10,7 @@ BOOTLOADER="$ROOT/boot/uefi/efi_main/target/x86_64-unknown-uefi/release/efi_main
 rm -f "$EFI_IMG"
 rm -f "$ISO_OUT"
 rm -f "$ISO_DIR/efiboot.img"
-rm -f "/mnt/c/Users/Black/VirtualBox VMs/SAIOS/SAIOS.nvram"
+#rm -f "/mnt/c/Users/Black/VirtualBox VMs/SAIOS/SAIOS.nvram"
 #
 # Create 16MB FAT EFI image
 #

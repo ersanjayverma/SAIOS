@@ -113,9 +113,12 @@ impl BootstrapHeapAllocator {
     fn find_record(&self, ptr: *mut u8) -> Option<usize> {
         let base = self.arena.as_ptr() as usize;
         let target = ptr as usize;
+        // Only match ACTIVE records — a freed record may still have a
+        // non-zero `size` and `offset`, which would cause a false match
+        // and lead to a double-free or use-after-free.
         self.allocations
             .iter()
-            .position(|entry| base + entry.offset == target && (entry.active || entry.size != 0))
+            .position(|entry| entry.active && base + entry.offset == target)
     }
 
     fn reserve_record(&mut self, record: AllocationRecord) -> Option<usize> {
@@ -144,7 +147,13 @@ impl BootstrapHeapAllocator {
         let offset = if let Some(recycled) = self.slabs[class_index].take_recycled() {
             recycled
         } else {
-            let next = self.slabs[class_index].next_bump();
+            let next = match self.slabs[class_index].next_bump() {
+                Some(n) => n,
+                None => {
+                    self.stats.failed_allocations += 1;
+                    return ptr::null_mut();
+                }
+            };
             if next + block_size > self.small_region_limit {
                 self.stats.failed_allocations += 1;
                 return ptr::null_mut();
@@ -250,6 +259,9 @@ impl HeapAllocator for BootstrapHeapAllocator {
         }
 
         record.active = false;
+        // Zero out size so reserve_record() can reuse this slot.
+        // reserve_record() requires entry.size == 0 to consider a slot free.
+        record.size = 0;
         self.stats.free_bytes = self.stats.total_bytes.saturating_sub(self.stats.used_bytes);
         self.stats.active_allocations = self.stats.active_allocations.saturating_sub(1);
         Ok(())

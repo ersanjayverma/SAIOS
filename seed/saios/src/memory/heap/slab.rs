@@ -34,9 +34,9 @@ impl SlabCache {
         Some(self.recycled[self.recycled_count])
     }
 
-    pub fn next_bump(&mut self) -> usize {
+    pub fn next_bump(&mut self) -> Option<usize> {
         let offset = self.bump_offset;
-        self.bump_offset += self.block_size;
-        offset
+        self.bump_offset = self.bump_offset.checked_add(self.block_size)?;
+        Some(offset)
     }
 }

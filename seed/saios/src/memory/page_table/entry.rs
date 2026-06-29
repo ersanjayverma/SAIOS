@@ -1,4 +1,4 @@
-use crate::memory::constants::{FLAG_MASK, PAGE_SIZE};
+use crate::memory::constants::FLAG_MASK;
 use crate::memory::types::PhysAddr;
 use crate::memory::vmm::flags::PageFlags;
 #[derive(Debug, Copy, Clone)]
@@ -41,8 +41,11 @@ impl PageTableEntry {
     }
 
     pub fn set_frame(&mut self, frame: PhysAddr) {
-        self.value &= !0x000f_ffff_ffff_f000;
-        self.value |= frame.align_down(PAGE_SIZE).as_u64();
+        // Clear the physical address field (bits 12..51) while preserving
+        // flags in bits 0..11 and 52..63.
+        const ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
+        self.value &= !ADDR_MASK;
+        self.value |= frame.as_u64() & ADDR_MASK;
     }
 
     pub fn set_flags(&mut self, flags: PageFlags) {

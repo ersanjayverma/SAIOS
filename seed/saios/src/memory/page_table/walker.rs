@@ -110,12 +110,16 @@ fn walk_internal(
     let pt_phys = pd_entry.frame();
     let pt_table = unsafe { table_from_frame(PhysicalFrame::containing(pt_phys)) };
     let pt_entry = pt_table.entry_mut(parts.pt);
+
+    // In Allocate mode we ensure intermediate tables exist, but we do NOT
+    // allocate a physical frame for the leaf PTE — the caller (VMM mapper)
+    // is responsible for setting the target physical address.  We only
+    // mark the PTE present so the walk succeeds; the caller will overwrite
+    // the frame address and flags.
     if !pt_entry.present() && mode == WalkMode::Allocate {
-        let new_frame_phys = crate::memory::pmm::alloc_frame()?;
-        unsafe {
-            core::ptr::write_bytes(table_from_frame(new_frame_phys), 0, 1);
-        }
-        pt_entry.set_frame(new_frame_phys.start_address());
+        // Pre-initialise the leaf PTE as present+writable so the caller
+        // can immediately write the real frame address.  The caller MUST
+        // call set_frame() + set_flags() afterwards.
         pt_entry.set_present(true);
         pt_entry.set_writable(true);
     }
@@ -137,8 +141,31 @@ fn walk_internal(
 }
 unsafe fn table_from_frame(frame: PhysicalFrame) -> &'static mut PageTable {
     let phys_addr = frame.start_address();
+    unsafe { table_from_phys(phys_addr) }
+}
+
+/// Convert a physical address to a mutable reference to a [`PageTable`]
+/// by adding the kernel-space offset.
+///
+/// # Safety
+///
+/// The physical address must point to a valid, page-aligned page table
+/// that is mapped in the kernel's higher-half virtual address space.
+pub unsafe fn table_from_phys(phys_addr: PhysAddr) -> &'static mut PageTable {
     let virt_addr = phys_to_virt(phys_addr);
     let table = virt_addr.cast::<PageTable>();
-
     unsafe { &mut *table }
+}
+
+/// Convert a physical address to a mutable reference to a [`PageTable`]
+/// using **identity mapping** (physical == virtual).
+///
+/// # Safety
+///
+/// The physical address must point to a valid, page-aligned page table
+/// that is identity-mapped.  This is only safe during early boot before
+/// higher-half mappings are established, or when the caller has
+/// guaranteed identity mappings for the target address.
+pub unsafe fn table_from_phys_identity(phys_addr: PhysAddr) -> &'static mut PageTable {
+    unsafe { &mut *(phys_addr.as_u64() as *mut PageTable) }
 }

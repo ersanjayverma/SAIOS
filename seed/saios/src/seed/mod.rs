@@ -12,7 +12,7 @@ use crate::graphics::{Color, Point};
 use crate::memory;
 use crate::rrod;
 use crate::timer::TimerManager;
-const SAIOS_BLUE: Color = Color::rgb(7, 32, 70);
+pub const SAIOS_BLUE : Color = Color::rgb(7, 32, 70);
 
 #[unsafe(no_mangle)]
 extern "C" fn seed_exception_from_stack(stack: *const u64, vector: u32, has_error_code: u32) -> ! {
