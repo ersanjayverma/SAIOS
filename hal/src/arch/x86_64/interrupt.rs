@@ -1,33 +1,52 @@
 use core::arch::asm;
+
+#[inline(always)]
 pub fn enable() {
     unsafe {
-        asm!("sti", options(nomem, nostack));
+        asm!("sti", options(nomem, nostack, preserves_flags));
     }
 }
 
+#[inline(always)]
 pub fn disable() {
     unsafe {
-        asm!("cli", options(nomem, nostack));
+        asm!("cli", options(nomem, nostack, preserves_flags));
     }
 }
 
-pub fn enabled() -> bool {
-    let flags: u64;
+#[inline(always)]
+pub fn are_enabled() -> bool {
+    let rflags: u64;
+
     unsafe {
-        asm!("pushf", out("rax") flags, options(nomem, nostack));
+        asm!(
+            "pushfq",
+            "pop {}",
+            out(reg) rflags,
+            options(nomem, preserves_flags),
+        );
     }
-    (flags & (1 << 9)) != 0
+
+    (rflags & (1 << 9)) != 0
 }
 
-pub fn without_interrupts<F, R>(f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    let was_enabled = enabled();
-    disable();
-    let result = f();
-    if was_enabled {
+pub fn without_interrupts<F: FnOnce()>(f: F) {
+    let enabled = are_enabled();
+
+    if enabled {
+        disable();
+    }
+
+    f();
+
+    if enabled {
         enable();
     }
-    result
+}
+
+#[inline(always)]
+pub fn int3() {
+    unsafe {
+        asm!("int3", options(nomem, nostack));
+    }
 }
