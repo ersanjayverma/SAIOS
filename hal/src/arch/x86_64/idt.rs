@@ -2,8 +2,7 @@ use core::{arch::asm, mem::size_of};
 
 use crate::arch::x86_64::sync::StaticCell;
 
-static IDT: StaticCell<InterruptDescriptorTable> =
-    StaticCell::new(InterruptDescriptorTable::new());
+static IDT: StaticCell<InterruptDescriptorTable> = StaticCell::new(InterruptDescriptorTable::new());
 
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
@@ -25,7 +24,7 @@ pub struct IdtEntry {
 }
 
 impl IdtEntry {
-     pub const fn missing() -> Self {
+    pub const fn missing() -> Self {
         Self {
             offset_low: 0,
             selector: 0,

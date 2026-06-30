@@ -16,6 +16,6 @@ pub mod pit;
 pub mod platform;
 pub mod rtc;
 pub mod serial;
+pub mod sync;
 pub mod tss;
 pub mod volatile;
-pub mod sync;

@@ -5,11 +5,7 @@
 
 use core::fmt::{self, Write};
 
-use super::serial::{
-    SerialConfig,
-    SerialHal,
-    SerialResult,
-};
+use super::serial::{SerialConfig, SerialHal, SerialResult};
 
 // ── Serial port singleton ─────────────────────────────────────────
 

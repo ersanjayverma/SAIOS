@@ -1,6 +1,6 @@
-use core::{arch::asm, mem::size_of};
 use crate::arch::x86_64::sync::StaticCell;
 use crate::arch::x86_64::tss::{self, TaskStateSegment};
+use core::{arch::asm, mem::size_of};
 
 /// Segment selectors.
 pub const KERNEL_CODE: SegmentSelector = SegmentSelector::new(1, 0);
@@ -12,8 +12,7 @@ pub const USER_DATA: SegmentSelector = SegmentSelector::new(4, 3);
 pub const TSS_SELECTOR: SegmentSelector = SegmentSelector::new(5, 0);
 
 /// Global GDT storage.
-static GDT: StaticCell<GlobalDescriptorTable> =
-    StaticCell::new(GlobalDescriptorTable::new());
+static GDT: StaticCell<GlobalDescriptorTable> = StaticCell::new(GlobalDescriptorTable::new());
 
 #[repr(C, packed)]
 #[derive(Copy, Clone)]

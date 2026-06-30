@@ -9,8 +9,7 @@ pub struct TaskStateSegment {
     pub reserved4: u16,
     pub io_map_base: u16,
 }
-static TSS: StaticCell<TaskStateSegment> =
-    StaticCell::new(TaskStateSegment::new());
+static TSS: StaticCell<TaskStateSegment> = StaticCell::new(TaskStateSegment::new());
 impl TaskStateSegment {
     pub const fn new() -> Self {
         Self {
@@ -26,7 +25,7 @@ impl TaskStateSegment {
 }
 
 pub fn instance() -> *const TaskStateSegment {
-    TSS.get() as *const TaskStateSegment  
+    TSS.get() as *const TaskStateSegment
 }
 
 pub fn instance_mut() -> *mut TaskStateSegment {

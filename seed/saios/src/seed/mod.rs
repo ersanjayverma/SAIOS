@@ -1,5 +1,5 @@
-use hal::println;
 use efi_main::SaiosBootInfo;
+use hal::println;
 
 pub struct Seed {
     boot_info: *const SaiosBootInfo,
