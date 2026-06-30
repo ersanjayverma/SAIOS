@@ -15,7 +15,7 @@ use uefi::*;
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
-    let mut boot_info = efi_main::initialize_boot_info();
+    let boot_info = efi_main::initialize_boot_info();
 
     let mut fb = efi_main::ui::Framebuffer {
         info: boot_info.framebuffer.clone(),
