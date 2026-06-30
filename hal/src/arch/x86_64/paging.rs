@@ -2,11 +2,9 @@
 //!
 //! Full implementation supporting 4 KiB, 2 MiB, and 1 GiB pages,
 //! recursive page-table mapping, NX/WP control, and TLB shootdown.
-// NEED TO REVIEW NAMUALY ONCE MORE
+
 use core::arch::asm;
 use core::ops::{Index, IndexMut};
-
-use crate::println;
 
 // ── Constants ─────────────────────────────────────────────────────
 
@@ -17,6 +15,7 @@ pub const HUGE_1GIB: u64 = 1024 * 1024 * 1024;
 
 /// Recursive page-table index — PML4[511] points to the PML4 itself.
 pub const RECURSIVE_INDEX: usize = 511;
+
 // ── Page-table entry flags ────────────────────────────────────────
 
 pub const FLAG_PRESENT: u64 = 1 << 0;
@@ -29,15 +28,14 @@ pub const FLAG_DIRTY: u64 = 1 << 6;
 pub const FLAG_HUGE: u64 = 1 << 7;
 pub const FLAG_GLOBAL: u64 = 1 << 8;
 pub const FLAG_NX: u64 = 1 << 63;
+
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 // ── Page-table entry ──────────────────────────────────────────────
 
-
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Entry(u64);
-
 
 impl Entry {
     pub const fn new() -> Self {
@@ -140,11 +138,6 @@ impl Entry {
         self.set_huge(true);
         self.set_nx(nx);
     }
-    pub fn atomic_write(&mut self, val: u64) {
-        unsafe {
-            core::ptr::write_volatile(&mut self.0, val);
-        }
-    }
 }
 
 impl core::fmt::Debug for Entry {
@@ -169,7 +162,6 @@ pub struct Table {
 }
 
 impl Table {
-    
     pub const fn new() -> Self {
         Self { entries: [Entry::new(); ENTRY_COUNT] }
     }
@@ -178,11 +170,6 @@ impl Table {
         self.entries.fill(Entry::new());
     }
 
-    /// Returns the physical address of this table.
-    ///
-    /// During early bootstrap the kernel is identity-mapped
-    /// (virtual == physical), so this is just `self as *const Self as u64`.
-    /// After we move to a higher-half layout, subtract KERNEL_VIRT_BASE.
     pub fn as_phys_addr(&self) -> u64 {
         self as *const Self as u64
     }
@@ -223,19 +210,12 @@ impl VirtAddr {
 
     /// Build a virtual address from its components.
     pub const fn to_va(pml4: usize, pdp: usize, pd: usize, pt: usize, offset: u16) -> u64 {
-    let mut va = ((pml4 as u64) & 0x1FF) << 39
-        | ((pdp as u64) & 0x1FF) << 30
-        | ((pd as u64) & 0x1FF) << 21
-        | ((pt as u64) & 0x1FF) << 12
-        | ((offset as u64) & 0xFFF);
-    
-    // If bit 47 is set, sign-extend bits 48..63 to 1
-    if (va & (1 << 47)) != 0 {
-        va |= 0xFFFF_0000_0000_0000;
+        ((pml4 as u64) << 39)
+            | ((pdp as u64) << 30)
+            | ((pd as u64) << 21)
+            | ((pt as u64) << 12)
+            | (offset as u64)
     }
-    va
-}
-
 }
 
 // ── Recursive mapping helpers ─────────────────────────────────────
@@ -279,52 +259,64 @@ pub unsafe fn walk(
 ) -> Option<(*mut Entry, *mut Entry, *mut Entry, *mut Entry)> {
     let v = VirtAddr::new(va);
 
-    // 1. PML4 Entry
+    // PML4 entry
     let pml4_ptr = pml4_virt_addr() as *mut Table;
     let pml4 = unsafe { &mut *pml4_ptr };
     let pml4e = &mut pml4[v.pml4];
 
     if !pml4e.is_present() {
         let new_table = alloc_table();
-        // Convert the raw pointer check cleanly into an Option bubble
-        if new_table.is_null() { return None; }
+        if new_table.is_null() {
+            return None;
+        }
         unsafe { (*new_table).clear(); }
         pml4e.set_page(new_table as u64, true, false, false);
     }
-    // PML4 entries cannot be huge pages (huge page feature starts at PDPT level)
 
-    // 2. PDP Entry (for 1 GiB huge pages)
+    // PDP entry
     let pdp_ptr = pdp_virt_addr(v.pml4) as *mut Table;
     let pdp = unsafe { &mut *pdp_ptr };
     let pdpe = &mut pdp[v.pdp];
 
+    if pdpe.is_huge() {
+        // 1 GiB page — no further levels
+        return Some((pml4e as *mut Entry, pdpe as *mut Entry, core::ptr::null_mut(), core::ptr::null_mut()));
+    }
+
     if !pdpe.is_present() {
         let new_table = alloc_table();
-        if new_table.is_null() { return None; }
+        if new_table.is_null() {
+            return None;
+        }
         unsafe { (*new_table).clear(); }
         pdpe.set_page(new_table as u64, true, false, false);
     }
-    if pdpe.is_huge() { return Some((pml4e, pdpe, core::ptr::null_mut(), core::ptr::null_mut())); }
 
-    // 3. PD Entry (for 2 MiB huge pages)
+    // PD entry
     let pd_ptr = pd_virt_addr(v.pml4, v.pdp) as *mut Table;
     let pd = unsafe { &mut *pd_ptr };
     let pde = &mut pd[v.pd];
 
+    if pde.is_huge() {
+        // 2 MiB page — no page-table level
+        return Some((pml4e as *mut Entry, pdpe as *mut Entry, pde as *mut Entry, core::ptr::null_mut()));
+    }
+
     if !pde.is_present() {
         let new_table = alloc_table();
-        if new_table.is_null() { return None; }
+        if new_table.is_null() {
+            return None;
+        }
         unsafe { (*new_table).clear(); }
         pde.set_page(new_table as u64, true, false, false);
     }
-    if pde.is_huge() { return Some((pml4e, pdpe, pde, core::ptr::null_mut())); }
 
-    // 4. PT Entry
+    // PT entry
     let pt_ptr = pt_virt_addr(v.pml4, v.pdp, v.pd) as *mut Table;
     let pt = unsafe { &mut *pt_ptr };
     let pte = &mut pt[v.pt];
 
-    Some((pml4e, pdpe, pde, pte))
+    Some((pml4e as *mut Entry, pdpe as *mut Entry, pde as *mut Entry, pte as *mut Entry))
 }
 
 // ── Mapping functions ─────────────────────────────────────────────
@@ -501,14 +493,11 @@ pub fn read_cr3() -> u64 {
 pub fn enable_nx() {
     unsafe {
         asm!(
+            "mov ecx, 0xC0000080",
             "rdmsr",
-            "or eax, {nx_bit}",
+            "or eax, 1 << 11",
             "wrmsr",
-            in("ecx") 0xC000_0080u32,
-            nx_bit = const 1u32 << 11,
-            out("eax") _,
-            out("edx") _,
-            options(nostack, preserves_flags)
+            options(nostack),
         );
     }
 }
@@ -536,8 +525,8 @@ pub fn nx_supported() -> bool {
 /// The kernel's PML4 table, statically allocated.
 static mut KERNEL_PML4: Table = Table::new();
 
-/// Identity-map the first `size` bytes of physical memory using
-/// 2 MiB huge pages.  Sets up the recursive mapping at
+/// Identity-map the first `size` bytes of physical memory using the
+/// largest available page size.  Sets up the recursive mapping at
 /// PML4[RECURSIVE_INDEX].
 ///
 /// During bootstrap we access child page tables by their **physical**
@@ -549,74 +538,87 @@ static mut KERNEL_PML4: Table = Table::new();
 ///
 /// Must be called once during early kernel init.  `size` must be a
 /// multiple of 2 MiB.
-/// Identity-map the first `size` bytes of physical memory using 2 MiB huge pages.
-/// Sets up the recursive mapping at PML4[RECURSIVE_INDEX].
-///
-/// `physical_offset` must be the value subtracted from a kernel virtual address 
-/// to get its corresponding physical address (e.g., `virt_addr - physical_offset`).
-///
-/// # Safety
-///
-/// Must be called once during early kernel init. `size` must be a multiple of 2 MiB.
-pub unsafe fn identity_map(size: u64, physical_offset: u64) -> u64 {
-    // ── Calculate how many tables we need ─────────────────────────
-    let total_2mib_pages = size / HUGE_2MIB;
-    let pds_needed = (total_2mib_pages + 511) / 512;
-    let pdps_needed = (pds_needed + 511) / 512;
-    let total_from_pool = pdps_needed + pds_needed;
-
-    if total_from_pool > STATIC_POOL_SIZE as u64 {
-       println!("Not enough static tables for identity mapping");
-        return 0; // Not enough static tables configuration error
-    }
-
-    // ── Build the page tables ────────────────────────────────────
+pub unsafe fn identity_map(size: u64) -> u64 {
     let pml4 = unsafe { &mut *core::ptr::addr_of_mut!(KERNEL_PML4) };
     pml4.clear();
-    
+
+    let mut remaining = size;
     let mut phys = 0u64;
-    let mut pds_left = pds_needed;
-    let mut pages_left = total_2mib_pages;
+    let mut virt = 0u64;
 
-    for pml4_idx in 0..pdps_needed as usize {
-        let pdp_ptr = alloc_static_table();
-        if pdp_ptr.is_null() { return 0; }
-        let pdp = unsafe { &mut *pdp_ptr };
-        pdp.clear();
+    while remaining > 0 {
+        let v = VirtAddr::new(virt);
 
-        // Convert virtual table pointer to physical address
-        let pdp_phys = (pdp_ptr as u64) - physical_offset;
-        pml4[pml4_idx].set_page(pdp_phys, true, false, false);
-
-        let pds_in_this_pdp = pds_left.min(512);
-        pds_left -= pds_in_this_pdp;
-
-        for pdp_idx in 0..pds_in_this_pdp as usize {
-            let pd_ptr = alloc_static_table();
-            if pd_ptr.is_null() { return 0; }
-            let pd = unsafe { &mut *pd_ptr };
-            pd.clear();
-
-            // Convert virtual table pointer to physical address
-            let pd_phys = (pd_ptr as u64) - physical_offset;
-            pdp[pdp_idx].set_page(pd_phys, true, false, false);
-
-            let pages_in_this_pd = pages_left.min(512);
-            pages_left -= pages_in_this_pd;
-
-            for i in 0..pages_in_this_pd as usize {
-                pd[i].set_huge_2mib(phys, true, false, false);
-                phys += HUGE_2MIB;
+        // ── PML4 entry ──────────────────────────────────────────
+        if !pml4[v.pml4].is_present() {
+            let pdp = alloc_static_table();
+            if pdp.is_null() {
+                break; // out of static tables
             }
+            unsafe { (*pdp).clear(); }
+            pml4[v.pml4].set_page(pdp as u64, true, false, false);
+        }
+
+        // Access PDP by its physical address (identity-mapped by UEFI).
+        let pdp_phys = pml4[v.pml4].address();
+        let pdp = unsafe { &mut *(pdp_phys as *mut Table) };
+
+        if remaining >= HUGE_1GIB && (phys & (HUGE_1GIB - 1)) == 0 && (virt & (HUGE_1GIB - 1)) == 0 {
+            // 1 GiB page.
+            pdp[v.pdp].set_huge_1gib(phys, true, false, false);
+            phys += HUGE_1GIB;
+            virt += HUGE_1GIB;
+            remaining -= HUGE_1GIB;
+        } else if remaining >= HUGE_2MIB {
+            // ── PD entry ────────────────────────────────────────
+            if !pdp[v.pdp].is_present() {
+                let pd = alloc_static_table();
+                if pd.is_null() { break; }
+                unsafe { (*pd).clear(); }
+                pdp[v.pdp].set_page(pd as u64, true, false, false);
+            }
+
+            let pd_phys = pdp[v.pdp].address();
+            let pd = unsafe { &mut *(pd_phys as *mut Table) };
+
+            // 2 MiB page.
+            pd[v.pd].set_huge_2mib(phys, true, false, false);
+            phys += HUGE_2MIB;
+            virt += HUGE_2MIB;
+            remaining -= HUGE_2MIB;
+        } else {
+            // ── PT entry (4 KiB) ────────────────────────────────
+            if !pdp[v.pdp].is_present() {
+                let pd = alloc_static_table();
+                if pd.is_null() { break; }
+                unsafe { (*pd).clear(); }
+                pdp[v.pdp].set_page(pd as u64, true, false, false);
+            }
+
+            let pd_phys = pdp[v.pdp].address();
+            let pd = unsafe { &mut *(pd_phys as *mut Table) };
+
+            if !pd[v.pd].is_present() {
+                let pt = alloc_static_table();
+                if pt.is_null() { break; }
+                unsafe { (*pt).clear(); }
+                pd[v.pd].set_page(pt as u64, true, false, false);
+            }
+
+            let pt_phys = pd[v.pd].address();
+            let pt = unsafe { &mut *(pt_phys as *mut Table) };
+            pt[v.pt].set_page(phys, true, false, false);
+            phys += PAGE_SIZE;
+            virt += PAGE_SIZE;
+            remaining -= PAGE_SIZE;
         }
     }
 
     // Recursive mapping: PML4[511] → PML4 itself.
-    let pml4_virt = pml4 as *const Table as u64;
-    let pml4_phys = pml4_virt - physical_offset;
+    let pml4_phys = pml4.as_phys_addr();
     pml4[RECURSIVE_INDEX].set_page(pml4_phys, true, false, false);
 
-    pml4_phys
+    pml4.as_phys_addr()
 }
 
 // ── Static page-table pool (bootstrap only) ───────────────────────
@@ -631,20 +633,18 @@ static mut STATIC_TABLES: [Table; STATIC_POOL_SIZE] = [
     Table::new(), Table::new(), Table::new(), Table::new(),
 ];
 
-/// Simple bootstrap allocator — returns the next free static table.
-/// Not thread-safe; only for early kernel init.
-static mut STATIC_NEXT: usize = 0;
+static STATIC_NEXT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
+/// Allocate a page table from the static bootstrap pool.
+/// Returns null when exhausted.
 fn alloc_static_table() -> *mut Table {
-    let idx = unsafe {
-        let i = STATIC_NEXT;
-        if i >= STATIC_POOL_SIZE {
-            return core::ptr::null_mut();
-        }
-        STATIC_NEXT = i + 1;
-        i
-    };
-    unsafe { core::ptr::addr_of_mut!(STATIC_TABLES[idx]) }
+    let idx = STATIC_NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if idx < STATIC_POOL_SIZE {
+        unsafe { core::ptr::addr_of_mut!(STATIC_TABLES[idx]) }
+    } else {
+        core::ptr::null_mut()
+    }
 }
 
 /// Return the kernel PML4 physical address (for use after `identity_map`).
