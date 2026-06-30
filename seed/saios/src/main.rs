@@ -1,10 +1,10 @@
 #![no_std]
 #![no_main]
 
-pub mod seed;
 pub mod driver;
-use seed::Seed;
+pub mod seed;
 use efi_main::SaiosBootInfo;
+use seed::Seed;
 #[unsafe(no_mangle)]
 /// # Safety
 ///
@@ -19,13 +19,13 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-        match info.location() {
-            Some(loc) => {
-                println!("Panic at {}:{}", loc.file(), loc.line());
-            }
-            None => {
-                println!("Panic");
-            }
+    match info.location() {
+        Some(loc) => {
+            println!("Panic at {}:{}", loc.file(), loc.line());
         }
+        None => {
+            println!("Panic");
+        }
+    }
     loop {}
 }
