@@ -8,7 +8,7 @@ efi_main = { path = "../../boot/uefi/efi_main" }
 hal = {path = "../../hal" }
 
 [profile.dev]
-panic = "unwind"
+panic = "abort"
 
 [profile.release]
-panic = "unwind"
+panic = "abort"
