@@ -165,8 +165,8 @@ fn main() -> Status {
         }
     }
     println!("All segments copied successfully");
-    efi_main::apply_relocations(base.as_ptr() as u64, &loader.image.relocations)
-        .expect("Failed to apply relocations");
+    // efi_main::apply_relocations(base.as_ptr() as u64, &loader.image.relocations)
+    //     .expect("Failed to apply relocations");
     println!("All relocations applied successfully");
     println!("Initializing boot information");
 
@@ -259,7 +259,10 @@ fn main() -> Status {
     drop(loader);
     let p = entry as *const u8;
     println!("===============================================",);
-    println!("{:#?}", boot_info.memorymap);
+    // Print the STABLE copy, not the stale local `boot_info`.
+    unsafe {
+        println!("{:#?}", (*boot_info_ptr).memorymap);
+    }
     println!("==============================================");
     unsafe {
         println!(

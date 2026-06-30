@@ -1,16 +1,8 @@
-#[macro_use]
-pub mod macros;
-mod serial;
-mod sink;
-
-pub use serial::SerialConsole;
-pub use sink::ConsoleSink;
-
-/// Re-export the singleton-backed `_print` so macros resolve to it.
-pub use crate::driver::serial::_print;
+/// Re-export the HAL's console module (which provides println support).
+pub use hal::arch::x86_64::console::*;
 
 /// One-time console initialisation.  Must be called before the first
 /// `println!`.
 pub fn init() {
-    crate::driver::serial::init_serial();
+    hal::arch::x86_64::console::init_serial();
 }

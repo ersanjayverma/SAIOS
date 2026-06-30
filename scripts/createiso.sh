@@ -14,7 +14,7 @@ rm -f "$ISO_DIR/efiboot.img"
 #
 # Create 16MB FAT EFI image
 #
-dd if=/dev/zero of="$EFI_IMG" bs=1M count=16
+dd if=/dev/zero of="$EFI_IMG" bs=1M count=64
 
 mkfs.fat "$EFI_IMG"
 

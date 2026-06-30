@@ -1,4 +1,5 @@
 pub mod apic;
+pub mod console;
 pub mod cpu;
 pub mod cpuid;
 pub mod gdt;

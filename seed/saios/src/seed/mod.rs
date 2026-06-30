@@ -1,4 +1,4 @@
-use crate::println;
+use hal::println;
 use efi_main::SaiosBootInfo;
 
 pub struct Seed {
@@ -12,12 +12,9 @@ impl Seed {
 
     pub fn run(&self) -> ! {
         println!("SAIOS kernel started");
-        println!("Serial initialized");
-
         // Verify the boot_info pointer is valid by reading magic.
         // SAFETY: pointer is valid per the boot contract.
         let bi = unsafe { &*self.boot_info };
-
         // Use simple printing — complex format_args! pulls in ~74 KB
         // of core::fmt code that may not work yet.
         if bi.magic == efi_main::SAIOS_BOOT_MAGIC {

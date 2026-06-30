@@ -1,52 +1,53 @@
 #![no_std]
 #![no_main]
 
+#[macro_use]
 pub mod driver;
 pub mod seed;
-
+use hal::println;
 use efi_main::SaiosBootInfo;
-use hal::arch::x86_64::{gdt, idt, interrupt};
+use hal::arch::x86_64::{gdt, idt, interrupt, paging};
 use seed::Seed;
 
-#[unsafe(no_mangle)]
-/// # Safety
-///
-/// `boot_info` must be a valid pointer supplied by the SAIOS bootloader entry
-/// contract and remain valid throughout early kernel initialization.
-///
-/// The caller (UEFI bootloader) must have already exited boot services.
-/// The bootloader provides a valid 64 KiB stack — we keep using it until
-/// the kernel has its own memory manager.
-pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
-    // ── 1. Disable interrupts immediately ──────────────────────────
-    interrupt::disable();
+const INITIAL_MAP_SIZE: u64 = 1024 * 1024 * 1024; // 1 GiB
+const KERNEL_PHYSICAL_OFFSET: u64 = 0; // identity-mapped: virt == phys
 
-    // ── 2. Install our own GDT, IDT, and TSS ─────────────────────
+#[unsafe(no_mangle)]
+pub unsafe extern "win64" fn _start(boot_info: *const SaiosBootInfo) -> ! {
+    interrupt::disable();
+    driver::console::init();
     gdt::init();
     idt::init();
+  
+    println!("start");
+    // Set up paging: identity-map first 1 GiB, enable NX/WP.
+    if paging::nx_supported() {
+        paging::enable_nx();
+    }
+   
+    println!("Calling identity_map...");
+    let pml4_phys = unsafe { paging::identity_map(INITIAL_MAP_SIZE, KERNEL_PHYSICAL_OFFSET) };
+    println!("identity_map returned: pml4_phys = {:#x}", pml4_phys);
+    if pml4_phys == 0 {
+        println!("ERROR: identity_map returned 0");
+        loop {
+            hal::arch::x86_64::cpu::hlt();
+        }
+    }
+    println!("Paging initialized");
+    unsafe { paging::load_cr3(pml4_phys); }
+    paging::enable_write_protect();
 
-    // ── 3. Initialize the serial console singleton ────────────────
-    driver::console::init();
+    println!("Paging OK");
 
-    // ── 4. Hand off to the Seed subsystem ─────────────────────────
     let seed = Seed::init(boot_info);
     seed.run()
 }
 
 #[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
+fn panic(_info: &core::panic::PanicInfo) -> ! {
     interrupt::disable();
-
-    if let Some(loc) = info.location() {
-        println!("KERNEL PANIC at {}:{}", loc.file(), loc.line());
-    } else {
-        println!("KERNEL PANIC");
-    }
-
-    if let Some(msg) = info.message().as_str() {
-        println!("  {}", msg);
-    }
-
+    println!("PANIC");
     loop {
         hal::arch::x86_64::cpu::hlt();
     }
