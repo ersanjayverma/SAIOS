@@ -1,20 +1,46 @@
 use core::cell::Cell;
+use bitflags::bitflags;
 
 use hal::arch::x86_64::io::inb;
+
+bitflags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct KeyModifiers: u8 {
+        const SHIFT = 0b0000_0001;
+        const CTRL  = 0b0000_0010;
+        const ALT   = 0b0000_0100;
+    }
+}
 
 pub enum KeyEvent {
     Character(char),
     Enter,
     Backspace,
     Delete,
+    Insert,
     Escape,
     Tab,
     Home,
     End,
+    PageUp,
+    PageDown,
     ArrowUp,
     ArrowDown,
     ArrowLeft,
     ArrowRight,
+    ShiftArrowUp,
+    ShiftArrowDown,
+    ShiftArrowLeft,
+    ShiftArrowRight,
+    CtrlArrowUp,
+    CtrlArrowDown,
+    CtrlArrowLeft,
+    CtrlArrowRight,
+    CtrlShiftArrowUp,
+    CtrlShiftArrowDown,
+    CtrlShiftArrowLeft,
+    CtrlShiftArrowRight,
+    FKey(u8),
     CtrlA,
     CtrlC,
     CtrlD,
@@ -120,6 +146,39 @@ impl KeyboardDriver {
         }
     }
 
+    fn modifiers(&self) -> KeyModifiers {
+        let mut mods = KeyModifiers::empty();
+        if self.shift_down.get() {
+            mods |= KeyModifiers::SHIFT;
+        }
+        if self.ctrl_down.get() {
+            mods |= KeyModifiers::CTRL;
+        }
+        mods
+    }
+
+    fn apply_arrow_modifiers(&self, base: KeyEvent) -> KeyEvent {
+        let mods = self.modifiers();
+        let shift = mods.contains(KeyModifiers::SHIFT);
+        let ctrl = mods.contains(KeyModifiers::CTRL);
+
+        match base {
+            KeyEvent::ArrowUp if shift && ctrl => KeyEvent::CtrlShiftArrowUp,
+            KeyEvent::ArrowDown if shift && ctrl => KeyEvent::CtrlShiftArrowDown,
+            KeyEvent::ArrowLeft if shift && ctrl => KeyEvent::CtrlShiftArrowLeft,
+            KeyEvent::ArrowRight if shift && ctrl => KeyEvent::CtrlShiftArrowRight,
+            KeyEvent::ArrowUp if ctrl => KeyEvent::CtrlArrowUp,
+            KeyEvent::ArrowDown if ctrl => KeyEvent::CtrlArrowDown,
+            KeyEvent::ArrowLeft if ctrl => KeyEvent::CtrlArrowLeft,
+            KeyEvent::ArrowRight if ctrl => KeyEvent::CtrlArrowRight,
+            KeyEvent::ArrowUp if shift => KeyEvent::ShiftArrowUp,
+            KeyEvent::ArrowDown if shift => KeyEvent::ShiftArrowDown,
+            KeyEvent::ArrowLeft if shift => KeyEvent::ShiftArrowLeft,
+            KeyEvent::ArrowRight if shift => KeyEvent::ShiftArrowRight,
+            _ => base,
+        }
+    }
+
     pub fn poll_event(&self) -> Option<KeyEvent> {
         let scancode = self.ps2.read_scancode()?;
 
@@ -173,6 +232,18 @@ impl KeyboardDriver {
                 0x0E => Some(KeyEvent::Backspace),
                 0x0F => Some(KeyEvent::Tab),
                 0x1C => Some(KeyEvent::Enter),
+                0x3B => Some(KeyEvent::FKey(1)),
+                0x3C => Some(KeyEvent::FKey(2)),
+                0x3D => Some(KeyEvent::FKey(3)),
+                0x3E => Some(KeyEvent::FKey(4)),
+                0x3F => Some(KeyEvent::FKey(5)),
+                0x40 => Some(KeyEvent::FKey(6)),
+                0x41 => Some(KeyEvent::FKey(7)),
+                0x42 => Some(KeyEvent::FKey(8)),
+                0x43 => Some(KeyEvent::FKey(9)),
+                0x44 => Some(KeyEvent::FKey(10)),
+                0x57 => Some(KeyEvent::FKey(11)),
+                0x58 => Some(KeyEvent::FKey(12)),
                 _ => self.decode_char(code).map(KeyEvent::Character),
             };
         }
@@ -183,11 +254,14 @@ impl KeyboardDriver {
 
         match code {
             0x47 => Some(KeyEvent::Home),
-            0x48 => Some(KeyEvent::ArrowUp),
-            0x4B => Some(KeyEvent::ArrowLeft),
-            0x4D => Some(KeyEvent::ArrowRight),
+            0x48 => Some(self.apply_arrow_modifiers(KeyEvent::ArrowUp)),
+            0x49 => Some(KeyEvent::PageUp),
+            0x4B => Some(self.apply_arrow_modifiers(KeyEvent::ArrowLeft)),
+            0x4D => Some(self.apply_arrow_modifiers(KeyEvent::ArrowRight)),
             0x4F => Some(KeyEvent::End),
-            0x50 => Some(KeyEvent::ArrowDown),
+            0x50 => Some(self.apply_arrow_modifiers(KeyEvent::ArrowDown)),
+            0x51 => Some(KeyEvent::PageDown),
+            0x52 => Some(KeyEvent::Insert),
             0x53 => Some(KeyEvent::Delete),
             _ => None,
         }

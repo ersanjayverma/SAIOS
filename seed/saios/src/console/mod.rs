@@ -1,8 +1,6 @@
 mod backend;
 mod cursor;
 mod framebuffer;
-mod font;
-mod glyph;
 mod input;
 mod keyboard;
 mod serial;
@@ -418,6 +416,7 @@ pub fn poll_input() -> Option<String<256>> {
             }
             None
         }
+        KeyEvent::Insert => None,
         KeyEvent::Home => {
             if unsafe { (*INPUT_BUFFER.get()).move_home() } {
                 for _ in 0..prev_cursor_cells {
@@ -431,6 +430,22 @@ pub fn poll_input() -> Option<String<256>> {
                 for _ in prev_cursor_cells..prev_len_cells {
                     move_cursor_right();
                 }
+            }
+            None
+        }
+        KeyEvent::PageUp => {
+            let line = unsafe { (*INPUT_BUFFER.get()).history_prev() };
+            if let Some(line) = line {
+                unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
+                redraw_line(prev_len_cells, prev_cursor_cells);
+            }
+            None
+        }
+        KeyEvent::PageDown => {
+            let line = unsafe { (*INPUT_BUFFER.get()).history_next() };
+            if let Some(line) = line {
+                unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
+                redraw_line(prev_len_cells, prev_cursor_cells);
             }
             None
         }
@@ -448,6 +463,70 @@ pub fn poll_input() -> Option<String<256>> {
                     move_cursor_right();
                 }
             }
+            None
+        }
+        KeyEvent::ShiftArrowLeft => {
+            if unsafe { (*INPUT_BUFFER.get()).move_left() } {
+                for _ in 0..prev_cursor_char_width {
+                    move_cursor_left();
+                }
+            }
+            None
+        }
+        KeyEvent::ShiftArrowRight => {
+            if unsafe { (*INPUT_BUFFER.get()).move_right() } {
+                for _ in 0..prev_right_char_width {
+                    move_cursor_right();
+                }
+            }
+            None
+        }
+        KeyEvent::ShiftArrowUp => {
+            let line = unsafe { (*INPUT_BUFFER.get()).history_prev() };
+            if let Some(line) = line {
+                unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
+                redraw_line(prev_len_cells, prev_cursor_cells);
+            }
+            None
+        }
+        KeyEvent::ShiftArrowDown => {
+            let line = unsafe { (*INPUT_BUFFER.get()).history_next() };
+            if let Some(line) = line {
+                unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
+                redraw_line(prev_len_cells, prev_cursor_cells);
+            }
+            None
+        }
+        KeyEvent::CtrlArrowLeft | KeyEvent::CtrlShiftArrowLeft => {
+            if unsafe { (*INPUT_BUFFER.get()).move_prev_word() } {
+                redraw_line(prev_len_cells, prev_cursor_cells);
+            }
+            None
+        }
+        KeyEvent::CtrlArrowRight | KeyEvent::CtrlShiftArrowRight => {
+            if unsafe { (*INPUT_BUFFER.get()).move_next_word() } {
+                redraw_line(prev_len_cells, prev_cursor_cells);
+            }
+            None
+        }
+        KeyEvent::CtrlArrowUp | KeyEvent::CtrlShiftArrowUp => {
+            let line = unsafe { (*INPUT_BUFFER.get()).history_prev() };
+            if let Some(line) = line {
+                unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
+                redraw_line(prev_len_cells, prev_cursor_cells);
+            }
+            None
+        }
+        KeyEvent::CtrlArrowDown | KeyEvent::CtrlShiftArrowDown => {
+            let line = unsafe { (*INPUT_BUFFER.get()).history_next() };
+            if let Some(line) = line {
+                unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
+                redraw_line(prev_len_cells, prev_cursor_cells);
+            }
+            None
+        }
+        KeyEvent::FKey(key) => {
+            let _ = key;
             None
         }
         KeyEvent::ArrowUp => {

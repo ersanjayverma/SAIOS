@@ -1,9 +1,9 @@
 use core::fmt;
-use arrayvec::ArrayVec;
+use smallvec::SmallVec;
 use utf8parse::{Parser, Receiver};
 
 use super::backend::ConsoleBackend;
-use super::keyboard::KeyEvent;
+use super::keyboard::{KeyEvent, KeyModifiers};
 use hal::arch::x86_64::io::inb;
 use hal::arch::x86_64::sync::StaticCell;
 
@@ -13,7 +13,7 @@ const COM1_LINE_STATUS: u16 = COM1_DATA + 5;
 enum EscState {
     None,
     Esc,
-    Csi(ArrayVec<u8, 8>),
+    Csi(SmallVec<[u8; 8]>),
     Ss3,
 }
 
@@ -87,8 +87,64 @@ fn poll_byte() -> Option<u8> {
     Some(inb(COM1_DATA))
 }
 
-fn csi_params_eq_dyn(params: &ArrayVec<u8, 8>, expected: &[u8]) -> bool {
+fn csi_params_eq_dyn(params: &SmallVec<[u8; 8]>, expected: &[u8]) -> bool {
     params.as_slice() == expected
+}
+
+fn parse_csi_modifier(params: &SmallVec<[u8; 8]>) -> KeyModifiers {
+    let bytes = params.as_slice();
+    let mut last_value: u8 = 0;
+    let mut current: u8 = 0;
+    let mut saw_digit = false;
+
+    for b in bytes {
+        if b.is_ascii_digit() {
+            saw_digit = true;
+            current = current.saturating_mul(10).saturating_add(*b - b'0');
+        } else if *b == b';' {
+            if saw_digit {
+                last_value = current;
+            }
+            current = 0;
+            saw_digit = false;
+        }
+    }
+
+    if saw_digit {
+        last_value = current;
+    }
+
+    let mut mods = KeyModifiers::empty();
+    match last_value {
+        2 => mods |= KeyModifiers::SHIFT,
+        5 => mods |= KeyModifiers::CTRL,
+        6 => {
+            mods |= KeyModifiers::CTRL;
+            mods |= KeyModifiers::SHIFT;
+        }
+        _ => {}
+    }
+    mods
+}
+
+fn apply_arrow_modifiers(base: KeyEvent, mods: KeyModifiers) -> KeyEvent {
+    let shift = mods.contains(KeyModifiers::SHIFT);
+    let ctrl = mods.contains(KeyModifiers::CTRL);
+    match base {
+        KeyEvent::ArrowUp if shift && ctrl => KeyEvent::CtrlShiftArrowUp,
+        KeyEvent::ArrowDown if shift && ctrl => KeyEvent::CtrlShiftArrowDown,
+        KeyEvent::ArrowLeft if shift && ctrl => KeyEvent::CtrlShiftArrowLeft,
+        KeyEvent::ArrowRight if shift && ctrl => KeyEvent::CtrlShiftArrowRight,
+        KeyEvent::ArrowUp if ctrl => KeyEvent::CtrlArrowUp,
+        KeyEvent::ArrowDown if ctrl => KeyEvent::CtrlArrowDown,
+        KeyEvent::ArrowLeft if ctrl => KeyEvent::CtrlArrowLeft,
+        KeyEvent::ArrowRight if ctrl => KeyEvent::CtrlArrowRight,
+        KeyEvent::ArrowUp if shift => KeyEvent::ShiftArrowUp,
+        KeyEvent::ArrowDown if shift => KeyEvent::ShiftArrowDown,
+        KeyEvent::ArrowLeft if shift => KeyEvent::ShiftArrowLeft,
+        KeyEvent::ArrowRight if shift => KeyEvent::ShiftArrowRight,
+        _ => base,
+    }
 }
 
 pub fn poll_input_event() -> Option<KeyEvent> {
@@ -105,7 +161,7 @@ pub fn poll_input_event() -> Option<KeyEvent> {
         }
         EscState::Esc => {
             if byte == b'[' {
-                *state = EscState::Csi(ArrayVec::new());
+                *state = EscState::Csi(SmallVec::new());
                 return None;
             }
 
@@ -126,40 +182,73 @@ pub fn poll_input_event() -> Option<KeyEvent> {
                 b'B' => Some(KeyEvent::ArrowDown),
                 b'C' => Some(KeyEvent::ArrowRight),
                 b'D' => Some(KeyEvent::ArrowLeft),
+                b'P' => Some(KeyEvent::FKey(1)),
+                b'Q' => Some(KeyEvent::FKey(2)),
+                b'R' => Some(KeyEvent::FKey(3)),
+                b'S' => Some(KeyEvent::FKey(4)),
                 _ => None,
             };
         }
         EscState::Csi(params) => {
-            if params.is_full() {
+            if params.len() >= 8 {
                 *state = EscState::None;
                 return None;
             }
 
-            if params.try_push(byte).is_err() {
-                *state = EscState::None;
-                return None;
-            }
+            params.push(byte);
 
             // Final CSI byte range per ANSI/VT sequences.
             if !(0x40..=0x7E).contains(&byte) {
                 return None;
             }
 
-            let mut param_bytes: ArrayVec<u8, 8> = ArrayVec::new();
+            let mut param_bytes: SmallVec<[u8; 8]> = SmallVec::new();
             let final_byte = params.last().copied().unwrap_or(byte);
             for b in params.iter().take(params.len().saturating_sub(1)) {
-                let _ = param_bytes.try_push(*b);
+                if param_bytes.len() < 8 {
+                    param_bytes.push(*b);
+                }
             }
 
+            let mods = parse_csi_modifier(&param_bytes);
+
             let event = match final_byte {
-                b'A' => Some(KeyEvent::ArrowUp),
-                b'B' => Some(KeyEvent::ArrowDown),
-                b'C' => Some(KeyEvent::ArrowRight),
-                b'D' => Some(KeyEvent::ArrowLeft),
+                b'A' => Some(apply_arrow_modifiers(KeyEvent::ArrowUp, mods)),
+                b'B' => Some(apply_arrow_modifiers(KeyEvent::ArrowDown, mods)),
+                b'C' => Some(apply_arrow_modifiers(KeyEvent::ArrowRight, mods)),
+                b'D' => Some(apply_arrow_modifiers(KeyEvent::ArrowLeft, mods)),
                 b'H' => Some(KeyEvent::Home),
                 b'F' => Some(KeyEvent::End),
                 b'~' => {
-                    if csi_params_eq_dyn(&param_bytes, b"3") {
+                    if csi_params_eq_dyn(&param_bytes, b"2") {
+                        Some(KeyEvent::Insert)
+                    } else if csi_params_eq_dyn(&param_bytes, b"5") {
+                        Some(KeyEvent::PageUp)
+                    } else if csi_params_eq_dyn(&param_bytes, b"6") {
+                        Some(KeyEvent::PageDown)
+                    } else if csi_params_eq_dyn(&param_bytes, b"15") {
+                        Some(KeyEvent::FKey(5))
+                    } else if csi_params_eq_dyn(&param_bytes, b"17") {
+                        Some(KeyEvent::FKey(6))
+                    } else if csi_params_eq_dyn(&param_bytes, b"18") {
+                        Some(KeyEvent::FKey(7))
+                    } else if csi_params_eq_dyn(&param_bytes, b"19") {
+                        Some(KeyEvent::FKey(8))
+                    } else if csi_params_eq_dyn(&param_bytes, b"20") {
+                        Some(KeyEvent::FKey(9))
+                    } else if csi_params_eq_dyn(&param_bytes, b"21") {
+                        Some(KeyEvent::FKey(10))
+                    } else if csi_params_eq_dyn(&param_bytes, b"23") {
+                        Some(KeyEvent::FKey(11))
+                    } else if csi_params_eq_dyn(&param_bytes, b"24") {
+                        Some(KeyEvent::FKey(12))
+                    } else if csi_params_eq_dyn(&param_bytes, b"1;2") {
+                        Some(apply_arrow_modifiers(KeyEvent::ArrowUp, KeyModifiers::SHIFT))
+                    } else if csi_params_eq_dyn(&param_bytes, b"1;5") {
+                        Some(apply_arrow_modifiers(KeyEvent::ArrowUp, KeyModifiers::CTRL))
+                    } else if csi_params_eq_dyn(&param_bytes, b"1;6") {
+                        Some(apply_arrow_modifiers(KeyEvent::ArrowUp, KeyModifiers::CTRL | KeyModifiers::SHIFT))
+                    } else if csi_params_eq_dyn(&param_bytes, b"3") {
                         Some(KeyEvent::Delete)
                     } else if csi_params_eq_dyn(&param_bytes, b"1") || csi_params_eq_dyn(&param_bytes, b"7") {
                         Some(KeyEvent::Home)

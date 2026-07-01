@@ -84,6 +84,48 @@ impl InputBuffer {
         true
     }
 
+    pub fn move_prev_word(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+
+        let mut pos = self.cursor;
+        while pos > 0 && self.line[pos - 1].is_whitespace() {
+            pos -= 1;
+        }
+        while pos > 0 && !self.line[pos - 1].is_whitespace() {
+            pos -= 1;
+        }
+
+        if pos == self.cursor {
+            return false;
+        }
+
+        self.cursor = pos;
+        true
+    }
+
+    pub fn move_next_word(&mut self) -> bool {
+        if self.cursor >= self.line.len() {
+            return false;
+        }
+
+        let mut pos = self.cursor;
+        while pos < self.line.len() && !self.line[pos].is_whitespace() {
+            pos += 1;
+        }
+        while pos < self.line.len() && self.line[pos].is_whitespace() {
+            pos += 1;
+        }
+
+        if pos == self.cursor {
+            return false;
+        }
+
+        self.cursor = pos;
+        true
+    }
+
     pub fn cursor(&self) -> usize {
         self.cursor
     }

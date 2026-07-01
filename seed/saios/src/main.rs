@@ -6,6 +6,7 @@ extern crate alloc;
 #[macro_use]
 pub mod driver;
 pub mod console;
+pub mod graphics;
 pub mod heap;
 pub mod kernel;
 pub mod kernel_arch;
