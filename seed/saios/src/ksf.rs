@@ -23,7 +23,8 @@ pub mod ids {
     pub const SCHEDULER: ServiceId = ServiceId(7);
     pub const EVENT: ServiceId = ServiceId(8);
     pub const HEALTH: ServiceId = ServiceId(9);
-    pub const SHELL: ServiceId = ServiceId(10);
+    pub const INPUT: ServiceId = ServiceId(10);
+    pub const SHELL: ServiceId = ServiceId(11);
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -518,6 +519,36 @@ impl KernelService for HealthService {
     }
 }
 
+struct InputService;
+
+impl KernelService for InputService {
+    fn id(&self) -> ServiceId {
+        ids::INPUT
+    }
+
+    fn name(&self) -> &'static str {
+        "input"
+    }
+
+    fn dependencies(&self) -> &'static [ServiceId] {
+        &[ids::CONSOLE]
+    }
+
+    fn initialize(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {}
+
+    fn health(&self) -> HealthState {
+        HealthState::Healthy
+    }
+}
+
 struct ShellService;
 
 impl KernelService for ShellService {
@@ -530,7 +561,7 @@ impl KernelService for ShellService {
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
-        &[ids::CONSOLE, ids::SIF, ids::SCHEDULER]
+        &[ids::CONSOLE, ids::INPUT, ids::SIF, ids::SCHEDULER]
     }
 
     fn initialize(&mut self) -> Result<(), &'static str> {
@@ -539,7 +570,7 @@ impl KernelService for ShellService {
     }
 
     fn start(&mut self) -> Result<(), &'static str> {
-        Ok(())
+        shell::start_service()
     }
 
     fn stop(&mut self) {}
@@ -560,6 +591,7 @@ pub fn bootstrap() -> Result<(), &'static str> {
         manager.register(Box::new(SchedulerService));
         manager.register(Box::new(EventService));
         manager.register(Box::new(HealthService));
+        manager.register(Box::new(InputService));
         manager.register(Box::new(ShellService));
         manager.start_all()
     })

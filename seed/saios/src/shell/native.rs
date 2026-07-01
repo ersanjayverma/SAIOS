@@ -11,7 +11,7 @@ use crate::saifs;
 use crate::scheduler;
 use crate::shell::command::{ShellResult, StaticCommand};
 use crate::shell::registry::CommandRegistry;
-use crate::shell::session::ShellContext;
+use crate::shell::session::CommandContext;
 use crate::timer;
 
 pub fn register(registry: &mut CommandRegistry) {
@@ -147,11 +147,11 @@ pub fn register(registry: &mut CommandRegistry) {
     }));
 }
 
-fn cmd_help(ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_help(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!(
         "namespace={} env_vars={}",
         ctx.session.current_namespace,
-        ctx.environment.vars.len()
+        ctx.session.environment.len()
     );
     for item in &ctx.command_catalog {
         console::println!("{} - {}", item.name, item.description);
@@ -159,29 +159,29 @@ fn cmd_help(ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_version(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_version(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!("SAIOS v0.1 SNSH");
     Ok(())
 }
 
-fn cmd_clear(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_clear(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::clear();
     Ok(())
 }
 
-fn cmd_exit(ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_exit(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     ctx.session.running = false;
     Ok(())
 }
 
-fn cmd_objects(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_objects(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     for ty in object_manager::object_types() {
         console::println!("{}", ty);
     }
     Ok(())
 }
 
-fn cmd_providers(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_providers(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     for provider in object_manager::providers() {
         console::println!(
             "{} [{}] {:?}",
@@ -193,7 +193,7 @@ fn cmd_providers(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_service(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_service(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let action = args.first().copied().unwrap_or("list");
 
     match action {
@@ -249,7 +249,7 @@ fn cmd_service(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
     }
 }
 
-fn cmd_test(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_test(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let target = args.first().copied();
     let report = testing::run_tests(target)?;
 
@@ -273,7 +273,7 @@ fn cmd_test(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_verify(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_verify(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let target = args.first().copied();
     let reports = testing::verify_target(target)?;
 
@@ -292,7 +292,7 @@ fn cmd_verify(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_services(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_services(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     let results = object_manager::query("kind=Service")?;
     for item in results {
         console::println!("{}", item);
@@ -311,7 +311,7 @@ fn join_args_with_commas(args: &[&str]) -> String {
     expr
 }
 
-fn cmd_query(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_query(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     if args.is_empty() {
         return Err("query: missing expression");
     }
@@ -323,7 +323,7 @@ fn cmd_query(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_inspect(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_inspect(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = args.first().copied().ok_or("inspect: missing object path")?;
     for line in object_manager::inspect(path)? {
         console::println!("{}", line);
@@ -331,7 +331,7 @@ fn cmd_inspect(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_describe(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_describe(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = args.first().copied().ok_or("describe: missing object path")?;
     let handle = saifs::open(path).map_err(|_| "describe: open failed")?;
 
@@ -363,14 +363,14 @@ fn cmd_describe(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_health(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_health(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     for line in object_manager::health_summary() {
         console::println!("{}", line);
     }
     Ok(())
 }
 
-fn cmd_diagnose(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_diagnose(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = args.first().copied().ok_or("diagnose: missing object path")?;
     for line in object_manager::diagnose(path)? {
         console::println!("{}", line);
@@ -378,7 +378,7 @@ fn cmd_diagnose(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_explain(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_explain(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = args.first().copied().ok_or("explain: missing object path")?;
     for line in object_manager::explain(path)? {
         console::println!("{}", line);
@@ -386,7 +386,7 @@ fn cmd_explain(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_events(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_events(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let limit = args
         .first()
         .and_then(|s| s.parse::<usize>().ok())
@@ -397,7 +397,7 @@ fn cmd_events(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_mounts(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_mounts(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     for mount in saifs::mounts() {
         console::println!(
             "{} -> provider={} readonly={}",
@@ -409,7 +409,7 @@ fn cmd_mounts(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_threads(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_threads(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!("ID   State");
     for t in scheduler::threads() {
         console::println!("{}    {:?}", t.id, t.state);
@@ -417,7 +417,7 @@ fn cmd_threads(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_uptime(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_uptime(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     let d = timer::uptime();
     let total_ms = d.as_millis() as u64;
     let hours = total_ms / 3_600_000;
@@ -428,12 +428,12 @@ fn cmd_uptime(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_ticks(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_ticks(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!("{}", timer::ticks());
     Ok(())
 }
 
-fn cmd_heap(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_heap(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     let stats = heap::stats();
     console::println!("Heap Size : {} MB", stats.total / (1024 * 1024));
     console::println!("Used      : {} KB", stats.used / 1024);
@@ -441,7 +441,7 @@ fn cmd_heap(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_pci(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_pci(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!("Bus Dev Fn Vendor Device Class");
     for dev in pci::devices() {
         console::println!(
@@ -457,12 +457,12 @@ fn cmd_pci(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_shutdown(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_shutdown(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!("Shutdown requested");
     halt_forever()
 }
 
-fn cmd_reboot(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_reboot(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     hal::arch::x86_64::io::outb(0x64, 0xFE);
     halt_forever()
 }

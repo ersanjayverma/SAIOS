@@ -84,19 +84,35 @@ Registered in bootstrap order:
 - scheduler
 - event
 - health
+- input
 - shell
 
 Dependencies enforce startup constraints, for example:
 
 - scheduler depends on timer
 - sif depends on provider
-- shell depends on console, sif, scheduler
+- input depends on console
+- shell depends on console, input, sif, scheduler
+
+Shell start behavior:
+
+- Shell service initialization prepares shell runtime modules.
+- Shell service start spawns a scheduler thread for SISH runtime.
+- Shell is not entered directly from boot flow.
 
 ## Boot Integration
 
 Current boot path initializes PMM and heap, then transfers service bring-up to KSF bootstrap.
 
-This establishes a single service orchestration point before entering scheduler and shell execution flow.
+This establishes a single service orchestration point before entering steady-state scheduler and idle execution flow.
+
+Runtime handoff shape:
+
+Kernel init
+-> KSF bootstrap
+-> Service graph started
+-> Shell service thread spawned
+-> Seed runtime enters idle/scheduler loop
 
 Code references:
 
@@ -133,7 +149,7 @@ This enables operators to inspect lifecycle and health, and to control service s
 
 - Service lifecycle is explicit and queryable.
 - Dependency sequencing is centralized.
-- Shell and boot paths use the same service runtime surface.
+- Shell startup is service-owned and no longer a boot-special path.
 - Service ownership boundaries remain aligned with KernelArchitecture and ADR-0014.
 
 ## Current Limitations

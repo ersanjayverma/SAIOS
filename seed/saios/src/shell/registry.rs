@@ -21,6 +21,13 @@ impl CommandRegistry {
     }
 
     pub fn register(&mut self, command: Box<dyn Command>) {
+        if self
+            .commands
+            .iter()
+            .any(|existing| existing.name().eq_ignore_ascii_case(command.name()))
+        {
+            return;
+        }
         self.commands.push(command);
     }
 

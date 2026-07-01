@@ -148,13 +148,20 @@ Firmware
 -> ProviderRegistry
 -> SIF
 -> SAIFS
--> Scheduler
+-> KSF (ServiceManager + service startup)
+-> Scheduler Service Running
+-> Input Service Running
+-> Shell Service Thread Spawned
 -> DeviceManager
 -> Drivers
--> KSF (ServiceManager + service startup)
 -> Services Running
--> Shell
+-> Idle Runtime
 -> User Space
+
+Shell placement rule:
+
+- Shell is a KSF-managed service and scheduled task.
+- Boot code must not enter shell loops directly.
 ```
 
 ## Execution Context Model

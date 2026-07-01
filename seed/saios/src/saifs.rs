@@ -2,6 +2,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
@@ -41,6 +42,29 @@ pub enum SaifsError {
     Busy,
     Corrupt,
     Internal,
+}
+
+impl SaifsError {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SaifsError::NotFound => "not found",
+            SaifsError::AlreadyExists => "already exists",
+            SaifsError::InvalidPath => "invalid path",
+            SaifsError::InvalidHandle => "invalid handle",
+            SaifsError::UnsupportedOperation => "unsupported operation",
+            SaifsError::AccessDenied => "access denied",
+            SaifsError::ProviderUnavailable => "provider unavailable",
+            SaifsError::Busy => "resource busy",
+            SaifsError::Corrupt => "corrupt",
+            SaifsError::Internal => "internal error",
+        }
+    }
+}
+
+impl fmt::Display for SaifsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 pub struct LookupContext;
@@ -102,6 +126,40 @@ pub trait MountManager {
     fn resolve_provider(&self, path: &str) -> Result<ProviderId, SaifsError>;
     fn mounts(&self) -> Vec<MountPoint>;
 }
+
+pub trait NamespaceManager {
+    fn lookup(&self, path: &str) -> Result<LookupResult, SaifsError>;
+    fn enumerate(&self, path: &str) -> Result<Vec<DirEntry>, SaifsError>;
+    fn create(&self, path: &str, kind: CreateKind) -> Result<ObjectId, SaifsError>;
+    fn remove(&self, path: &str) -> Result<(), SaifsError>;
+}
+
+#[derive(Clone)]
+pub struct ResolvedPath {
+    pub input_path: String,
+    pub absolute_path: String,
+    pub provider_path: String,
+    pub mount_path: String,
+    pub provider: ProviderId,
+    pub read_only: bool,
+}
+
+pub trait PathResolver {
+    fn canonicalize(&self, path: &str) -> Result<String, SaifsError>;
+    fn resolve(&self, path: &str) -> Result<ResolvedPath, SaifsError>;
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct SaifsProviderRegistry;
+
+#[derive(Debug, Copy, Clone)]
+pub struct SaifsMountManager;
+
+#[derive(Debug, Copy, Clone)]
+pub struct SaifsNamespaceManager;
+
+#[derive(Debug, Copy, Clone)]
+pub struct SaifsPathResolver;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum EventType {
@@ -223,13 +281,65 @@ fn with_state<R>(f: impl FnOnce(&mut SaifsState) -> R) -> R {
 }
 
 fn normalize_path(path: &str) -> String {
-    if path.is_empty() {
-        return "/".to_string();
+    canonicalize_path(path).unwrap_or_else(|_| "/".to_string())
+}
+
+fn canonicalize_path(path: &str) -> Result<String, SaifsError> {
+    if path.as_bytes().contains(&0) {
+        return Err(SaifsError::InvalidPath);
     }
-    if path.starts_with('/') {
+
+    if path.is_empty() || path == "/" {
+        return Ok("/".to_string());
+    }
+
+    let source = if path.starts_with('/') {
         path.to_string()
     } else {
         format!("/{}", path)
+    };
+
+    let mut parts: Vec<&str> = Vec::new();
+    for part in source.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+
+        if part == ".." {
+            let _ = parts.pop();
+            continue;
+        }
+
+        parts.push(part);
+    }
+
+    if parts.is_empty() {
+        Ok("/".to_string())
+    } else {
+        Ok(format!("/{}", parts.join("/")))
+    }
+}
+
+fn path_in_mount(mount_path: &str, path: &str) -> bool {
+    mount_path == "/"
+        || path == mount_path
+        || (path.starts_with(mount_path) && path.as_bytes().get(mount_path.len()) == Some(&b'/'))
+}
+
+fn provider_path_from_mount(mount_path: &str, absolute_path: &str) -> String {
+    if mount_path == "/" {
+        return absolute_path.to_string();
+    }
+
+    if absolute_path == mount_path {
+        return "/".to_string();
+    }
+
+    let tail = &absolute_path[mount_path.len()..];
+    if tail.starts_with('/') {
+        tail.to_string()
+    } else {
+        format!("/{}", tail)
     }
 }
 
@@ -318,29 +428,40 @@ fn register_provider_internal(state: &mut SaifsState, provider: &'static dyn Nam
     id
 }
 
-fn resolve_provider_internal(state: &SaifsState, path: &str) -> Option<ProviderId> {
-    let path = normalize_path(path);
-    let mut best: Option<(usize, ProviderId)> = None;
+fn resolve_mount_internal(state: &SaifsState, path: &str) -> Option<MountPoint> {
+    let mut best: Option<MountPoint> = None;
+    let mut best_score = 0usize;
 
     for mount in &state.mounts {
         let mount_path = if mount.path.is_empty() { "/" } else { mount.path.as_str() };
-        let matched = path == mount_path
-            || (mount_path == "/")
-            || (path.starts_with(mount_path) && path.as_bytes().get(mount_path.len()) == Some(&b'/'));
-
-        if matched {
+        if path_in_mount(mount_path, path) {
             let score = mount_path.len();
-            match best {
-                None => best = Some((score, mount.provider)),
-                Some((best_score, _)) if score >= best_score => {
-                    best = Some((score, mount.provider))
-                }
-                _ => {}
+            if best.is_none() || score >= best_score {
+                best = Some(mount.clone());
+                best_score = score;
             }
         }
     }
 
-    best.map(|(_, provider)| provider)
+    best
+}
+
+fn resolve_provider_internal(state: &SaifsState, path: &str) -> Option<ProviderId> {
+    resolve_mount_internal(state, path).map(|m| m.provider)
+}
+
+fn resolve_path_internal(state: &SaifsState, path: &str) -> Result<ResolvedPath, SaifsError> {
+    let absolute_path = canonicalize_path(path)?;
+    let mount = resolve_mount_internal(state, &absolute_path).ok_or(SaifsError::ProviderUnavailable)?;
+
+    Ok(ResolvedPath {
+        input_path: path.to_string(),
+        absolute_path: absolute_path.clone(),
+        provider_path: provider_path_from_mount(&mount.path, &absolute_path),
+        mount_path: mount.path,
+        provider: mount.provider,
+        read_only: mount.read_only,
+    })
 }
 
 fn provider_by_id_internal(state: &SaifsState, id: ProviderId) -> Option<&'static dyn NamespaceProvider> {
@@ -356,6 +477,9 @@ fn map_str_err(err: &'static str) -> SaifsError {
         "path not found" | "node missing" => SaifsError::NotFound,
         "already exists" => SaifsError::AlreadyExists,
         "invalid name" | "missing name" => SaifsError::InvalidPath,
+        "not a file" | "not a directory" | "parent is not a directory" => SaifsError::UnsupportedOperation,
+        "cannot remove root" | "directory not empty" => SaifsError::Busy,
+        "invalid inode" => SaifsError::Corrupt,
         "read-only virtual path" => SaifsError::AccessDenied,
         _ => SaifsError::Internal,
     }
@@ -373,6 +497,7 @@ fn default_write(path: &str, data: &[u8]) -> Result<usize, SaifsError> {
 pub struct SaifsHandle {
     id: HandleId,
     path: String,
+    provider_path: String,
     object_id: Option<ObjectId>,
     provider_id: ProviderId,
     kind: SaifsNodeKind,
@@ -381,6 +506,10 @@ pub struct SaifsHandle {
 impl SaifsHandle {
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    pub fn provider_path(&self) -> &str {
+        &self.provider_path
     }
 
     pub fn kind(&self) -> SaifsNodeKind {
@@ -464,7 +593,7 @@ impl Handle for SaifsHandle {
                 ])
             }
             SaifsNodeKind::Directory => {
-                let children = vfs::ls(Some(&self.path)).map_err(map_str_err)?;
+                let children = self.children()?;
                 Ok(vec![
                     Property {
                         key: "type".to_string(),
@@ -495,7 +624,14 @@ impl Handle for SaifsHandle {
         match self.kind {
             SaifsNodeKind::File => Err(SaifsError::UnsupportedOperation),
             SaifsNodeKind::Directory | SaifsNodeKind::Virtual => {
-                vfs::ls(Some(&self.path)).map_err(map_str_err)
+                with_state(|state| {
+                    let provider = provider_by_id_internal(state, self.provider_id)
+                        .ok_or(SaifsError::ProviderUnavailable)?;
+                    let entries = provider.enumerate(&LookupContext, &self.provider_path)?;
+                    let mut out: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+                    out.sort();
+                    Ok(out)
+                })
             }
             SaifsNodeKind::Object => {
                 if let Some(meta) = object_manager::metadata(&self.path) {
@@ -508,11 +644,180 @@ impl Handle for SaifsHandle {
                     out.sort();
                     Ok(out)
                 } else {
-                    vfs::ls(Some(&self.path)).map_err(map_str_err)
+                    with_state(|state| {
+                        let provider = provider_by_id_internal(state, self.provider_id)
+                            .ok_or(SaifsError::ProviderUnavailable)?;
+                        let entries = provider.enumerate(&LookupContext, &self.provider_path)?;
+                        let mut out: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+                        out.sort();
+                        Ok(out)
+                    })
                 }
             }
         }
     }
+}
+
+impl ProviderRegistry for SaifsProviderRegistry {
+    fn register(&self, provider: &'static dyn NamespaceProvider) -> Result<ProviderId, SaifsError> {
+        init();
+        with_state(|state| Ok(register_provider_internal(state, provider)))
+    }
+
+    fn get(&self, provider: ProviderId) -> Option<&'static dyn NamespaceProvider> {
+        init();
+        with_state(|state| provider_by_id_internal(state, provider))
+    }
+
+    fn list(&self) -> Vec<ProviderId> {
+        init();
+        with_state(|state| state.providers.iter().map(|entry| entry.id).collect())
+    }
+}
+
+impl MountManager for SaifsMountManager {
+    fn mount(&self, mut mount: MountPoint) -> Result<(), SaifsError> {
+        init();
+        mount.path = canonicalize_path(&mount.path)?;
+
+        with_state(|state| {
+            if provider_by_id_internal(state, mount.provider).is_none() {
+                return Err(SaifsError::ProviderUnavailable);
+            }
+
+            if state.mounts.iter().any(|m| m.path == mount.path) {
+                return Err(SaifsError::AlreadyExists);
+            }
+
+            state.mounts.push(mount.clone());
+
+            let id = state.alloc_event_id();
+            state.events.push(Event {
+                id,
+                event_type: EventType::Mounted,
+                object: None,
+                payload: format!("mounted {}", mount.path),
+            });
+
+            Ok(())
+        })
+    }
+
+    fn unmount(&self, path: &str) -> Result<(), SaifsError> {
+        init();
+        let path = canonicalize_path(path)?;
+        if path == "/" {
+            return Err(SaifsError::Busy);
+        }
+
+        with_state(|state| {
+            let before = state.mounts.len();
+            state.mounts.retain(|m| m.path != path);
+            if state.mounts.len() == before {
+                return Err(SaifsError::NotFound);
+            }
+
+            let id = state.alloc_event_id();
+            state.events.push(Event {
+                id,
+                event_type: EventType::Unmounted,
+                object: None,
+                payload: format!("unmounted {}", path),
+            });
+
+            Ok(())
+        })
+    }
+
+    fn resolve_provider(&self, path: &str) -> Result<ProviderId, SaifsError> {
+        init();
+        let path = canonicalize_path(path)?;
+        with_state(|state| resolve_provider_internal(state, &path).ok_or(SaifsError::ProviderUnavailable))
+    }
+
+    fn mounts(&self) -> Vec<MountPoint> {
+        init();
+        with_state(|state| state.mounts.clone())
+    }
+}
+
+impl PathResolver for SaifsPathResolver {
+    fn canonicalize(&self, path: &str) -> Result<String, SaifsError> {
+        canonicalize_path(path)
+    }
+
+    fn resolve(&self, path: &str) -> Result<ResolvedPath, SaifsError> {
+        init();
+        with_state(|state| resolve_path_internal(state, path))
+    }
+}
+
+impl NamespaceManager for SaifsNamespaceManager {
+    fn lookup(&self, path: &str) -> Result<LookupResult, SaifsError> {
+        init();
+        let resolved = path_resolver().resolve(path)?;
+
+        with_state(|state| {
+            let provider = provider_by_id_internal(state, resolved.provider)
+                .ok_or(SaifsError::ProviderUnavailable)?;
+            provider.lookup(&LookupContext, &resolved.provider_path)
+        })
+    }
+
+    fn enumerate(&self, path: &str) -> Result<Vec<DirEntry>, SaifsError> {
+        init();
+        let resolved = path_resolver().resolve(path)?;
+
+        with_state(|state| {
+            let provider = provider_by_id_internal(state, resolved.provider)
+                .ok_or(SaifsError::ProviderUnavailable)?;
+            provider.enumerate(&LookupContext, &resolved.provider_path)
+        })
+    }
+
+    fn create(&self, path: &str, kind: CreateKind) -> Result<ObjectId, SaifsError> {
+        init();
+        let resolved = path_resolver().resolve(path)?;
+        if resolved.read_only {
+            return Err(SaifsError::AccessDenied);
+        }
+
+        with_state(|state| {
+            let provider = provider_by_id_internal(state, resolved.provider)
+                .ok_or(SaifsError::ProviderUnavailable)?;
+            provider.create(&LookupContext, &resolved.provider_path, kind)
+        })
+    }
+
+    fn remove(&self, path: &str) -> Result<(), SaifsError> {
+        init();
+        let resolved = path_resolver().resolve(path)?;
+        if resolved.read_only {
+            return Err(SaifsError::AccessDenied);
+        }
+
+        with_state(|state| {
+            let provider = provider_by_id_internal(state, resolved.provider)
+                .ok_or(SaifsError::ProviderUnavailable)?;
+            provider.remove(&LookupContext, &resolved.provider_path)
+        })
+    }
+}
+
+pub const fn provider_registry() -> SaifsProviderRegistry {
+    SaifsProviderRegistry
+}
+
+pub const fn mount_manager() -> SaifsMountManager {
+    SaifsMountManager
+}
+
+pub const fn namespace_manager() -> SaifsNamespaceManager {
+    SaifsNamespaceManager
+}
+
+pub const fn path_resolver() -> SaifsPathResolver {
+    SaifsPathResolver
 }
 
 pub fn init() {
@@ -550,22 +855,17 @@ pub fn is_initialized() -> bool {
 pub fn open(path: &str) -> Result<SaifsHandle, SaifsError> {
     init();
 
-    let path = normalize_path(path);
-    let provider_id = with_state(|state| resolve_provider_internal(state, &path));
-    let provider_id = provider_id.ok_or(SaifsError::ProviderUnavailable)?;
-
-    let lookup = with_state(|state| {
-        let provider = provider_by_id_internal(state, provider_id).ok_or(SaifsError::ProviderUnavailable)?;
-        provider.lookup(&LookupContext, &path)
-    })?;
+    let resolved = path_resolver().resolve(path)?;
+    let lookup = namespace_manager().lookup(&resolved.absolute_path)?;
 
     let handle_id = with_state(|state| state.alloc_handle_id());
 
     Ok(SaifsHandle {
         id: handle_id,
-        path,
+        path: resolved.absolute_path,
+        provider_path: resolved.provider_path,
         object_id: lookup.object_id,
-        provider_id,
+        provider_id: resolved.provider,
         kind: lookup.kind,
     })
 }
@@ -577,23 +877,25 @@ pub fn read_text(path: &str) -> Result<String, SaifsError> {
 }
 
 pub fn list(path: &str) -> Result<Vec<String>, SaifsError> {
-    let handle = open(path)?;
-    handle.children()
+    let mut out: Vec<String> = namespace_manager()
+        .enumerate(path)?
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    out.sort();
+    Ok(out)
 }
 
 pub fn mkdir(path: &str) -> Result<(), SaifsError> {
-    init();
-    vfs::mkdir(&normalize_path(path)).map_err(map_str_err)
+    namespace_manager().create(path, CreateKind::Directory).map(|_| ())
 }
 
 pub fn touch(path: &str) -> Result<(), SaifsError> {
-    init();
-    vfs::touch(&normalize_path(path)).map_err(map_str_err)
+    namespace_manager().create(path, CreateKind::File).map(|_| ())
 }
 
 pub fn remove(path: &str) -> Result<(), SaifsError> {
-    init();
-    vfs::rm(&normalize_path(path)).map_err(map_str_err)
+    namespace_manager().remove(path)
 }
 
 pub fn cd(path: &str) -> Result<(), SaifsError> {
@@ -650,42 +952,23 @@ pub fn publish_event(event_type: EventType, object: Option<ObjectId>, payload: &
 }
 
 pub fn register_provider(provider: &'static dyn NamespaceProvider) -> Result<ProviderId, SaifsError> {
-    init();
-    with_state(|state| Ok(register_provider_internal(state, provider)))
+    provider_registry().register(provider)
 }
 
 pub fn mount(path: &str, provider: ProviderId, read_only: bool) -> Result<(), SaifsError> {
-    init();
-    let path = normalize_path(path);
-    with_state(|state| {
-        if provider_by_id_internal(state, provider).is_none() {
-            return Err(SaifsError::ProviderUnavailable);
-        }
-
-        if state.mounts.iter().any(|m| m.path == path) {
-            return Err(SaifsError::AlreadyExists);
-        }
-
-        state.mounts.push(MountPoint {
-            path: path.clone(),
-            provider,
-            read_only,
-        });
-
-        let id = state.alloc_event_id();
-        state.events.push(Event {
-            id,
-            event_type: EventType::Mounted,
-            object: None,
-            payload: format!("mounted {}", path),
-        });
-        Ok(())
+    mount_manager().mount(MountPoint {
+        path: path.to_string(),
+        provider,
+        read_only,
     })
 }
 
+pub fn unmount(path: &str) -> Result<(), SaifsError> {
+    mount_manager().unmount(path)
+}
+
 pub fn mounts() -> Vec<MountPoint> {
-    init();
-    with_state(|state| state.mounts.clone())
+    mount_manager().mounts()
 }
 
 pub fn providers() -> Vec<(ProviderId, String)> {

@@ -1,51 +1,61 @@
 use crate::console;
+use crate::scheduler;
 
-use super::parser;
+use super::dispatcher::CommandDispatcher;
+use super::prompt::{PromptProvider, SessionPromptProvider};
 use super::registry::CommandRegistry;
-use super::session::ShellContext;
+use super::session::CommandContext;
 use super::{compatibility, native};
-
-const PROMPT: &str = "SNSH>";
+use super::commands;
 
 pub struct ShellEngine {
     registry: CommandRegistry,
-    ctx: ShellContext,
+    dispatcher: CommandDispatcher,
+    ctx: CommandContext,
+    needs_prompt: bool,
 }
 
 impl ShellEngine {
     pub fn new() -> Self {
         let mut registry = CommandRegistry::new();
+        commands::register(&mut registry);
         native::register(&mut registry);
         compatibility::register(&mut registry);
 
-        let mut ctx = ShellContext::new();
+        let mut ctx = CommandContext::new();
         ctx.command_catalog = registry.list();
 
-        Self { registry, ctx }
+        Self {
+            registry,
+            dispatcher: CommandDispatcher::new(),
+            ctx,
+            needs_prompt: true,
+        }
     }
 
-    pub fn run(&mut self) -> ! {
+    fn render_prompt(&self) {
+        let provider = SessionPromptProvider::new(&self.ctx.session);
+        console::print(provider.render().as_str());
+    }
+
+    pub fn run(&mut self) {
         while self.ctx.session.running {
-            console::print(PROMPT);
-            let line = console::read_line();
-
-            if let Some(parsed) = parser::parse_line(line.as_str()) {
-                let args: &[&str] = parsed.args.as_slice();
-                match self.registry.find(parsed.command) {
-                    Some(command) => {
-                        if let Err(e) = command.execute(&mut self.ctx, args) {
-                            console::println!("{}", e);
-                        }
-                    }
-                    None => {
-                        console::println!("Unknown command");
-                    }
-                }
+            if self.needs_prompt {
+                self.render_prompt();
+                self.needs_prompt = false;
             }
-        }
 
-        loop {
-            hal::arch::x86_64::cpu::hlt();
+            if let Some(line) = console::poll_input() {
+                let line = line.as_str();
+                self.ctx.push_history(line);
+                if let Err(e) = self.dispatcher.dispatch(&self.registry, &mut self.ctx, line) {
+                    console::println!("{}", e);
+                }
+
+                self.needs_prompt = self.ctx.session.running;
+            } else {
+                scheduler::yield_now();
+            }
         }
     }
 }

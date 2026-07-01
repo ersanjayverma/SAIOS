@@ -1,20 +1,24 @@
-# SNSH: SAIOS Native Shell
+# SNSH: SAIOS Native Shell (SISH Service)
 
-Status: Implemented
+Status: Implemented (service-based runtime)
 Owner: Shell and platform architecture
 Last updated: 2026-07-02
 
 ## Purpose
 
-SNSH is the primary operator and developer interface for SAIOS.
+SNSH (SISH runtime) is the primary operator and developer interface for SAIOS.
 
 SNSH is object-centric and routes through SIF and SAIFS contracts instead of calling managers directly.
 
+SNSH is started as a kernel service by KSF and runs as a scheduled shell thread, not as a special boot loop.
+
 ## Layering
 
-Keyboard
+Keyboard IRQ
+-> Input Service
 -> Console
--> SNSH Engine
+-> SNSH Session Engine
+-> Command Dispatcher
 -> Command Registry
 -> Query Engine
 -> SIF
@@ -24,24 +28,33 @@ Keyboard
 Key rule:
 
 - SNSH must not call manager internals directly.
+- SNSH must not read keyboard drivers directly.
 
 ## Module Layout
 
 - Engine: command loop and dispatch
+- Dispatcher: registry lookup and command execution
 - Parser: line tokenization
 - Command: command interface contract
 - Registry: dynamic command registration and lookup
-- Session: shell context and environment/session state
+- Session: cwd, namespace, environment, history, prompt, and user state
+- Prompt: prompt provider contract and implementation
+- Service: KSF entry point that spawns shell runtime thread
+- Commands: modular command plugins
 - Native: object-first commands
 - Compatibility: POSIX-like compatibility commands
 
 Code locations:
 
 - [seed/saios/src/shell/engine.rs](../seed/saios/src/shell/engine.rs)
+- [seed/saios/src/shell/dispatcher.rs](../seed/saios/src/shell/dispatcher.rs)
 - [seed/saios/src/shell/parser.rs](../seed/saios/src/shell/parser.rs)
 - [seed/saios/src/shell/command.rs](../seed/saios/src/shell/command.rs)
 - [seed/saios/src/shell/registry.rs](../seed/saios/src/shell/registry.rs)
 - [seed/saios/src/shell/session.rs](../seed/saios/src/shell/session.rs)
+- [seed/saios/src/shell/prompt.rs](../seed/saios/src/shell/prompt.rs)
+- [seed/saios/src/shell/service.rs](../seed/saios/src/shell/service.rs)
+- [seed/saios/src/shell/commands/](../seed/saios/src/shell/commands/)
 - [seed/saios/src/shell/native.rs](../seed/saios/src/shell/native.rs)
 - [seed/saios/src/shell/compatibility.rs](../seed/saios/src/shell/compatibility.rs)
 
@@ -53,7 +66,7 @@ All commands implement a shared contract:
 pub trait Command {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
-    fn execute(&self, ctx: &mut ShellContext, args: &[&str]) -> ShellResult;
+    fn execute(&self, ctx: &mut CommandContext, args: &[&str]) -> ShellResult;
 }
 ```
 
@@ -77,21 +90,41 @@ Notes:
 - Registration order is independent from help output ordering.
 - Help output uses sorted command metadata list.
 
-## Shell Context
+## Shell Session and Context
 
-Current context payload includes:
+Session payload includes:
 
-- Session state
+- Running state
+- Current working directory
 - Current namespace
 - Environment variable store
+- Command history
+- Prompt template
+- Current user (optional)
+
+CommandContext includes:
+
+- Session payload
 - Command catalog cache
 
-This enables future additions without changing command signatures:
+This enables additions without changing command signatures:
 
 - user identity and roles
 - permission and capability model
 - scripting state
 - execution context and tracing
+
+## Prompt Provider
+
+Prompt rendering is provider-based:
+
+```rust
+pub trait PromptProvider {
+    fn render(&self) -> String;
+}
+```
+
+Current implementation uses session-backed prompt text, and can switch to user/path-aware prompts without changing engine logic.
 
 ## Command Sets
 
@@ -167,11 +200,13 @@ Compatibility commands are intentionally isolated from the native command set im
 
 ## Execution Flow
 
-1. Engine reads input line from console
-2. Parser tokenizes into command and args
-3. Registry resolves command by name
-4. Command executes with mutable ShellContext
-5. Command returns ShellResult and engine reports errors
+1. KSF starts shell service and spawns shell thread.
+2. Engine renders prompt via PromptProvider.
+3. Engine receives console input events.
+4. Parser tokenizes into command and args.
+5. Dispatcher resolves command in registry.
+6. Command executes with mutable CommandContext.
+7. ShellResult is reported to console.
 
 ## Error Model
 
@@ -191,13 +226,42 @@ Guideline:
 - Native discovery operations use object query and inspection APIs.
 - Namespace/file operations use SAIFS.
 - Shell commands should never call HAL-level APIs except explicit system control commands such as reboot/shutdown.
+- Shell runtime should not own boot control flow.
+
+## Command Modules
+
+Built-ins are modular command plugins under `shell/commands/` and each module implements only command behavior.
+
+Current core modules include:
+
+- help
+- clear
+- version
+- objects
+- inspect
+- health
+- shutdown
+- reboot
 
 ## How To Add a Command
 
-1. Add handler in native or compatibility module.
+1. Add module under `shell/commands/` (or native/compatibility family as appropriate).
 2. Register a StaticCommand entry in that module's register function.
 3. Keep command description concise and action-oriented.
 4. If it exposes object data, prefer query or inspect contracts over ad hoc traversal.
+
+## Runtime Placement
+
+Boot runtime shape:
+
+Firmware
+-> Bootloader
+-> Kernel init
+-> KSF service startup
+-> Shell service start
+-> Scheduler/idle runtime
+
+After this handoff, boot code no longer invokes shell loops directly.
 
 ## Planned Extensions
 

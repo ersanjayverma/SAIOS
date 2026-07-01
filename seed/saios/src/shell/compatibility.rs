@@ -4,7 +4,7 @@ use crate::console;
 use crate::saifs;
 use crate::shell::command::{ShellResult, StaticCommand};
 use crate::shell::registry::CommandRegistry;
-use crate::shell::session::ShellContext;
+use crate::shell::session::CommandContext;
 
 pub fn register(registry: &mut CommandRegistry) {
     registry.register(Box::new(StaticCommand {
@@ -44,7 +44,7 @@ pub fn register(registry: &mut CommandRegistry) {
     }));
 }
 
-fn cmd_ls(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_ls(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = args.first().copied().unwrap_or(".");
     let entries = saifs::list(path).map_err(|_| "ls failed")?;
     for name in entries {
@@ -53,29 +53,29 @@ fn cmd_ls(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_pwd(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
+fn cmd_pwd(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!("{}", saifs::pwd());
     Ok(())
 }
 
-fn cmd_cd(ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_cd(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = args.first().copied().ok_or("cd: missing path")?;
     saifs::cd(path).map_err(|_| "cd failed")?;
-    ctx.session.current_namespace = saifs::pwd();
+    ctx.sync_namespace_from_saifs();
     Ok(())
 }
 
-fn cmd_mkdir(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_mkdir(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = args.first().copied().ok_or("mkdir: missing path")?;
     saifs::mkdir(path).map_err(|_| "mkdir failed")
 }
 
-fn cmd_touch(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_touch(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = args.first().copied().ok_or("touch: missing path")?;
     saifs::touch(path).map_err(|_| "touch failed")
 }
 
-fn cmd_cat(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_cat(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = args.first().copied().ok_or("cat: missing path")?;
     let text = saifs::read_text(path).map_err(|_| "cat failed")?;
     if !text.is_empty() {
@@ -84,7 +84,7 @@ fn cmd_cat(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_rm(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+fn cmd_rm(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = args.first().copied().ok_or("rm: missing path")?;
     saifs::remove(path).map_err(|_| "rm failed")
 }
