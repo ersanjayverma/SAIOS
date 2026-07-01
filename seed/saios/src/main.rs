@@ -1,37 +1,60 @@
 #![no_std]
 #![no_main]
 
-pub mod arch;
-pub mod boot;
-pub mod console;
-pub mod diagnostics;
-pub mod drivers;
-pub mod fs;
-pub mod graphics;
-pub mod ipc;
-pub mod log;
-pub mod memory;
-pub mod net;
-pub mod process;
-pub mod rrod;
-pub mod scheduler;
-pub mod seed;
-pub mod timer;
+extern crate alloc;
 
+#[macro_use]
+pub mod driver;
+pub mod console;
+pub mod heap;
+pub mod pci;
+pub mod pmm;
+pub mod shell;
+pub mod seed;
 use efi_main::SaiosBootInfo;
+use hal::arch::paging::{self, Table};
+use hal::arch::x86_64::{gdt, idt, interrupt};
+use seed::Seed;
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
-    arch::disable_interrupts();
+    interrupt::disable();
+    let boot_info = unsafe { &*boot_info };
+    console::attach_framebuffer(boot_info.framebuffer);
+    driver::console::init();
+    gdt::init();
+    idt::init();
 
-    seed::init(boot_info);
-    seed::run()
+    // Convert the raw pointer and count into a temporary Rust slice
+    let _entries_slice = unsafe {
+        core::slice::from_raw_parts(boot_info.memorymap.entries, boot_info.memorymap.entry_count)
+    };
+    // Initialize PMM with the boot memory map and take one page for PML4.
+    pmm::init(_entries_slice);
+    let pml4_phys = pmm::alloc_page().expect("PMM: no free pages for PML4");
+    let pml4_ptr = pml4_phys as *mut Table;
+    unsafe { (*pml4_ptr).clear() };
+    // Recursive mapping: last PML4 slot points to the PML4 itself.
+    unsafe {
+        (*pml4_ptr).entries[511].set_page(pml4_phys, paging::FLAG_WRITABLE);
+    }
+
+    heap::init();
+   
+    let seed = Seed::init(boot_info as *const SaiosBootInfo);
+    seed.run()
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    console::init_serial();
-    console::panic_prelude(info);
-    let context = rrod::capture::from_panic(info);
-    rrod::trigger(context)
+    interrupt::disable();
+    console::panic_println("PANIC");
+    // Print panic info directly to emergency serial path.
+    hal::arch::x86_64::console::_print(format_args!("{}\n", info));
+    loop {
+        hal::arch::x86_64::cpu::hlt();
+    }
 }

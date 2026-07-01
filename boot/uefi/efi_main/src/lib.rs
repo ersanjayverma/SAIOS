@@ -10,7 +10,7 @@ pub mod smbios;
 pub mod ui;
 pub const R_X86_64_RELATIVE: u32 = 8;
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SaiosBootInfo {
     pub magic: u64,
     pub version: u32,

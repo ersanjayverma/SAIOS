@@ -3,12 +3,10 @@ use core::cell::UnsafeCell;
 use uefi::boot::MemoryType as UefiMemoryType;
 use uefi::mem::memory_map::MemoryMap;
 use uefi::println;
-/// Maximum number of UEFI memory descriptors
-/// supported during boot.
-///
-/// If firmware returns more than this,
-/// the bootloader aborts.
+
+/// Maximum number of UEFI memory descriptors supported during boot.
 const MEMORY_REGION_CAPACITY: usize = 1024;
+
 struct MemoryRegionBuffer(UnsafeCell<[MemoryRegion; MEMORY_REGION_CAPACITY]>);
 
 unsafe impl Sync for MemoryRegionBuffer {}
@@ -21,12 +19,14 @@ static MEMORY_REGIONS: MemoryRegionBuffer = MemoryRegionBuffer(UnsafeCell::new(
         attributes: 0,
     }; MEMORY_REGION_CAPACITY],
 ));
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct MemoryMapInfo {
     pub entries: *const MemoryRegion,
     pub entry_count: usize,
 }
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct MemoryRegion {
@@ -35,6 +35,7 @@ pub struct MemoryRegion {
     pub region_type: MemoryType,
     pub attributes: u64,
 }
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(u32)]
 pub enum MemoryType {
@@ -51,19 +52,23 @@ pub enum MemoryType {
     Seed,
     Framebuffer,
 }
-pub fn initialize() -> uefi::Result<MemoryMapInfo> {
-    // 1. Get the UEFI memory map.
-    // LOADER_DATA is good, but it must have enough capacity so it doesn't reallocate inside.
-    let memorymap = uefi::boot::memory_map(UefiMemoryType::LOADER_DATA)?;
-    let entries = memorymap.entries();
 
-    // Safety: Accessing static mut in single-threaded boot environment
+pub fn initialize() -> uefi::Result<MemoryMapInfo> {
+    // Retrieve the UEFI memory map.  This must happen AFTER all
+    // LOADER_DATA allocations (kernel, stack, boot-info, entries
+    // storage) so those regions appear in the map.
+    let memorymap = uefi::boot::memory_map(UefiMemoryType::LOADER_DATA)?;
+
+    // Debug: how many entries did the firmware give us?
+    let entry_count = memorymap.entries().len();
+    println!("Memory map: {} entries", entry_count);
+
+    // SAFETY: single-threaded boot context.
     let regions = unsafe { &mut *MEMORY_REGIONS.0.get() };
     let mut count = 0;
 
-    // 2. Copy data directly into your fixed, unchangeable static buffer
-    for entry in entries {
-        if count == MEMORY_REGION_CAPACITY {
+    for entry in memorymap.entries() {
+        if count >= MEMORY_REGION_CAPACITY {
             println!("Memory map exceeds {} entries", MEMORY_REGION_CAPACITY);
             return Err(uefi::Error::from(uefi::Status::BUFFER_TOO_SMALL));
         }
@@ -77,12 +82,14 @@ pub fn initialize() -> uefi::Result<MemoryMapInfo> {
         count += 1;
     }
 
-    // 3. Return the info pointing to the immutable static buffer
+    println!("Memory map: {} entries copied", count);
+
     Ok(MemoryMapInfo {
         entries: regions.as_ptr(),
         entry_count: count,
     })
 }
+
 fn convert_memory_type(ty: UefiMemoryType) -> MemoryType {
     match ty {
         UefiMemoryType::CONVENTIONAL => MemoryType::Usable,

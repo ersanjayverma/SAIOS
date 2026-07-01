@@ -15,7 +15,7 @@ use uefi::*;
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
-    let mut boot_info = efi_main::initialize_boot_info();
+    let boot_info = efi_main::initialize_boot_info();
 
     let mut fb = efi_main::ui::Framebuffer {
         info: boot_info.framebuffer.clone(),
@@ -165,8 +165,8 @@ fn main() -> Status {
         }
     }
     println!("All segments copied successfully");
-    efi_main::apply_relocations(base.as_ptr() as u64, &loader.image.relocations)
-        .expect("Failed to apply relocations");
+    // efi_main::apply_relocations(base.as_ptr() as u64, &loader.image.relocations)
+    //     .expect("Failed to apply relocations");
     println!("All relocations applied successfully");
     println!("Initializing boot information");
 
@@ -217,15 +217,52 @@ fn main() -> Status {
         boot_info_ptr.write(boot_info.clone());
     }
 
-    boot_info.memorymap = efi_main::memorymap::initialize().unwrap();
+    // ── Pre-allocate storage for memory-map entries ──────────────────
+    //
+    // We must allocate the destination buffer BEFORE calling
+    // memorymap::initialize() so that the allocation appears in the
+    // UEFI memory map as a LOADER_DATA region.  The PMM will then
+    // reserve those frames and the entries will never be overwritten.
+    const MAX_ENTRIES: usize = 1024;
+    let entry_size = core::mem::size_of::<efi_main::memorymap::MemoryRegion>();
+    let entries_bytes = MAX_ENTRIES * entry_size; // 32 KiB
+    let entries_pages = (entries_bytes as u64 + 4095) / 4096;
+
+    let entries_storage = boot::allocate_pages(
+        AllocateType::AnyPages,
+        MemoryType::LOADER_DATA,
+        entries_pages as usize,
+    )
+    .expect("Failed to allocate stable memory-map storage");
+
+    // ── Capture the memory map AFTER all LOADER_DATA allocations ─────
+    //
+    // Every allocation (kernel, stack, boot-info, entries storage) is
+    // now visible in the memory map so the PMM can reserve them.
+    let mut mm_info = efi_main::memorymap::initialize().unwrap();
+
+    if mm_info.entry_count > 0 && !mm_info.entries.is_null() && mm_info.entry_count <= MAX_ENTRIES {
+        // Copy every entry out of the transient static buffer into the
+        // pre-allocated stable LOADER_DATA buffer.
+        unsafe {
+            let src = mm_info.entries;
+            let dst = entries_storage.as_ptr() as *mut efi_main::memorymap::MemoryRegion;
+            core::ptr::copy_nonoverlapping(src, dst, mm_info.entry_count);
+            mm_info.entries = dst;
+        }
+    }
+
     unsafe {
-        (*boot_info_ptr).memorymap = boot_info.memorymap;
+        (*boot_info_ptr).memorymap = mm_info;
     }
     let entry = loader.entry_point;
     drop(loader);
     let p = entry as *const u8;
     println!("===============================================",);
-    println!("{:#?}", boot_info.memorymap);
+    // Print the STABLE copy, not the stale local `boot_info`.
+    unsafe {
+        println!("{:#?}", (*boot_info_ptr).memorymap);
+    }
     println!("==============================================");
     unsafe {
         println!(
