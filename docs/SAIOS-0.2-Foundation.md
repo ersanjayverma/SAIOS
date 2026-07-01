@@ -67,3 +67,22 @@ Primary validation workflow in SNSH:
 Development loop shifts from "write and hope" to:
 
 Write subsystem -> Test -> Verify -> Health-check -> Merge
+
+## Serviceized Shell Milestone
+
+This milestone is now part of 0.2 foundation:
+
+- SNSH/SISH is started by KSF as a kernel service.
+- Shell runtime is a scheduled thread with session-owned state.
+- Boot and seed paths no longer invoke shell loops directly.
+
+Serviceized runtime shape:
+
+Boot
+-> Kernel init
+-> Initialize managers
+-> KSF start services
+-> Spawn SISH thread
+-> Scheduler + idle
+
+This establishes continuity for future transition from in-kernel shell service to user-mode system process with minimal shell-engine rewrite.
