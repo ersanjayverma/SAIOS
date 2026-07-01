@@ -224,3 +224,4 @@ Code references:
 
 - SNOM contracts: [seed/saios/src/snom.rs](../seed/saios/src/snom.rs)
 - SIF facade: [seed/saios/src/sif.rs](../seed/saios/src/sif.rs)
+- Kernel architecture contracts: [seed/saios/src/kernel_arch.rs](../seed/saios/src/kernel_arch.rs)

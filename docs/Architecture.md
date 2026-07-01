@@ -14,6 +14,9 @@ See [docs/SOM.md](SOM.md) for the SOM baseline object contract and [docs/SNOM.md
 
 SNOM ABI version compatibility policy: [docs/adr/ADR-0013-object-abi-versioning-policy.md](adr/ADR-0013-object-abi-versioning-policy.md).
 
+Kernel architecture freeze: [docs/KernelArchitecture.md](KernelArchitecture.md).
+Kernel layering ADR: [docs/adr/ADR-0014-kernel-managers-providers-services-architecture.md](adr/ADR-0014-kernel-managers-providers-services-architecture.md).
+
 ## Framework Naming
 
 SIF (SAIOS Information Framework) is the architecture umbrella.
