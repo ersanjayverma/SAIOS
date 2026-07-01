@@ -37,6 +37,10 @@ impl IdtEntry {
     }
     pub fn set_handler(&mut self, handler: extern "C" fn()) {
         let addr = handler as usize;
+        self.set_handler_addr(addr);
+    }
+
+    pub fn set_handler_addr(&mut self, addr: usize) {
 
         self.offset_low = addr as u16;
         self.selector = crate::arch::x86_64::gdt::KERNEL_CODE.0;
@@ -70,6 +74,13 @@ pub fn register(vector: u8, handler: extern "C" fn()) {
     unsafe {
         let idt = &mut *IDT.get();
         idt.entries[vector as usize].set_handler(handler);
+    }
+}
+
+pub fn register_raw(vector: u8, handler_addr: usize) {
+    unsafe {
+        let idt = &mut *IDT.get();
+        idt.entries[vector as usize].set_handler_addr(handler_addr);
     }
 }
 pub fn load() {

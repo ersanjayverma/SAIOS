@@ -11,6 +11,7 @@ pub mod pci;
 pub mod pmm;
 pub mod shell;
 pub mod seed;
+pub mod timer;
 use efi_main::SaiosBootInfo;
 use hal::arch::paging::{self, Table};
 use hal::arch::x86_64::{gdt, idt, interrupt};
@@ -43,6 +44,8 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     }
 
     heap::init();
+    timer::init();
+    interrupt::enable();
    
     let seed = Seed::init(boot_info as *const SaiosBootInfo);
     seed.run()

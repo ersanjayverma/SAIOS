@@ -4,6 +4,7 @@ use crate::pci;
 use crate::pmm;
 use crate::shell::commands;
 use crate::shell::parser::ParsedCommand;
+use crate::timer;
 
 fn print_help() {
     console::println!("help");
@@ -13,9 +14,22 @@ fn print_help() {
     console::println!("mem");
     console::println!("heap");
     console::println!("pci");
+    console::println!("ticks");
+    console::println!("uptime");
     console::println!("panic");
     console::println!("reboot");
     console::println!("shutdown");
+}
+
+fn print_uptime() {
+    let d = timer::uptime();
+    let total_ms = d.as_millis() as u64;
+    let hours = total_ms / 3_600_000;
+    let minutes = (total_ms % 3_600_000) / 60_000;
+    let seconds = (total_ms % 60_000) / 1000;
+    let millis = total_ms % 1000;
+
+    console::println!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis);
 }
 
 fn halt_forever() -> ! {
@@ -75,6 +89,12 @@ pub fn execute(parsed: ParsedCommand<'_>) {
                     pci::class_name(dev.class)
                 );
             }
+        }
+        commands::TICKS => {
+            console::println!("{}", timer::ticks());
+        }
+        commands::UPTIME => {
+            print_uptime();
         }
         commands::PANIC => {
             panic!("panic command invoked");
