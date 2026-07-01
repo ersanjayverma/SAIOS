@@ -12,6 +12,9 @@ use crate::som::{HealthState, ObjectClass, ObjectFlags, ObjectHeader, ObjectStat
 use crate::provider::{DeviceProvider, ProcessProvider, Provider, ProviderObject, ProviderType, StorageProvider};
 use crate::{heap, pmm, scheduler, timer};
 
+#[path = "object_manager/tests.rs"]
+pub mod tests;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ObjectType {
     Kernel,
@@ -721,6 +724,10 @@ pub fn init() {
     });
 }
 
+pub fn is_initialized() -> bool {
+    with_manager_mut(|manager| manager.initialized)
+}
+
 pub fn object_types() -> Vec<String> {
     init();
     with_manager_mut(|manager| manager.object_types())
@@ -1118,4 +1125,53 @@ pub fn sys_read(path: &str) -> Option<Vec<String>> {
             }
         }
     }
+}
+
+pub fn verify() -> crate::kernel::testing::report::VerifyReport {
+    init();
+
+    with_manager_mut(|manager| {
+        let mut checks = Vec::new();
+
+        checks.push(if manager.initialized {
+            crate::kernel::testing::report::VerifyCheck::pass("Initialization", "manager initialized")
+        } else {
+            crate::kernel::testing::report::VerifyCheck::fail("Initialization", "manager not initialized")
+        });
+
+        let mut unique_ids = true;
+        for i in 0..manager.objects.len() {
+            for j in (i + 1)..manager.objects.len() {
+                if manager.objects[i].id == manager.objects[j].id {
+                    unique_ids = false;
+                }
+            }
+        }
+        checks.push(if unique_ids {
+            crate::kernel::testing::report::VerifyCheck::pass("Object ids", "all object ids unique")
+        } else {
+            crate::kernel::testing::report::VerifyCheck::fail("Object ids", "duplicate object id found")
+        });
+
+        let mut unique_providers = true;
+        for i in 0..manager.providers.len() {
+            for j in (i + 1)..manager.providers.len() {
+                if manager.providers[i].id == manager.providers[j].id
+                    || manager.providers[i].name == manager.providers[j].name
+                {
+                    unique_providers = false;
+                }
+            }
+        }
+        checks.push(if unique_providers {
+            crate::kernel::testing::report::VerifyCheck::pass("Provider registry", "providers are unique")
+        } else {
+            crate::kernel::testing::report::VerifyCheck::fail("Provider registry", "duplicate provider registration")
+        });
+
+        crate::kernel::testing::report::VerifyReport {
+            target: "object",
+            checks,
+        }
+    })
 }

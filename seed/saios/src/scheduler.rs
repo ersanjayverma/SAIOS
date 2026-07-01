@@ -7,6 +7,9 @@ use core::arch::global_asm;
 use hal::arch::x86_64::interrupt;
 use hal::arch::x86_64::sync::StaticCell;
 
+#[path = "scheduler/tests.rs"]
+pub mod tests;
+
 pub type ThreadId = u64;
 pub type VirtAddr = u64;
 
@@ -312,4 +315,45 @@ pub fn threads() -> Vec<ThreadInfo> {
             })
             .collect()
     })
+}
+
+pub fn verify() -> crate::kernel::testing::report::VerifyReport {
+    let snapshot = threads();
+    let mut checks = Vec::new();
+
+    checks.push(if !snapshot.is_empty() {
+        crate::kernel::testing::report::VerifyCheck::pass("Thread table", "thread records present")
+    } else {
+        crate::kernel::testing::report::VerifyCheck::fail("Thread table", "no threads registered")
+    });
+
+    let running = snapshot
+        .iter()
+        .filter(|t| t.state == ThreadState::Running)
+        .count();
+    checks.push(if running == 1 {
+        crate::kernel::testing::report::VerifyCheck::pass("Running thread", "exactly one running thread")
+    } else {
+        crate::kernel::testing::report::VerifyCheck::fail("Running thread", "invalid running thread count")
+    });
+
+    let mut unique = true;
+    for i in 0..snapshot.len() {
+        for j in (i + 1)..snapshot.len() {
+            if snapshot[i].id == snapshot[j].id {
+                unique = false;
+            }
+        }
+    }
+
+    checks.push(if unique {
+        crate::kernel::testing::report::VerifyCheck::pass("Thread ids", "all thread ids are unique")
+    } else {
+        crate::kernel::testing::report::VerifyCheck::fail("Thread ids", "duplicate thread id found")
+    });
+
+    crate::kernel::testing::report::VerifyReport {
+        target: "scheduler",
+        checks,
+    }
 }

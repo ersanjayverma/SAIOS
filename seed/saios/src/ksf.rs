@@ -599,3 +599,59 @@ pub fn info(name: &str) -> Option<ServiceSnapshot> {
             .find(|s| s.name.eq_ignore_ascii_case(name))
     })
 }
+
+pub fn verify() -> crate::kernel::testing::report::VerifyReport {
+    let snapshots = list();
+    let mut checks = Vec::new();
+
+    checks.push(if snapshots.is_empty() {
+        crate::kernel::testing::report::VerifyCheck::fail("Service registry", "no services registered")
+    } else {
+        crate::kernel::testing::report::VerifyCheck::pass("Service registry", "services are registered")
+    });
+
+    let mut unique_names = true;
+    let mut unique_ids = true;
+    for i in 0..snapshots.len() {
+        for j in (i + 1)..snapshots.len() {
+            if snapshots[i].name == snapshots[j].name {
+                unique_names = false;
+            }
+            if snapshots[i].id == snapshots[j].id {
+                unique_ids = false;
+            }
+        }
+    }
+
+    checks.push(if unique_ids {
+        crate::kernel::testing::report::VerifyCheck::pass("Service ids", "all ids are unique")
+    } else {
+        crate::kernel::testing::report::VerifyCheck::fail("Service ids", "duplicate service id found")
+    });
+
+    checks.push(if unique_names {
+        crate::kernel::testing::report::VerifyCheck::pass("Service names", "all names are unique")
+    } else {
+        crate::kernel::testing::report::VerifyCheck::fail("Service names", "duplicate service name found")
+    });
+
+    let mut deps_resolve = true;
+    for snapshot in &snapshots {
+        for dep in &snapshot.dependencies {
+            if snapshots.iter().find(|s| s.id == *dep).is_none() {
+                deps_resolve = false;
+            }
+        }
+    }
+
+    checks.push(if deps_resolve {
+        crate::kernel::testing::report::VerifyCheck::pass("Dependencies", "all dependencies resolve")
+    } else {
+        crate::kernel::testing::report::VerifyCheck::fail("Dependencies", "unresolved service dependency")
+    });
+
+    crate::kernel::testing::report::VerifyReport {
+        target: "service",
+        checks,
+    }
+}

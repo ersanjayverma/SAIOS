@@ -20,6 +20,23 @@ It formalizes how Managers, Providers, Services, and HAL interact, and freezes b
  Managers      Providers             Services        HAL
 ```
 
+## Kernel Core (0.2 Freeze)
+
+Frozen kernel core subsystems for SAIOS 0.2:
+
+- HAL
+- Memory Manager
+- Object Manager
+- Service Manager
+- Provider Manager
+- Event Bus
+- Query Engine
+- SAIFS
+- Scheduler
+- SNSH
+
+All new subsystem work must integrate through these contracts.
+
 ## 1. Managers (Own State)
 
 Managers own resources and enforce lifecycle and integrity for their domain.
@@ -213,3 +230,5 @@ The corresponding code-level contract module is:
 Related architecture document:
 
 - [docs/KSF.md](KSF.md)
+- [docs/SAIOS-0.2-Foundation.md](SAIOS-0.2-Foundation.md)
+- [docs/adr/ADR-0015-saios-0.2-foundation-freeze-and-validation.md](adr/ADR-0015-saios-0.2-foundation-freeze-and-validation.md)

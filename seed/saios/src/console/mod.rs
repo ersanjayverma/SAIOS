@@ -6,8 +6,10 @@ mod glyph;
 mod input;
 mod keyboard;
 mod serial;
+pub mod tests;
 
 use core::fmt::{self, Write};
+use alloc::vec::Vec;
 
 use backend::{ConsoleBackend, MirrorConsole};
 use cursor::Cursor;
@@ -324,6 +326,31 @@ pub fn read_line() -> String<256> {
             return line;
         }
         hal::arch::x86_64::cpu::pause();
+    }
+}
+
+pub fn is_initialized() -> bool {
+    CONSOLE_INITIALIZED.load(Ordering::Acquire)
+}
+
+pub fn verify() -> crate::kernel::testing::report::VerifyReport {
+    let mut checks = Vec::new();
+
+    checks.push(if is_initialized() {
+        crate::kernel::testing::report::VerifyCheck::pass("Console init", "console initialized")
+    } else {
+        crate::kernel::testing::report::VerifyCheck::fail("Console init", "console not initialized")
+    });
+
+    checks.push(if !CONSOLE_LOCKED.load(Ordering::Acquire) {
+        crate::kernel::testing::report::VerifyCheck::pass("Console lock", "lock not stuck")
+    } else {
+        crate::kernel::testing::report::VerifyCheck::fail("Console lock", "lock currently held")
+    });
+
+    crate::kernel::testing::report::VerifyReport {
+        target: "console",
+        checks,
     }
 }
 

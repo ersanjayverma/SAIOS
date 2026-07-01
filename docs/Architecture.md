@@ -17,6 +17,8 @@ SNOM ABI version compatibility policy: [docs/adr/ADR-0013-object-abi-versioning-
 Kernel architecture freeze: [docs/KernelArchitecture.md](KernelArchitecture.md).
 Kernel layering ADR: [docs/adr/ADR-0014-kernel-managers-providers-services-architecture.md](adr/ADR-0014-kernel-managers-providers-services-architecture.md).
 Kernel service lifecycle orchestration: [docs/KSF.md](KSF.md).
+SAIOS 0.2 foundation milestone: [docs/SAIOS-0.2-Foundation.md](SAIOS-0.2-Foundation.md).
+Foundation freeze ADR: [docs/adr/ADR-0015-saios-0.2-foundation-freeze-and-validation.md](adr/ADR-0015-saios-0.2-foundation-freeze-and-validation.md).
 SNSH shell architecture: [docs/SNSH.md](SNSH.md).
 
 ## Framework Naming

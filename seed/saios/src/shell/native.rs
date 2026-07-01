@@ -3,6 +3,7 @@ use alloc::string::String;
 
 use crate::console;
 use crate::heap;
+use crate::kernel::testing;
 use crate::ksf;
 use crate::object_manager;
 use crate::pci;
@@ -48,6 +49,16 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "service",
         description: "Manage kernel services",
         handler: cmd_service,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "test",
+        description: "Run kernel test suites",
+        handler: cmd_test,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "verify",
+        description: "Verify runtime invariants",
+        handler: cmd_verify,
     }));
     registry.register(Box::new(StaticCommand {
         name: "services",
@@ -236,6 +247,49 @@ fn cmd_service(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
         }
         _ => Err("service: expected list|start|stop|restart|health|info"),
     }
+}
+
+fn cmd_test(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+    let target = args.first().copied();
+    let report = testing::run_tests(target)?;
+
+    console::println!("Running {} tests...", report.total);
+    for failure in &report.failures {
+        console::println!("FAIL {}::{} - {}", failure.suite, failure.test, failure.reason);
+    }
+
+    if report.failed == 0 {
+        console::println!("{} / {} Passed", report.passed, report.total);
+    } else {
+        console::println!(
+            "{} / {} Passed ({} failed, {}%)",
+            report.passed,
+            report.total,
+            report.failed,
+            report.pass_rate_percent()
+        );
+    }
+
+    Ok(())
+}
+
+fn cmd_verify(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+    let target = args.first().copied();
+    let reports = testing::verify_target(target)?;
+
+    for report in reports {
+        console::println!("verify {}", report.target);
+        for check in report.checks {
+            console::println!("Checking {}...", check.name);
+            if check.passed {
+                console::println!("PASS ({})", check.detail);
+            } else {
+                console::println!("FAIL ({})", check.detail);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn cmd_services(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {

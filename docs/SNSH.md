@@ -106,6 +106,8 @@ Primary object-first interface:
 - objects
 - providers
 - service
+- test
+- verify
 - query
 - inspect
 - describe
@@ -131,6 +133,23 @@ Service subcommands:
 - service restart <name>
 - service health
 - service info <name>
+
+Validation commands:
+
+- test
+- test memory
+- test scheduler
+- test console
+- test object
+- test saifs
+- test all
+- verify memory
+- verify scheduler
+- verify console
+- verify object
+- verify service
+- verify saifs
+- verify all
 
 ### Compatibility Commands
 

@@ -10,6 +10,9 @@ use crate::som::{EventId, HandleId, ObjectId, OperationId, ProviderId};
 use crate::object_manager::{self, Health, ObjectMetadata, ObjectStatus, ObjectType, Property, PropertyMap};
 use crate::vfs;
 
+#[path = "saifs/tests.rs"]
+pub mod tests;
+
 pub use crate::som::KernelObject;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -540,6 +543,10 @@ pub fn init() {
     });
 }
 
+pub fn is_initialized() -> bool {
+    with_state(|state| state.initialized)
+}
+
 pub fn open(path: &str) -> Result<SaifsHandle, SaifsError> {
     init();
 
@@ -710,5 +717,36 @@ pub fn unsubscribe(id: SubscriptionId) -> Result<(), SaifsError> {
             return Err(SaifsError::NotFound);
         }
         Ok(())
+    })
+}
+
+pub fn verify() -> crate::kernel::testing::report::VerifyReport {
+    init();
+
+    with_state(|state| {
+        let mut checks = Vec::new();
+
+        checks.push(if state.initialized {
+            crate::kernel::testing::report::VerifyCheck::pass("Initialization", "saifs initialized")
+        } else {
+            crate::kernel::testing::report::VerifyCheck::fail("Initialization", "saifs not initialized")
+        });
+
+        checks.push(if state.mounts.iter().any(|m| m.path == "/") {
+            crate::kernel::testing::report::VerifyCheck::pass("Root mount", "root mount exists")
+        } else {
+            crate::kernel::testing::report::VerifyCheck::fail("Root mount", "missing root mount")
+        });
+
+        checks.push(if !state.providers.is_empty() {
+            crate::kernel::testing::report::VerifyCheck::pass("Provider registry", "provider(s) registered")
+        } else {
+            crate::kernel::testing::report::VerifyCheck::fail("Provider registry", "no providers registered")
+        });
+
+        crate::kernel::testing::report::VerifyReport {
+            target: "saifs",
+            checks,
+        }
     })
 }

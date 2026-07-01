@@ -7,8 +7,10 @@ extern crate alloc;
 pub mod driver;
 pub mod console;
 pub mod heap;
+pub mod kernel;
 pub mod kernel_arch;
 pub mod ksf;
+pub mod memory;
 pub mod object_manager;
 pub mod pci;
 pub mod pmm;
@@ -56,6 +58,9 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     heap::init();
     ksf::bootstrap().expect("KSF bootstrap failed");
     interrupt::enable();
+    if cfg!(debug_assertions) {
+        kernel::testing::boot_self_test();
+    }
    
     let seed = Seed::init(boot_info as *const SaiosBootInfo);
     seed.run()
