@@ -1,9 +1,12 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 #[macro_use]
 pub mod driver;
 pub mod console;
+pub mod heap;
 pub mod pmm;
 pub mod shell;
 pub mod seed;
@@ -11,6 +14,9 @@ use efi_main::SaiosBootInfo;
 use hal::arch::paging::{self, Table};
 use hal::arch::x86_64::{gdt, idt, interrupt};
 use seed::Seed;
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
@@ -34,6 +40,8 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     unsafe {
         (*pml4_ptr).entries[511].set_page(pml4_phys, paging::FLAG_WRITABLE);
     }
+
+    heap::init();
    
     let seed = Seed::init(boot_info as *const SaiosBootInfo);
     seed.run()

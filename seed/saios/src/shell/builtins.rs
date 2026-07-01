@@ -1,4 +1,5 @@
 use crate::console;
+use crate::heap;
 use crate::pmm;
 use crate::shell::commands;
 use crate::shell::parser::ParsedCommand;
@@ -9,6 +10,7 @@ fn print_help() {
     console::println!("version");
     console::println!("echo");
     console::println!("mem");
+    console::println!("heap");
     console::println!("panic");
     console::println!("reboot");
     console::println!("shutdown");
@@ -51,6 +53,12 @@ pub fn execute(parsed: ParsedCommand<'_>) {
                 console::println!("Used      : {}", pmm::used_pages());
                 console::println!("Free      : {}", pmm::free_pages());
             }
+        }
+        commands::HEAP => {
+            let stats = heap::stats();
+            console::println!("Heap Size : {} MB", stats.total / (1024 * 1024));
+            console::println!("Used      : {} KB", stats.used / 1024);
+            console::println!("Free      : {} KB", stats.free / 1024);
         }
         commands::PANIC => {
             panic!("panic command invoked");

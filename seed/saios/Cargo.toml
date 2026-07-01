@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-efi_main = { path = "../../boot/uefi/efi_main" }
+efi_main = { path = "../../boot/uefi/efi_main", default-features = false, features = ["uefi-boot"] }
 hal = {path = "../../hal" }
 heapless = { version = "0.9.3", default-features = false }
 

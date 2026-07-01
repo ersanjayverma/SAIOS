@@ -4,12 +4,23 @@ pub use crate::driver::memory::PAGE_SIZE;
 pub type PhysAddr = crate::driver::memory::PhysAddr;
 pub type MemoryMap = [MemoryRegion];
 
+#[derive(Copy, Clone, Debug, Default)]
+pub struct HeapStats {
+    pub total: usize,
+    pub used: usize,
+    pub free: usize,
+}
+
 pub fn init(memory_map: &MemoryMap) {
     crate::driver::memory::init(memory_map);
 }
 
 pub fn alloc_page() -> Option<PhysAddr> {
     crate::driver::memory::alloc_page()
+}
+
+pub fn alloc_pages(count: usize) -> Option<PhysAddr> {
+    crate::driver::memory::alloc_pages(count)
 }
 
 pub fn free_page(page: PhysAddr) {

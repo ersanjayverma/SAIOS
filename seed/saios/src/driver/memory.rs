@@ -99,24 +99,45 @@ pub fn init(entries: &[MemoryRegion]) {
 
 /// Allocate one 4 KiB physical page.
 pub fn alloc_page() -> Option<PhysAddr> {
-    let pmm = unsafe { &mut *PMM.get() };
-    if !pmm.initialized || pmm.free_pages == 0 || pmm.tracked_pages == 0 {
+    alloc_pages(1)
+}
+
+/// Allocate `count` contiguous 4 KiB pages.
+pub fn alloc_pages(count: usize) -> Option<PhysAddr> {
+    if count == 0 {
         return None;
     }
 
-    let start = if pmm.next_hint < pmm.tracked_pages {
+    let pmm = unsafe { &mut *PMM.get() };
+    if !pmm.initialized || pmm.free_pages < count || pmm.tracked_pages < count {
+        return None;
+    }
+
+    let start = if pmm.next_hint < pmm.tracked_pages.saturating_sub(count) + 1 {
         pmm.next_hint
     } else {
         0
     };
 
-    for offset in 0..pmm.tracked_pages {
-        let page = (start + offset) % pmm.tracked_pages;
-        if !pmm.is_used(page) {
-            pmm.set_used(page);
-            pmm.free_pages -= 1;
-            pmm.next_hint = page + 1;
-            return Some((page as u64) * PAGE_SIZE);
+    let max_start = pmm.tracked_pages - count;
+    for offset in 0..=max_start {
+        let first = (start + offset) % (max_start + 1);
+
+        let mut all_free = true;
+        for page in first..(first + count) {
+            if pmm.is_used(page) {
+                all_free = false;
+                break;
+            }
+        }
+
+        if all_free {
+            for page in first..(first + count) {
+                pmm.set_used(page);
+            }
+            pmm.free_pages -= count;
+            pmm.next_hint = first + count;
+            return Some((first as u64) * PAGE_SIZE);
         }
     }
 
