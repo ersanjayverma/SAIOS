@@ -17,7 +17,7 @@ use framebuffer::FramebufferConsole;
 use hal::arch::x86_64::sync::StaticCell;
 use input::InputBuffer;
 use keyboard::{KeyEvent, KeyboardDriver};
-use serial::SerialConsole;
+use serial::{poll_input_event as poll_serial_input_event, SerialConsole};
 use core::sync::atomic::{AtomicBool, Ordering};
 use efi_main::graphics::FramebufferInfo;
 use heapless::String;
@@ -189,6 +189,7 @@ static CONSOLE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static CONSOLE_LOCKED: AtomicBool = AtomicBool::new(false);
 static INPUT_BUFFER: StaticCell<InputBuffer> = StaticCell::new(InputBuffer::new());
 static KEYBOARD: StaticCell<KeyboardDriver> = StaticCell::new(KeyboardDriver::new());
+static INPUT_PROMPT: StaticCell<String<64>> = StaticCell::new(String::new());
 
 fn with_console<R>(f: impl FnOnce(&mut Console<DefaultBackend>) -> R) -> R {
     // SAFETY: single-core early kernel context; mutable global console singleton.
@@ -261,6 +262,19 @@ pub fn clear() {
     }
 
     let _ = try_with_console(|console| console.clear());
+}
+
+pub fn set_input_prompt(prompt: &str) {
+    // SAFETY: single-core early kernel context.
+    unsafe {
+        let slot = &mut *INPUT_PROMPT.get();
+        slot.clear();
+        for ch in prompt.chars() {
+            if slot.push(ch).is_err() {
+                break;
+            }
+        }
+    }
 }
 
 pub fn set_cursor(x: usize, y: usize) {
@@ -345,7 +359,7 @@ pub fn poll_input() -> Option<String<256>> {
     }
 
     // SAFETY: single-core early kernel context.
-    let key_event = unsafe { (*KEYBOARD.get()).poll_event() }?;
+    let key_event = unsafe { (*KEYBOARD.get()).poll_event() }.or_else(poll_serial_input_event)?;
 
     let prev_len = unsafe { (*INPUT_BUFFER.get()).len() };
     let prev_cursor = unsafe { (*INPUT_BUFFER.get()).cursor() };
@@ -366,6 +380,29 @@ pub fn poll_input() -> Option<String<256>> {
             let erased = unsafe { (*INPUT_BUFFER.get()).backspace() };
             if erased {
                 redraw_line(prev_len, prev_cursor);
+            }
+            None
+        }
+        KeyEvent::Delete => {
+            let erased = unsafe { (*INPUT_BUFFER.get()).delete() };
+            if erased {
+                redraw_line(prev_len, prev_cursor);
+            }
+            None
+        }
+        KeyEvent::Home => {
+            if unsafe { (*INPUT_BUFFER.get()).move_home() } {
+                for _ in 0..prev_cursor {
+                    move_cursor_left();
+                }
+            }
+            None
+        }
+        KeyEvent::End => {
+            if unsafe { (*INPUT_BUFFER.get()).move_end() } {
+                for _ in prev_cursor..prev_len {
+                    move_cursor_right();
+                }
             }
             None
         }
@@ -401,6 +438,72 @@ pub fn poll_input() -> Option<String<256>> {
             newline();
             unsafe { (*INPUT_BUFFER.get()).clear() };
             Some(String::new())
+        }
+        KeyEvent::CtrlA => {
+            if unsafe { (*INPUT_BUFFER.get()).move_home() } {
+                for _ in 0..prev_cursor {
+                    move_cursor_left();
+                }
+            }
+            None
+        }
+        KeyEvent::CtrlE => {
+            if unsafe { (*INPUT_BUFFER.get()).move_end() } {
+                for _ in prev_cursor..prev_len {
+                    move_cursor_right();
+                }
+            }
+            None
+        }
+        KeyEvent::CtrlD => {
+            let erased = unsafe { (*INPUT_BUFFER.get()).delete() };
+            if erased {
+                redraw_line(prev_len, prev_cursor);
+            }
+            None
+        }
+        KeyEvent::CtrlU => {
+            let changed = unsafe { (*INPUT_BUFFER.get()).clear_to_start() };
+            if changed {
+                redraw_line(prev_len, prev_cursor);
+            }
+            None
+        }
+        KeyEvent::CtrlK => {
+            let changed = unsafe { (*INPUT_BUFFER.get()).clear_to_end() };
+            if changed {
+                redraw_line(prev_len, prev_cursor);
+            }
+            None
+        }
+        KeyEvent::CtrlL => {
+            clear();
+
+            // SAFETY: single-core early kernel context.
+            let prompt = unsafe { (*INPUT_PROMPT.get()).clone() };
+            print(prompt.as_str());
+
+            // SAFETY: single-core early kernel context.
+            let input = unsafe { &mut *INPUT_BUFFER.get() };
+            let rendered = input.render();
+            for ch in rendered.chars() {
+                put_char(ch);
+            }
+
+            let len = input.len();
+            let cursor = input.cursor();
+            for _ in cursor..len {
+                move_cursor_left();
+            }
+
+            None
+        }
+        KeyEvent::CtrlW => {
+            let changed = unsafe { (*INPUT_BUFFER.get()).delete_prev_word() };
+            if changed {
+                redraw_line(prev_len, prev_cursor);
+            }
+            None
         }
         KeyEvent::Enter => {
             newline();

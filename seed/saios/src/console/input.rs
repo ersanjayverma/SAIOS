@@ -39,6 +39,15 @@ impl InputBuffer {
         true
     }
 
+    pub fn delete(&mut self) -> bool {
+        if self.cursor >= self.line.len() {
+            return false;
+        }
+
+        let _ = self.line.remove(self.cursor);
+        true
+    }
+
     pub fn move_left(&mut self) -> bool {
         if self.cursor == 0 {
             return false;
@@ -54,6 +63,24 @@ impl InputBuffer {
         }
 
         self.cursor += 1;
+        true
+    }
+
+    pub fn move_home(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+
+        self.cursor = 0;
+        true
+    }
+
+    pub fn move_end(&mut self) -> bool {
+        if self.cursor == self.line.len() {
+            return false;
+        }
+
+        self.cursor = self.line.len();
         true
     }
 
@@ -88,6 +115,44 @@ impl InputBuffer {
         self.cursor = 0;
         self.history_index = None;
         self.stashed_current.clear();
+    }
+
+    pub fn clear_to_start(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+
+        self.line.drain(0..self.cursor);
+        self.cursor = 0;
+        true
+    }
+
+    pub fn clear_to_end(&mut self) -> bool {
+        if self.cursor >= self.line.len() {
+            return false;
+        }
+
+        let end = self.line.len();
+        self.line.drain(self.cursor..end);
+        true
+    }
+
+    pub fn delete_prev_word(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+
+        let mut start = self.cursor;
+        while start > 0 && self.line[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !self.line[start - 1].is_whitespace() {
+            start -= 1;
+        }
+
+        self.line.drain(start..self.cursor);
+        self.cursor = start;
+        true
     }
 
     pub fn history_prev(&mut self) -> Option<String<256>> {

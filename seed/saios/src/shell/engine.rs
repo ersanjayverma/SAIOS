@@ -35,7 +35,9 @@ impl ShellEngine {
 
     fn render_prompt(&self) {
         let provider = SessionPromptProvider::new(&self.ctx.session);
-        console::print(provider.render().as_str());
+        let prompt = provider.render();
+        console::set_input_prompt(prompt.as_str());
+        console::print(prompt.as_str());
     }
 
     pub fn run(&mut self) {

@@ -20,6 +20,7 @@ pub fn init() {
     console::println!("SAIOS v0.10");
     console::println!("UEFI Boot");
     console::println!("Launching SISH...");
+    console::println!("UTF framebuffer: Cafe Ω α あ ┌─┐ █");
     console::newline();
     object_manager::init();
     saifs::init();
