@@ -3,6 +3,8 @@ mod cursor;
 mod framebuffer;
 mod font;
 mod glyph;
+mod input;
+mod keyboard;
 mod serial;
 
 use core::fmt::{self, Write};
@@ -11,9 +13,12 @@ use backend::{ConsoleBackend, MirrorConsole};
 use cursor::Cursor;
 use framebuffer::FramebufferConsole;
 use hal::arch::x86_64::sync::StaticCell;
+use input::InputBuffer;
+use keyboard::{KeyEvent, KeyboardDriver};
 use serial::SerialConsole;
 use core::sync::atomic::{AtomicBool, Ordering};
 use efi_main::graphics::FramebufferInfo;
+use heapless::String;
 
 const DEFAULT_WIDTH: usize = 80;
 const DEFAULT_HEIGHT: usize = 25;
@@ -166,6 +171,8 @@ static CONSOLE: StaticCell<Console<DefaultBackend>> =
 
 static CONSOLE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static CONSOLE_LOCKED: AtomicBool = AtomicBool::new(false);
+static INPUT_BUFFER: StaticCell<InputBuffer> = StaticCell::new(InputBuffer::new());
+static KEYBOARD: StaticCell<KeyboardDriver> = StaticCell::new(KeyboardDriver::new());
 
 fn with_console<R>(f: impl FnOnce(&mut Console<DefaultBackend>) -> R) -> R {
     // SAFETY: single-core early kernel context; mutable global console singleton.
@@ -192,6 +199,9 @@ fn emergency_write_str(s: &str) {
 pub fn init() {
     SerialConsole::init();
     with_console(|console| console.init());
+    unsafe {
+        (*INPUT_BUFFER.get()).clear();
+    }
     CONSOLE_INITIALIZED.store(true, Ordering::Release);
 }
 
@@ -275,6 +285,42 @@ pub fn panic_write_str(s: &str) {
 pub fn panic_println(s: &str) {
     panic_write_str(s);
     panic_write_str("\n");
+}
+
+pub fn prompt() {
+    print("> ");
+}
+
+pub fn poll_input() -> Option<String<256>> {
+    // SAFETY: single-core early kernel context.
+    let key_event = unsafe { (*KEYBOARD.get()).poll_event() }?;
+
+    match key_event {
+        KeyEvent::Character(ch) => {
+            unsafe { (*INPUT_BUFFER.get()).push(ch) };
+            put_char(ch);
+            None
+        }
+        KeyEvent::Backspace => {
+            let erased = unsafe { (*INPUT_BUFFER.get()).backspace() };
+            if erased {
+                put_char('\x08');
+            }
+            None
+        }
+        KeyEvent::Enter => {
+            newline();
+            let line = unsafe { (*INPUT_BUFFER.get()).take() };
+            unsafe { (*INPUT_BUFFER.get()).clear() };
+            prompt();
+            Some(line)
+        }
+        KeyEvent::Tab => {
+            put_char('\t');
+            None
+        }
+        KeyEvent::Escape => None,
+    }
 }
 
 #[macro_export]
