@@ -4,8 +4,9 @@
 #[macro_use]
 pub mod driver;
 pub mod console;
+pub mod shell;
 pub mod seed;
-use driver::memory::{alloc_page, available, init, used};
+use driver::memory::{alloc_page, init};
 use efi_main::SaiosBootInfo;
 use hal::arch::paging::{self, Table};
 use hal::arch::x86_64::{gdt, idt, interrupt};
@@ -19,7 +20,6 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     gdt::init();
     idt::init();
 
-    console::println!("start");
     // Convert the raw pointer and count into a temporary Rust slice
     let _entries_slice = unsafe {
         core::slice::from_raw_parts(
@@ -36,10 +36,6 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     unsafe {
         (*pml4_ptr).entries[511].set_page(pml4_phys, paging::FLAG_WRITABLE);
     }
-    console::println!("Allocated PML4 at physical address: {:#x}", pml4_phys);
-    console::println!("PMM used: {} bytes", unsafe { used() });
-    console::println!("PMM available: {} bytes", unsafe { available() });
-    console::println!("Current CR3: {:#x}", paging::read_cr3());
    
     let seed = Seed::init(boot_info);
     seed.run()

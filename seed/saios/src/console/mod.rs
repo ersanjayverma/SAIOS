@@ -312,7 +312,6 @@ pub fn poll_input() -> Option<String<256>> {
             newline();
             let line = unsafe { (*INPUT_BUFFER.get()).take() };
             unsafe { (*INPUT_BUFFER.get()).clear() };
-            prompt();
             Some(line)
         }
         KeyEvent::Tab => {
@@ -320,6 +319,15 @@ pub fn poll_input() -> Option<String<256>> {
             None
         }
         KeyEvent::Escape => None,
+    }
+}
+
+pub fn read_line() -> String<256> {
+    loop {
+        if let Some(line) = poll_input() {
+            return line;
+        }
+        hal::arch::x86_64::cpu::pause();
     }
 }
 
