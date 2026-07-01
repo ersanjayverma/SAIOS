@@ -4,9 +4,9 @@
 #[macro_use]
 pub mod driver;
 pub mod console;
+pub mod pmm;
 pub mod shell;
 pub mod seed;
-use driver::memory::{alloc_page, init};
 use efi_main::SaiosBootInfo;
 use hal::arch::paging::{self, Table};
 use hal::arch::x86_64::{gdt, idt, interrupt};
@@ -26,8 +26,8 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
         core::slice::from_raw_parts(boot_info.memorymap.entries, boot_info.memorymap.entry_count)
     };
     // Initialize PMM with the boot memory map and take one page for PML4.
-    init(_entries_slice);
-    let pml4_phys = alloc_page().expect("PMM: no free pages for PML4");
+    pmm::init(_entries_slice);
+    let pml4_phys = pmm::alloc_page().expect("PMM: no free pages for PML4");
     let pml4_ptr = pml4_phys as *mut Table;
     unsafe { (*pml4_ptr).clear() };
     // Recursive mapping: last PML4 slot points to the PML4 itself.

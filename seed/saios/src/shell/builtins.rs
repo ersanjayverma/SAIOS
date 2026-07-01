@@ -1,4 +1,5 @@
 use crate::console;
+use crate::pmm;
 use crate::shell::commands;
 use crate::shell::parser::ParsedCommand;
 
@@ -7,6 +8,7 @@ fn print_help() {
     console::println!("clear");
     console::println!("version");
     console::println!("echo");
+    console::println!("mem");
     console::println!("panic");
     console::println!("reboot");
     console::println!("shutdown");
@@ -39,6 +41,16 @@ pub fn execute(parsed: ParsedCommand<'_>) {
                 first = false;
             }
             console::newline();
+        }
+        commands::MEM => {
+            if parsed.args.first().copied() == Some("test") {
+                pmm::run_reuse_test(1000);
+            } else {
+                console::println!("Total RAM : {} MB", pmm::total_ram_mb());
+                console::println!("Pages     : {}", pmm::total_pages());
+                console::println!("Used      : {}", pmm::used_pages());
+                console::println!("Free      : {}", pmm::free_pages());
+            }
         }
         commands::PANIC => {
             panic!("panic command invoked");

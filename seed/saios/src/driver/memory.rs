@@ -1,6 +1,7 @@
 use efi_main::memorymap::{MemoryRegion, MemoryType};
 use hal::arch::x86_64::sync::StaticCell;
 
+pub type PhysAddr = u64;
 pub const PAGE_SIZE: u64 = 4096;
 const MAX_TRACKED_MEMORY_BYTES: u64 = 64 * 1024 * 1024 * 1024; // 64 GiB
 const MAX_PAGES: usize = (MAX_TRACKED_MEMORY_BYTES / PAGE_SIZE) as usize;
@@ -97,7 +98,7 @@ pub fn init(entries: &[MemoryRegion]) {
 }
 
 /// Allocate one 4 KiB physical page.
-pub fn alloc_page() -> Option<u64> {
+pub fn alloc_page() -> Option<PhysAddr> {
     let pmm = unsafe { &mut *PMM.get() };
     if !pmm.initialized || pmm.free_pages == 0 || pmm.tracked_pages == 0 {
         return None;
@@ -123,7 +124,7 @@ pub fn alloc_page() -> Option<u64> {
 }
 
 /// Free one 4 KiB physical page.
-pub fn free_page(phys_addr: u64) -> bool {
+pub fn free_page(phys_addr: PhysAddr) -> bool {
     if phys_addr & (PAGE_SIZE - 1) != 0 {
         return false;
     }
@@ -182,4 +183,28 @@ pub fn available() -> u64 {
         return 0;
     }
     (pmm.free_pages as u64) * PAGE_SIZE
+}
+
+pub fn total_pages() -> usize {
+    let pmm = unsafe { &*PMM.get() };
+    if !pmm.initialized {
+        return 0;
+    }
+    pmm.tracked_pages
+}
+
+pub fn free_pages() -> usize {
+    let pmm = unsafe { &*PMM.get() };
+    if !pmm.initialized {
+        return 0;
+    }
+    pmm.free_pages
+}
+
+pub fn used_pages() -> usize {
+    let pmm = unsafe { &*PMM.get() };
+    if !pmm.initialized {
+        return 0;
+    }
+    pmm.tracked_pages.saturating_sub(pmm.free_pages)
 }
