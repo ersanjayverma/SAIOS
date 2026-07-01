@@ -1,11 +1,13 @@
 use crate::console;
 use crate::heap;
+use crate::object_manager;
 use crate::pci;
 use crate::pmm;
 use crate::scheduler;
 use crate::shell::commands;
 use crate::shell::parser::ParsedCommand;
 use crate::timer;
+use crate::vfs;
 
 fn print_help() {
     console::println!("help");
@@ -18,6 +20,19 @@ fn print_help() {
     console::println!("ticks");
     console::println!("uptime");
     console::println!("threads");
+    console::println!("objects");
+    console::println!("inspect");
+    console::println!("explain");
+    console::println!("diagnose");
+    console::println!("health");
+    console::println!("events");
+    console::println!("ls");
+    console::println!("pwd");
+    console::println!("cd");
+    console::println!("mkdir");
+    console::println!("touch");
+    console::println!("cat");
+    console::println!("rm");
     console::println!("panic");
     console::println!("reboot");
     console::println!("shutdown");
@@ -112,6 +127,133 @@ pub fn execute(parsed: ParsedCommand<'_>) {
             console::println!("ID   State");
             for t in scheduler::threads() {
                 console::println!("{}    {}", t.id, state_name(t.state));
+            }
+        }
+        commands::OBJECTS => {
+            for ty in object_manager::object_types() {
+                console::println!("{}", ty);
+            }
+        }
+        commands::INSPECT => {
+            match parsed.args.first().copied() {
+                Some(path) => match object_manager::inspect(path) {
+                    Ok(lines) => {
+                        for line in lines {
+                            console::println!("{}", line);
+                        }
+                    }
+                    Err(e) => console::println!("inspect: {}", e),
+                },
+                None => console::println!("inspect: missing object path"),
+            }
+        }
+        commands::EXPLAIN => {
+            match parsed.args.first().copied() {
+                Some(path) => match object_manager::explain(path) {
+                    Ok(lines) => {
+                        for line in lines {
+                            console::println!("{}", line);
+                        }
+                    }
+                    Err(e) => console::println!("explain: {}", e),
+                },
+                None => console::println!("explain: missing object path"),
+            }
+        }
+        commands::DIAGNOSE => {
+            match parsed.args.first().copied() {
+                Some(path) => match object_manager::diagnose(path) {
+                    Ok(lines) => {
+                        for line in lines {
+                            console::println!("{}", line);
+                        }
+                    }
+                    Err(e) => console::println!("diagnose: {}", e),
+                },
+                None => console::println!("diagnose: missing object path"),
+            }
+        }
+        commands::HEALTH => {
+            for line in object_manager::health_summary() {
+                console::println!("{}", line);
+            }
+        }
+        commands::EVENTS => {
+            let limit = parsed
+                .args
+                .first()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(16);
+
+            for line in object_manager::events(limit) {
+                console::println!("{}", line);
+            }
+        }
+        commands::LS => {
+            let path = parsed.args.first().copied();
+            match vfs::ls(path) {
+                Ok(entries) => {
+                    for name in entries {
+                        console::println!("{}", name);
+                    }
+                }
+                Err(e) => console::println!("ls: {}", e),
+            }
+        }
+        commands::PWD => {
+            console::println!("{}", vfs::pwd());
+        }
+        commands::CD => {
+            match parsed.args.first().copied() {
+                Some(path) => {
+                    if let Err(e) = vfs::cd(path) {
+                        console::println!("cd: {}", e);
+                    }
+                }
+                None => console::println!("cd: missing path"),
+            }
+        }
+        commands::MKDIR => {
+            match parsed.args.first().copied() {
+                Some(path) => {
+                    if let Err(e) = vfs::mkdir(path) {
+                        console::println!("mkdir: {}", e);
+                    }
+                }
+                None => console::println!("mkdir: missing path"),
+            }
+        }
+        commands::TOUCH => {
+            match parsed.args.first().copied() {
+                Some(path) => {
+                    if let Err(e) = vfs::touch(path) {
+                        console::println!("touch: {}", e);
+                    }
+                }
+                None => console::println!("touch: missing path"),
+            }
+        }
+        commands::CAT => {
+            match parsed.args.first().copied() {
+                Some(path) => match vfs::cat(path) {
+                    Ok(contents) => {
+                        if !contents.is_empty() {
+                            console::println!("{}", contents);
+                        }
+                    }
+                    Err(e) => console::println!("cat: {}", e),
+                },
+                None => console::println!("cat: missing path"),
+            }
+        }
+        commands::RM => {
+            match parsed.args.first().copied() {
+                Some(path) => {
+                    if let Err(e) = vfs::rm(path) {
+                        console::println!("rm: {}", e);
+                    }
+                }
+                None => console::println!("rm: missing path"),
             }
         }
         commands::PANIC => {

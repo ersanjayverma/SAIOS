@@ -3,11 +3,15 @@ mod commands;
 mod parser;
 
 use crate::console;
+use crate::object_manager;
+use crate::vfs;
 
 const PROMPT: &str = "SAIOS v0.1>";
 
 pub fn init() {
     console::clear();
+    object_manager::init();
+    vfs::init();
 }
 
 pub fn run() -> ! {

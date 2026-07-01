@@ -97,7 +97,7 @@ impl Scheduler {
         let mut rsp = stack_top & !0xF;
         rsp -= core::mem::size_of::<usize>();
         unsafe {
-            *(rsp as *mut usize) = thread_trampoline as usize;
+            *(rsp as *mut usize) = thread_trampoline as *const () as usize;
         }
 
         let thread = Thread {
