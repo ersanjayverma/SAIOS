@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 use crate::console;
 use crate::heap;
+use crate::kernel::object as kom;
 use crate::kernel::testing;
 use crate::ksf;
 use crate::object_manager;
@@ -108,8 +109,13 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_status,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "stats",
+        description: "Show KOM object statistics",
+        handler: cmd_stats,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "objects",
-        description: "List object kinds",
+        description: "List KOM objects (optionally filtered by type)",
         handler: cmd_objects,
     }));
     registry.register(Box::new(StaticCommand {
@@ -434,9 +440,40 @@ fn cmd_status(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_objects(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
-    for ty in object_manager::object_types() {
-        console::println!("{}", ty);
+fn cmd_stats(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    let s = kom::stats();
+    console::println!("KOM Objects : {}", s.total);
+    console::println!("Kernel      : {}", s.kernels);
+    console::println!("Process     : {}", s.processes);
+    console::println!("Thread      : {}", s.threads);
+    console::println!("Driver      : {}", s.drivers);
+    console::println!("Device      : {}", s.devices);
+    console::println!("Mount       : {}", s.mounts);
+    Ok(())
+}
+
+fn cmd_objects(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    if args.first().copied() == Some("types") {
+        console::println!("Kernel");
+        console::println!("Process");
+        console::println!("Thread");
+        console::println!("Driver");
+        console::println!("Device");
+        console::println!("Mount");
+        return Ok(());
+    }
+
+    let records = if let Some(filter) = args.first().copied() {
+        let object_type = kom::ObjectType::parse(filter)
+            .ok_or("objects: expected kernel|process|thread|driver|device|mount|types")?;
+        kom::find_by_type(object_type)
+    } else {
+        kom::enumerate()
+    };
+
+    console::println!("ID   TYPE      NAME");
+    for obj in records {
+        console::println!("{}    {}    {}", obj.id.0, obj.object_type.as_str(), obj.name);
     }
     Ok(())
 }
@@ -584,8 +621,19 @@ fn cmd_query(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_inspect(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("inspect: missing object path")?;
-    for line in object_manager::inspect(path)? {
+    let target = args.first().copied().ok_or("inspect: missing object id or path")?;
+
+    if let Ok(id) = target.parse::<u64>() {
+        if let Some(lines) = kom::inspect(kom::ObjectId(id)) {
+            for line in lines {
+                console::println!("{}", line);
+            }
+            return Ok(());
+        }
+        return Err("inspect: object id not found");
+    }
+
+    for line in object_manager::inspect(target)? {
         console::println!("{}", line);
     }
     Ok(())
