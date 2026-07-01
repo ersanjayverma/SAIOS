@@ -1,5 +1,6 @@
 use crate::console;
 use crate::heap;
+use crate::pci;
 use crate::pmm;
 use crate::shell::commands;
 use crate::shell::parser::ParsedCommand;
@@ -11,6 +12,7 @@ fn print_help() {
     console::println!("echo");
     console::println!("mem");
     console::println!("heap");
+    console::println!("pci");
     console::println!("panic");
     console::println!("reboot");
     console::println!("shutdown");
@@ -59,6 +61,20 @@ pub fn execute(parsed: ParsedCommand<'_>) {
             console::println!("Heap Size : {} MB", stats.total / (1024 * 1024));
             console::println!("Used      : {} KB", stats.used / 1024);
             console::println!("Free      : {} KB", stats.free / 1024);
+        }
+        commands::PCI => {
+            console::println!("Bus Dev Fn Vendor Device Class");
+            for dev in pci::devices() {
+                console::println!(
+                    "{:02x} {:02x} {:02x} {:04x} {:04x} {}",
+                    dev.bus,
+                    dev.device,
+                    dev.function,
+                    dev.vendor_id,
+                    dev.device_id,
+                    pci::class_name(dev.class)
+                );
+            }
         }
         commands::PANIC => {
             panic!("panic command invoked");

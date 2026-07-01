@@ -4,6 +4,7 @@ pub const VERSION: &str = "version";
 pub const ECHO: &str = "echo";
 pub const MEM: &str = "mem";
 pub const HEAP: &str = "heap";
+pub const PCI: &str = "pci";
 pub const PANIC: &str = "panic";
 pub const REBOOT: &str = "reboot";
 pub const SHUTDOWN: &str = "shutdown";

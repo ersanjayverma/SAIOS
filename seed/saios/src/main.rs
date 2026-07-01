@@ -7,6 +7,7 @@ extern crate alloc;
 pub mod driver;
 pub mod console;
 pub mod heap;
+pub mod pci;
 pub mod pmm;
 pub mod shell;
 pub mod seed;
