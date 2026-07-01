@@ -6,29 +6,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
+use crate::som::{EventId, HandleId, ObjectId, OperationId, ProviderId};
 use crate::object_manager::{self, Health, ObjectMetadata, ObjectStatus, ObjectType, Property, PropertyMap};
 use crate::vfs;
 
-pub use crate::object_manager::KernelObject;
-pub type ObjectId = crate::object_manager::ObjectId;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProviderId(pub u64);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct HandleId(pub u64);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OperationId(pub u32);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum ObjectState {
-    Online,
-    Busy,
-    Warning,
-    Faulted,
-    Offline,
-}
+pub use crate::som::KernelObject;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SaifsNodeKind {
@@ -117,9 +99,6 @@ pub trait MountManager {
     fn resolve_provider(&self, path: &str) -> Result<ProviderId, SaifsError>;
     fn mounts(&self) -> Vec<MountPoint>;
 }
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct EventId(pub u64);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum EventType {
@@ -312,9 +291,7 @@ impl NamespaceProvider for DefaultVfsProvider {
         }
 
         let obj = object_manager::metadata(&path);
-        Ok(obj
-            .map(|m| m.id)
-            .unwrap_or(crate::object_manager::ObjectId(0)))
+        Ok(obj.map(|m| m.id).unwrap_or(ObjectId(0)))
     }
 
     fn remove(&self, _ctx: &LookupContext, path: &str) -> Result<(), SaifsError> {

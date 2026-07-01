@@ -1,4 +1,5 @@
 use alloc::format;
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -6,10 +7,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
-use crate::{heap, pci, pmm, scheduler, timer};
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ObjectId(pub u64);
+pub use crate::som::ObjectId;
+use crate::som::{HealthState, ObjectClass, ObjectFlags, ObjectHeader, ObjectState as SomObjectState, ProviderId};
+use crate::provider::{DeviceProvider, ProcessProvider, Provider, ProviderObject, ProviderType, StorageProvider};
+use crate::{heap, pmm, scheduler, timer};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ObjectType {
@@ -79,9 +80,14 @@ pub struct DiagnosticReport {
 pub struct ObjectMetadata {
     pub id: ObjectId,
     pub name: String,
+    pub provider_name: String,
     pub kind: ObjectType,
     pub status: ObjectStatus,
     pub health: Health,
+    pub class: ObjectClass,
+    pub created: u64,
+    pub modified: u64,
+    pub provider: ProviderId,
     pub properties: PropertyMap,
     pub children: Vec<ObjectId>,
 }
@@ -96,9 +102,11 @@ pub trait Diagnosable {
 
 #[derive(Clone)]
 struct ManagedObject {
+    header: ObjectHeader,
     id: ObjectId,
     name: String,
     path: String,
+    provider_name: String,
     object_type: ObjectType,
     status: ObjectStatus,
     health: Health,
@@ -182,7 +190,17 @@ struct ObjectManager {
     initialized: bool,
     next_id: ObjectId,
     objects: Vec<ManagedObject>,
+    providers: Vec<ProviderInfo>,
+    provider_instances: Vec<Box<dyn Provider>>,
     events: Vec<EventRecord>,
+}
+
+#[derive(Clone)]
+pub struct ProviderInfo {
+    pub id: ProviderId,
+    pub name: String,
+    pub provider_type: ProviderType,
+    pub namespace: String,
 }
 
 impl ObjectManager {
@@ -191,6 +209,8 @@ impl ObjectManager {
             initialized: false,
             next_id: ObjectId(1),
             objects: Vec::new(),
+            providers: Vec::new(),
+            provider_instances: Vec::new(),
             events: Vec::new(),
         }
     }
@@ -216,10 +236,29 @@ impl ObjectManager {
         }
 
         let id = self.alloc_id();
+        let now = timer::ticks();
+        let parent = parent_path.and_then(|p| self.objects.iter().find(|o| o.path == p).map(|o| o.id));
+
+        let header = ObjectHeader {
+            id,
+            class: map_object_class(object_type),
+            state: map_object_state(status),
+            health: map_health_state(health),
+            name: name.to_string(),
+            owner: None,
+            parent,
+            created: now,
+            modified: now,
+            provider: ProviderId(1),
+            flags: ObjectFlags::SYSTEM,
+        };
+
         self.objects.push(ManagedObject {
+            header,
             id,
             name: name.to_string(),
             path: path.to_string(),
+            provider_name: "core".to_string(),
             object_type,
             status,
             health,
@@ -394,78 +433,60 @@ impl ObjectManager {
         );
     }
 
+    fn register_provider_objects(
+        &mut self,
+        provider_id: ProviderId,
+        provider_name: &str,
+        objects: Vec<ProviderObject>,
+    ) {
+        for obj in objects {
+            let id = self.register_object(
+                &obj.path,
+                &obj.name,
+                obj.object_type,
+                obj.status,
+                obj.health,
+                obj.properties,
+                obj.parent_path.as_deref(),
+            );
+
+            if let Some(managed) = self.objects.iter_mut().find(|o| o.id == id) {
+                managed.header.provider = provider_id;
+                managed.provider_name = provider_name.to_string();
+                managed.header.modified = timer::ticks();
+            }
+        }
+    }
+
+    fn register_provider_instance(&mut self, mut provider: Box<dyn Provider>) {
+        let id = provider.id();
+        let name = provider.name().to_string();
+
+        if self.providers.iter().any(|p| p.id == id || p.name == name) {
+            return;
+        }
+
+        provider.initialize();
+        let objects = provider.enumerate();
+
+        self.register_provider_objects(id, &name, objects);
+
+        self.providers.push(ProviderInfo {
+            id,
+            name: name.clone(),
+            provider_type: provider.provider_type(),
+            namespace: provider.namespace().to_string(),
+        });
+        self.provider_instances.push(provider);
+        self.push_event(format!("Provider registered: {}", name));
+    }
+
     fn seed_runtime_objects(&mut self) {
-        pci::init();
-
-        let mut device_idx: usize = 0;
-        for dev in pci::devices() {
-            let path = format!("devices/pci{}", device_idx);
-            let name = format!("pci{}", device_idx);
-            let status = ObjectStatus::Online;
-            let health = Health::Healthy;
-            let props = vec_prop(&[
-                ("Vendor", hex16(dev.vendor_id)),
-                ("Device", hex16(dev.device_id)),
-                ("Class", pci::class_name(dev.class).to_string()),
-                (
-                    "Location",
-                    format!("{:02x}:{:02x}.{}", dev.bus, dev.device, dev.function),
-                ),
-            ]);
-
-            self.register_object(
-                &path,
-                &name,
-                ObjectType::Device,
-                status,
-                health,
-                props,
-                Some("devices"),
-            );
-            device_idx = device_idx.saturating_add(1);
-        }
-
-        for thread in scheduler::threads() {
-            let proc_path = format!("processes/{}", thread.id);
-            let proc_name = format!("{}", thread.id);
-            let proc_status = match thread.state {
-                scheduler::ThreadState::Dead => ObjectStatus::Offline,
-                scheduler::ThreadState::Blocked | scheduler::ThreadState::Sleeping => {
-                    ObjectStatus::Busy
-                }
-                _ => ObjectStatus::Online,
-            };
-            let proc_health = match thread.state {
-                scheduler::ThreadState::Dead => Health::Critical,
-                scheduler::ThreadState::Blocked => Health::Warning,
-                _ => Health::Healthy,
-            };
-
-            self.register_object(
-                &proc_path,
-                &proc_name,
-                ObjectType::Process,
-                proc_status,
-                proc_health,
-                vec_prop(&[("State", thread_state_name(thread.state))]),
-                Some("processes"),
-            );
-
-            let thread_path = format!("threads/{}", thread.id);
-            self.register_object(
-                &thread_path,
-                &proc_name,
-                ObjectType::Thread,
-                proc_status,
-                proc_health,
-                vec_prop(&[("State", thread_state_name(thread.state))]),
-                Some("system"),
-            );
-        }
+        self.register_provider_instance(Box::new(StorageProvider::new(ProviderId(10))));
+        self.register_provider_instance(Box::new(DeviceProvider::new(ProviderId(11))));
+        self.register_provider_instance(Box::new(ProcessProvider::new(ProviderId(12))));
 
         self.push_event("Object manager initialized");
-        self.push_event("Storage provider attached: tmpfs");
-        self.push_event("Driver loaded: pci");
     }
 
     fn push_event(&mut self, message: impl Into<String>) {
@@ -606,8 +627,40 @@ fn vec_prop(values: &[(&str, impl ToString + Clone)]) -> PropertyMap {
     map
 }
 
-fn hex16(v: u16) -> String {
-    format!("0x{:04x}", v)
+fn map_object_class(ty: ObjectType) -> ObjectClass {
+    match ty {
+        ObjectType::Kernel => ObjectClass::Kernel,
+        ObjectType::Process => ObjectClass::Process,
+        ObjectType::Thread => ObjectClass::Thread,
+        ObjectType::File => ObjectClass::File,
+        ObjectType::Device => ObjectClass::Device,
+        ObjectType::Driver => ObjectClass::Driver,
+        ObjectType::MemoryRegion => ObjectClass::Memory,
+        ObjectType::NetworkInterface => ObjectClass::Network,
+        ObjectType::Service => ObjectClass::Service,
+        ObjectType::Volume => ObjectClass::Volume,
+        ObjectType::Timer => ObjectClass::System,
+        ObjectType::Event => ObjectClass::Event,
+        ObjectType::AiSkill => ObjectClass::Skill,
+    }
+}
+
+fn map_object_state(status: ObjectStatus) -> SomObjectState {
+    match status {
+        ObjectStatus::Online => SomObjectState::Running,
+        ObjectStatus::Busy => SomObjectState::Running,
+        ObjectStatus::Faulted => SomObjectState::Stopping,
+        ObjectStatus::Offline => SomObjectState::Paused,
+    }
+}
+
+fn map_health_state(health: Health) -> HealthState {
+    match health {
+        Health::Healthy => HealthState::Healthy,
+        Health::Warning => HealthState::Warning,
+        Health::Critical => HealthState::Critical,
+        Health::Offline => HealthState::Offline,
+    }
 }
 
 fn object_type_name(ty: ObjectType) -> &'static str {
@@ -673,6 +726,87 @@ pub fn object_types() -> Vec<String> {
     with_manager_mut(|manager| manager.object_types())
 }
 
+pub fn providers() -> Vec<ProviderInfo> {
+    init();
+    with_manager_mut(|manager| manager.providers.clone())
+}
+
+pub fn query(expression: &str) -> Result<Vec<String>, &'static str> {
+    init();
+
+    let expr = expression.trim();
+    if expr.is_empty() {
+        return Err("empty query");
+    }
+
+    let mut predicates: Vec<(&str, &str, &str)> = Vec::new();
+    for part in expr.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        let (key, op, value) = if let Some((k, v)) = part.split_once("!=") {
+            (k.trim(), "!=", v.trim())
+        } else if let Some((k, v)) = part.split_once('=') {
+            (k.trim(), "=", v.trim())
+        } else {
+            return Err("invalid query format");
+        };
+
+        if key.is_empty() || value.is_empty() {
+            return Err("invalid query format");
+        }
+
+        predicates.push((key, op, value));
+    }
+
+    if predicates.is_empty() {
+        return Err("invalid query format");
+    }
+
+    with_manager_mut(|manager| {
+        let mut out = Vec::new();
+
+        for obj in &manager.objects {
+            let mut all_match = true;
+
+            for (key, op, value) in &predicates {
+                let candidate = match *key {
+                    "kind" => object_type_name(obj.object_type).eq_ignore_ascii_case(value),
+                    "health" => health_name(obj.health).eq_ignore_ascii_case(value),
+                    "provider" => obj.provider_name.eq_ignore_ascii_case(value),
+                    "parent" => obj
+                        .header
+                        .parent
+                        .and_then(|pid| {
+                            manager
+                                .objects
+                                .iter()
+                                .find(|o| o.id == pid)
+                                .map(|o| o.name.clone())
+                        })
+                        .is_some_and(|n| n.eq_ignore_ascii_case(value)),
+                    _ => return Err("unsupported query key"),
+                };
+
+                let matched = if *op == "=" { candidate } else { !candidate };
+                if !matched {
+                    all_match = false;
+                    break;
+                }
+            }
+
+            if all_match {
+                out.push(obj.path.clone());
+            }
+        }
+
+        out.sort();
+        Ok(out)
+    })
+}
+
 pub fn list_namespace(namespace: &str) -> Vec<String> {
     init();
     with_manager_mut(|manager| manager.list_by_prefix(&canonical_path(namespace)))
@@ -707,9 +841,14 @@ pub fn metadata(path: &str) -> Option<ObjectMetadata> {
         manager.object_by_path(&target).map(|obj| ObjectMetadata {
             id: obj.id,
             name: obj.name.clone(),
+            provider_name: obj.provider_name.clone(),
             kind: obj.object_type,
             status: obj.status,
             health: obj.health,
+            class: obj.header.class,
+            created: obj.header.created,
+            modified: obj.header.modified,
+            provider: obj.header.provider,
             properties: obj.properties.clone(),
             children: obj.children.clone(),
         })
@@ -739,6 +878,11 @@ pub fn inspect(path: &str) -> Result<Vec<String>, &'static str> {
         let mut out = Vec::new();
         out.push(format!("{} : {}", object_type_name(obj.object_type), obj.name));
         out.push(format!("Path : {}", obj.path));
+        out.push(format!("Class : {:?}", obj.header.class));
+        out.push(format!("Provider Name : {}", obj.provider_name));
+        out.push(format!("Created : {}", obj.header.created));
+        out.push(format!("Modified : {}", obj.header.modified));
+        out.push(format!("Provider : {}", obj.header.provider.0));
         out.push(format!("Status : {}", object_status_name(obj.status)));
         out.push(format!("Health : {}", health_name(obj.health)));
 
@@ -905,6 +1049,7 @@ pub fn sys_readdir(path: &str) -> Option<Vec<String>> {
             "storage".to_string(),
             "network".to_string(),
             "services".to_string(),
+            "providers".to_string(),
             "health".to_string(),
         ],
         "sys/devices" => list_namespace("devices"),
@@ -914,6 +1059,10 @@ pub fn sys_readdir(path: &str) -> Option<Vec<String>> {
         "sys/memory" => vec!["stats".to_string()],
         "sys/network" => vec!["status".to_string()],
         "sys/scheduler" => vec!["threads".to_string(), "uptime".to_string()],
+        "sys/providers" => providers()
+            .into_iter()
+            .map(|p| p.name)
+            .collect(),
         _ => return None,
     };
 
@@ -941,6 +1090,22 @@ pub fn sys_read(path: &str) -> Option<Vec<String>> {
                 .collect(),
         ),
         "sys/scheduler/uptime" => Some(vec![format!("{} ms", timer::uptime().as_millis())]),
+        "sys/providers" => Some(
+            providers()
+                .into_iter()
+                .map(|p| format!("{} [{}] {:?}", p.name, p.namespace, p.provider_type))
+                .collect(),
+        ),
+        _ if path.starts_with("sys/providers/") => {
+            let target = path.strip_prefix("sys/providers/")?;
+            let provider = providers().into_iter().find(|p| p.name == target)?;
+            Some(vec![
+                format!("Name : {}", provider.name),
+                format!("Id : {}", provider.id.0),
+                format!("Namespace : {}", provider.namespace),
+                format!("Type : {:?}", provider.provider_type),
+            ])
+        }
         _ => {
             if let Some(name) = path.strip_prefix("sys/devices/") {
                 inspect(&format!("device/{}", name)).ok()

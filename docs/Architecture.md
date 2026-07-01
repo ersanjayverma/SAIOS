@@ -6,9 +6,11 @@ Last updated: 2026-07-02
 
 ## Purpose
 
-This document defines the architecture contracts for SAIOS Abstract Information and File System (SAIFS) and the System Object Model.
+This document defines the architecture contracts for SAIOS Abstract Information and File System (SAIFS) anchored on the SAIOS Object Model (SOM).
 
 This is a contract-first document. It defines what must be true before additional subsystem features are added.
+
+See [docs/SOM.md](SOM.md) for the normative object contract.
 
 ## Foundational Rule
 
@@ -22,13 +24,28 @@ Corollary:
 
 ## Core Components
 
+- SOM: universal object header, taxonomy, capabilities, operations, relationships, lifecycle, and event semantics.
 - Object Manager: global object identity, registry, lifecycle, metadata baseline.
+- Provider Framework: subsystem discovery and object contribution through provider contracts.
+- Query Engine: first-class object discovery service over kind, health, provider, and graph context.
 - SAIFS API: open and operate on handles, not paths.
 - Namespace Manager: namespace view composition and lookup.
 - Mount Manager: mount-point routing to providers.
 - Provider Registry: provider registration and discovery.
 - Namespace Providers: source of objects and namespace entries.
 - Observer System: event publication and subscription.
+
+## Phase 0: SOM Foundation Contract
+
+SOM is a prerequisite to SAIFS. SAIFS and Object Manager must use SOM object identity and object contract semantics.
+
+Frozen principles:
+
+1. Everything is an object.
+2. Every object has a stable ObjectId for its lifetime.
+3. SAIFS exposes namespace views of objects and never owns object identity.
+4. Objects advertise capabilities and operations instead of being identified only by concrete type.
+5. Every object participates in health, diagnostics, events, and relationships by default.
 
 ## Phase 1: Core Types Contract
 
@@ -182,6 +199,21 @@ Notes:
 
 Providers are first-class and hot-pluggable through registration.
 
+Implemented baseline contract in code:
+
+```rust
+pub trait Provider {
+    fn id(&self) -> ProviderId;
+    fn name(&self) -> &str;
+    fn provider_type(&self) -> ProviderType;
+    fn namespace(&self) -> &str;
+    fn initialize(&mut self);
+    fn shutdown(&mut self);
+    fn enumerate(&self) -> Vec<ProviderObject>;
+    fn lookup(&self, id: ObjectId) -> Option<ProviderObject>;
+}
+```
+
 ```rust
 pub trait ProviderRegistry {
     fn register(&self, provider: &'static dyn NamespaceProvider) -> Result<ProviderId, SaifsError>;
@@ -280,6 +312,27 @@ pub trait EventBus {
     fn unsubscribe(&self, id: SubscriptionId) -> Result<(), SaifsError>;
 }
 ```
+
+## Query Service Contract
+
+Object discovery is not path-only. Query is a first-class service and can back shell commands.
+
+Current baseline query filters:
+
+- `kind=<ObjectType>`
+- `health=<HealthState>` and `health!=<HealthState>`
+- `provider=<ProviderName>`
+- `parent=<ParentObjectName>`
+
+Implemented query behavior:
+
+- Multiple predicates supported as comma-separated expressions (AND semantics)
+- Example: `kind=Device,health!=Healthy,provider=devices`
+
+Provider discovery surface:
+
+- Native shell command: `providers`
+- Namespace view: `/sys/providers`
 
 ## Layer Responsibilities (Frozen)
 

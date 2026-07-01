@@ -73,4 +73,6 @@ A subsystem is SAIFS-compliant when:
 
 ## Related Documents
 
-- docs/Architecture.md
+- [docs/Architecture.md](../Architecture.md)
+- [docs/SOM.md](../SOM.md)
+- [docs/adr/ADR-0011-som-foundational-object-model.md](ADR-0011-som-foundational-object-model.md)

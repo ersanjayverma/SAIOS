@@ -1,3 +1,5 @@
+use alloc::string::String;
+
 use crate::console;
 use crate::heap;
 use crate::object_manager;
@@ -26,6 +28,8 @@ fn print_help() {
     console::println!("diagnose");
     console::println!("health");
     console::println!("events");
+    console::println!("providers");
+    console::println!("query");
     console::println!("ls");
     console::println!("pwd");
     console::println!("cd");
@@ -189,6 +193,39 @@ pub fn execute(parsed: ParsedCommand<'_>) {
                 console::println!("{}", line);
             }
         }
+        commands::PROVIDERS => {
+            for provider in object_manager::providers() {
+                console::println!(
+                    "{} [{}] {}",
+                    provider.name,
+                    provider.namespace,
+                    provider_type_name(provider.provider_type)
+                );
+            }
+        }
+        commands::QUERY => {
+            if parsed.args.is_empty() {
+                console::println!("query: missing expression");
+                return;
+            }
+
+            let mut expr = String::new();
+            for (i, part) in parsed.args.iter().enumerate() {
+                if i > 0 {
+                    expr.push(',');
+                }
+                expr.push_str(part);
+            }
+
+            match object_manager::query(expr.as_str()) {
+                    Ok(paths) => {
+                        for path in paths {
+                            console::println!("{}", path);
+                        }
+                    }
+                    Err(e) => console::println!("query: {}", e),
+            }
+        }
         commands::LS => {
             let path = parsed.args.first().copied().unwrap_or(".");
             match saifs::list(path) {
@@ -271,5 +308,26 @@ pub fn execute(parsed: ParsedCommand<'_>) {
         _ => {
             console::println!("Unknown command");
         }
+    }
+}
+
+fn provider_type_name(kind: crate::provider::ProviderType) -> &'static str {
+    match kind {
+        crate::provider::ProviderType::Core => "Core",
+        crate::provider::ProviderType::Memory => "Memory",
+        crate::provider::ProviderType::Storage => "Storage",
+        crate::provider::ProviderType::Filesystem => "Filesystem",
+        crate::provider::ProviderType::Device => "Device",
+        crate::provider::ProviderType::Driver => "Driver",
+        crate::provider::ProviderType::Process => "Process",
+        crate::provider::ProviderType::Thread => "Thread",
+        crate::provider::ProviderType::Scheduler => "Scheduler",
+        crate::provider::ProviderType::Network => "Network",
+        crate::provider::ProviderType::Security => "Security",
+        crate::provider::ProviderType::User => "User",
+        crate::provider::ProviderType::Service => "Service",
+        crate::provider::ProviderType::Event => "Event",
+        crate::provider::ProviderType::Log => "Log",
+        crate::provider::ProviderType::AI => "AI",
     }
 }
