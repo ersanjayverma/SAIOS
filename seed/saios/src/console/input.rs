@@ -84,12 +84,19 @@ impl InputBuffer {
         true
     }
 
-    pub fn len(&self) -> usize {
-        self.line.len()
-    }
-
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    pub fn char_left_of_cursor(&self) -> Option<char> {
+        if self.cursor == 0 {
+            return None;
+        }
+        self.line.get(self.cursor - 1).copied()
+    }
+
+    pub fn char_at_cursor(&self) -> Option<char> {
+        self.line.get(self.cursor).copied()
     }
 
     pub fn render(&self) -> String<256> {

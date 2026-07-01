@@ -1,4 +1,6 @@
 use core::fmt;
+use arrayvec::ArrayVec;
+use utf8parse::{Parser, Receiver};
 
 use super::backend::ConsoleBackend;
 use super::keyboard::KeyEvent;
@@ -11,77 +13,67 @@ const COM1_LINE_STATUS: u16 = COM1_DATA + 5;
 enum EscState {
     None,
     Esc,
-    Csi {
-        buf: [u8; 8],
-        len: usize,
-    },
+    Csi(ArrayVec<u8, 8>),
     Ss3,
 }
 
+struct Utf8Receiver {
+    codepoint: Option<char>,
+    invalid: bool,
+}
+
+impl Utf8Receiver {
+    const fn new() -> Self {
+        Self {
+            codepoint: None,
+            invalid: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.codepoint = None;
+        self.invalid = false;
+    }
+}
+
+impl Receiver for Utf8Receiver {
+    fn codepoint(&mut self, c: char) {
+        self.codepoint = Some(c);
+    }
+
+    fn invalid_sequence(&mut self) {
+        self.invalid = true;
+    }
+}
+
 struct Utf8Decoder {
-    buf: [u8; 4],
-    len: usize,
-    needed: usize,
+    parser: Option<Parser>,
+    receiver: Utf8Receiver,
 }
 
 impl Utf8Decoder {
     const fn new() -> Self {
         Self {
-            buf: [0; 4],
-            len: 0,
-            needed: 0,
+            parser: None,
+            receiver: Utf8Receiver::new(),
         }
-    }
-
-    fn reset(&mut self) {
-        self.len = 0;
-        self.needed = 0;
-    }
-
-    fn finish_or_replacement(&mut self) -> char {
-        let out = core::str::from_utf8(&self.buf[..self.needed])
-            .ok()
-            .and_then(|s| s.chars().next())
-            .unwrap_or('\u{FFFD}');
-        self.reset();
-        out
     }
 
     fn feed(&mut self, byte: u8) -> Option<char> {
-        if self.len == 0 {
-            if byte < 0x80 {
-                return Some(byte as char);
-            }
-
-            let needed = if (byte & 0xE0) == 0xC0 {
-                2
-            } else if (byte & 0xF0) == 0xE0 {
-                3
-            } else if (byte & 0xF8) == 0xF0 {
-                4
-            } else {
-                return Some('\u{FFFD}');
-            };
-
-            self.buf[0] = byte;
-            self.len = 1;
-            self.needed = needed;
-            return None;
+        if self.parser.is_none() {
+            self.parser = Some(Parser::new());
         }
 
-        if (byte & 0xC0) != 0x80 {
-            self.reset();
+        self.receiver.reset();
+        if let Some(parser) = self.parser.as_mut() {
+            parser.advance(&mut self.receiver, byte);
+        }
+
+        if self.receiver.invalid {
             return Some('\u{FFFD}');
         }
 
-        self.buf[self.len] = byte;
-        self.len += 1;
-
-        if self.len == self.needed {
-            return Some(self.finish_or_replacement());
-        }
-
-        None
+        self.receiver.codepoint
     }
 }
 
@@ -95,8 +87,8 @@ fn poll_byte() -> Option<u8> {
     Some(inb(COM1_DATA))
 }
 
-fn csi_params_eq(buf: &[u8; 8], len: usize, expected: &[u8]) -> bool {
-    len == expected.len() && &buf[..len] == expected
+fn csi_params_eq_dyn(params: &ArrayVec<u8, 8>, expected: &[u8]) -> bool {
+    params.as_slice() == expected
 }
 
 pub fn poll_input_event() -> Option<KeyEvent> {
@@ -113,10 +105,7 @@ pub fn poll_input_event() -> Option<KeyEvent> {
         }
         EscState::Esc => {
             if byte == b'[' {
-                *state = EscState::Csi {
-                    buf: [0; 8],
-                    len: 0,
-                };
+                *state = EscState::Csi(ArrayVec::new());
                 return None;
             }
 
@@ -140,22 +129,27 @@ pub fn poll_input_event() -> Option<KeyEvent> {
                 _ => None,
             };
         }
-        EscState::Csi { buf, len } => {
-            if *len >= buf.len() {
+        EscState::Csi(params) => {
+            if params.is_full() {
                 *state = EscState::None;
                 return None;
             }
 
-            buf[*len] = byte;
-            *len += 1;
+            if params.try_push(byte).is_err() {
+                *state = EscState::None;
+                return None;
+            }
 
             // Final CSI byte range per ANSI/VT sequences.
             if !(0x40..=0x7E).contains(&byte) {
                 return None;
             }
 
-            let final_byte = byte;
-            let param_len = *len - 1;
+            let mut param_bytes: ArrayVec<u8, 8> = ArrayVec::new();
+            let final_byte = params.last().copied().unwrap_or(byte);
+            for b in params.iter().take(params.len().saturating_sub(1)) {
+                let _ = param_bytes.try_push(*b);
+            }
 
             let event = match final_byte {
                 b'A' => Some(KeyEvent::ArrowUp),
@@ -165,11 +159,11 @@ pub fn poll_input_event() -> Option<KeyEvent> {
                 b'H' => Some(KeyEvent::Home),
                 b'F' => Some(KeyEvent::End),
                 b'~' => {
-                    if csi_params_eq(buf, param_len, b"3") {
+                    if csi_params_eq_dyn(&param_bytes, b"3") {
                         Some(KeyEvent::Delete)
-                    } else if csi_params_eq(buf, param_len, b"1") || csi_params_eq(buf, param_len, b"7") {
+                    } else if csi_params_eq_dyn(&param_bytes, b"1") || csi_params_eq_dyn(&param_bytes, b"7") {
                         Some(KeyEvent::Home)
-                    } else if csi_params_eq(buf, param_len, b"4") || csi_params_eq(buf, param_len, b"8") {
+                    } else if csi_params_eq_dyn(&param_bytes, b"4") || csi_params_eq_dyn(&param_bytes, b"8") {
                         Some(KeyEvent::End)
                     } else {
                         None

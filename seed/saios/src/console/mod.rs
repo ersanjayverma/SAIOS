@@ -21,12 +21,17 @@ use serial::{poll_input_event as poll_serial_input_event, SerialConsole};
 use core::sync::atomic::{AtomicBool, Ordering};
 use efi_main::graphics::FramebufferInfo;
 use heapless::String;
+use static_assertions::const_assert;
+use unicode_width::UnicodeWidthChar;
 
 const DEFAULT_WIDTH: usize = 80;
 const DEFAULT_HEIGHT: usize = 25;
 const TAB_WIDTH: usize = 4;
 const MAX_WIDTH: usize = 160;
 const MAX_HEIGHT: usize = 100;
+
+const_assert!(MAX_WIDTH >= DEFAULT_WIDTH);
+const_assert!(MAX_HEIGHT >= DEFAULT_HEIGHT);
 
 struct Console<B: ConsoleBackend> {
     backend: B,
@@ -334,15 +339,27 @@ pub fn panic_println(s: &str) {
 }
 
 pub fn poll_input() -> Option<String<256>> {
-    fn redraw_line(prev_len: usize, prev_cursor: usize) {
+    fn cell_width(ch: char) -> usize {
+        UnicodeWidthChar::width(ch).unwrap_or(1).max(1)
+    }
+
+    fn line_cells(s: &str) -> usize {
+        s.chars().map(cell_width).sum()
+    }
+
+    fn cursor_cells(s: &str, cursor_chars: usize) -> usize {
+        s.chars().take(cursor_chars).map(cell_width).sum()
+    }
+
+    fn redraw_line(prev_len_cells: usize, prev_cursor_cells: usize) {
         // SAFETY: single-core early kernel context.
         let input = unsafe { &mut *INPUT_BUFFER.get() };
 
-        for _ in prev_cursor..prev_len {
+        for _ in prev_cursor_cells..prev_len_cells {
             move_cursor_right();
         }
 
-        for _ in 0..prev_len {
+        for _ in 0..prev_len_cells {
             put_char('\x08');
         }
 
@@ -351,9 +368,9 @@ pub fn poll_input() -> Option<String<256>> {
             put_char(ch);
         }
 
-        let new_len = input.len();
-        let new_cursor = input.cursor();
-        for _ in new_cursor..new_len {
+        let new_len_cells = line_cells(rendered.as_str());
+        let new_cursor_cells = cursor_cells(rendered.as_str(), input.cursor());
+        for _ in new_cursor_cells..new_len_cells {
             move_cursor_left();
         }
     }
@@ -361,17 +378,28 @@ pub fn poll_input() -> Option<String<256>> {
     // SAFETY: single-core early kernel context.
     let key_event = unsafe { (*KEYBOARD.get()).poll_event() }.or_else(poll_serial_input_event)?;
 
-    let prev_len = unsafe { (*INPUT_BUFFER.get()).len() };
-    let prev_cursor = unsafe { (*INPUT_BUFFER.get()).cursor() };
+    // SAFETY: single-core early kernel context.
+    let (prev_len_cells, prev_cursor_cells, prev_cursor_char_width, prev_right_char_width) = unsafe {
+        let input = &*INPUT_BUFFER.get();
+        let rendered = input.render();
+        let len_cells = line_cells(rendered.as_str());
+        let cursor_cells = cursor_cells(rendered.as_str(), input.cursor());
+        (
+            len_cells,
+            cursor_cells,
+            input.char_left_of_cursor().map(cell_width).unwrap_or(1),
+            input.char_at_cursor().map(cell_width).unwrap_or(1),
+        )
+    };
 
     match key_event {
         KeyEvent::Character(ch) => {
             let inserted = unsafe { (*INPUT_BUFFER.get()).insert(ch) };
             if inserted {
-                if prev_cursor == prev_len {
+                if prev_cursor_cells == prev_len_cells {
                     put_char(ch);
                 } else {
-                    redraw_line(prev_len, prev_cursor);
+                    redraw_line(prev_len_cells, prev_cursor_cells);
                 }
             }
             None
@@ -379,20 +407,20 @@ pub fn poll_input() -> Option<String<256>> {
         KeyEvent::Backspace => {
             let erased = unsafe { (*INPUT_BUFFER.get()).backspace() };
             if erased {
-                redraw_line(prev_len, prev_cursor);
+                redraw_line(prev_len_cells, prev_cursor_cells);
             }
             None
         }
         KeyEvent::Delete => {
             let erased = unsafe { (*INPUT_BUFFER.get()).delete() };
             if erased {
-                redraw_line(prev_len, prev_cursor);
+                redraw_line(prev_len_cells, prev_cursor_cells);
             }
             None
         }
         KeyEvent::Home => {
             if unsafe { (*INPUT_BUFFER.get()).move_home() } {
-                for _ in 0..prev_cursor {
+                for _ in 0..prev_cursor_cells {
                     move_cursor_left();
                 }
             }
@@ -400,7 +428,7 @@ pub fn poll_input() -> Option<String<256>> {
         }
         KeyEvent::End => {
             if unsafe { (*INPUT_BUFFER.get()).move_end() } {
-                for _ in prev_cursor..prev_len {
+                for _ in prev_cursor_cells..prev_len_cells {
                     move_cursor_right();
                 }
             }
@@ -408,13 +436,17 @@ pub fn poll_input() -> Option<String<256>> {
         }
         KeyEvent::ArrowLeft => {
             if unsafe { (*INPUT_BUFFER.get()).move_left() } {
-                move_cursor_left();
+                for _ in 0..prev_cursor_char_width {
+                    move_cursor_left();
+                }
             }
             None
         }
         KeyEvent::ArrowRight => {
             if unsafe { (*INPUT_BUFFER.get()).move_right() } {
-                move_cursor_right();
+                for _ in 0..prev_right_char_width {
+                    move_cursor_right();
+                }
             }
             None
         }
@@ -422,7 +454,7 @@ pub fn poll_input() -> Option<String<256>> {
             let line = unsafe { (*INPUT_BUFFER.get()).history_prev() };
             if let Some(line) = line {
                 unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
-                redraw_line(prev_len, prev_cursor);
+                redraw_line(prev_len_cells, prev_cursor_cells);
             }
             None
         }
@@ -430,7 +462,7 @@ pub fn poll_input() -> Option<String<256>> {
             let line = unsafe { (*INPUT_BUFFER.get()).history_next() };
             if let Some(line) = line {
                 unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
-                redraw_line(prev_len, prev_cursor);
+                redraw_line(prev_len_cells, prev_cursor_cells);
             }
             None
         }
@@ -441,7 +473,7 @@ pub fn poll_input() -> Option<String<256>> {
         }
         KeyEvent::CtrlA => {
             if unsafe { (*INPUT_BUFFER.get()).move_home() } {
-                for _ in 0..prev_cursor {
+                for _ in 0..prev_cursor_cells {
                     move_cursor_left();
                 }
             }
@@ -449,7 +481,7 @@ pub fn poll_input() -> Option<String<256>> {
         }
         KeyEvent::CtrlE => {
             if unsafe { (*INPUT_BUFFER.get()).move_end() } {
-                for _ in prev_cursor..prev_len {
+                for _ in prev_cursor_cells..prev_len_cells {
                     move_cursor_right();
                 }
             }
@@ -458,21 +490,21 @@ pub fn poll_input() -> Option<String<256>> {
         KeyEvent::CtrlD => {
             let erased = unsafe { (*INPUT_BUFFER.get()).delete() };
             if erased {
-                redraw_line(prev_len, prev_cursor);
+                redraw_line(prev_len_cells, prev_cursor_cells);
             }
             None
         }
         KeyEvent::CtrlU => {
             let changed = unsafe { (*INPUT_BUFFER.get()).clear_to_start() };
             if changed {
-                redraw_line(prev_len, prev_cursor);
+                redraw_line(prev_len_cells, prev_cursor_cells);
             }
             None
         }
         KeyEvent::CtrlK => {
             let changed = unsafe { (*INPUT_BUFFER.get()).clear_to_end() };
             if changed {
-                redraw_line(prev_len, prev_cursor);
+                redraw_line(prev_len_cells, prev_cursor_cells);
             }
             None
         }
@@ -490,9 +522,9 @@ pub fn poll_input() -> Option<String<256>> {
                 put_char(ch);
             }
 
-            let len = input.len();
-            let cursor = input.cursor();
-            for _ in cursor..len {
+            let rendered_cells = line_cells(rendered.as_str());
+            let cursor_cells = cursor_cells(rendered.as_str(), input.cursor());
+            for _ in cursor_cells..rendered_cells {
                 move_cursor_left();
             }
 
@@ -501,7 +533,7 @@ pub fn poll_input() -> Option<String<256>> {
         KeyEvent::CtrlW => {
             let changed = unsafe { (*INPUT_BUFFER.get()).delete_prev_word() };
             if changed {
-                redraw_line(prev_len, prev_cursor);
+                redraw_line(prev_len_cells, prev_cursor_cells);
             }
             None
         }
@@ -516,7 +548,7 @@ pub fn poll_input() -> Option<String<256>> {
             let inserted3 = unsafe { (*INPUT_BUFFER.get()).insert(' ') };
             let inserted4 = unsafe { (*INPUT_BUFFER.get()).insert(' ') };
             if inserted && inserted2 && inserted3 && inserted4 {
-                redraw_line(prev_len, prev_cursor);
+                redraw_line(prev_len_cells, prev_cursor_cells);
             }
             None
         }
