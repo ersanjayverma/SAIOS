@@ -1,4 +1,7 @@
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
 
 use crate::console;
 use crate::saifs;
@@ -45,8 +48,8 @@ pub fn register(registry: &mut CommandRegistry) {
 }
 
 fn cmd_ls(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().unwrap_or(".");
-    let entries = saifs::list(path).map_err(|_| "ls failed")?;
+    let path = resolve_relative_path(args.first().copied().unwrap_or("."));
+    let entries = saifs::list(path.as_str()).map_err(|_| "ls failed")?;
     for name in entries {
         console::println!("{}", name);
     }
@@ -59,25 +62,25 @@ fn cmd_pwd(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
 }
 
 fn cmd_cd(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("cd: missing path")?;
-    saifs::cd(path).map_err(|_| "cd failed")?;
+    let path = resolve_relative_path(args.first().copied().ok_or("cd: missing path")?);
+    saifs::cd(path.as_str()).map_err(|_| "cd failed")?;
     ctx.sync_namespace_from_saifs();
     Ok(())
 }
 
 fn cmd_mkdir(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("mkdir: missing path")?;
-    saifs::mkdir(path).map_err(|_| "mkdir failed")
+    let path = resolve_relative_path(args.first().copied().ok_or("mkdir: missing path")?);
+    saifs::mkdir(path.as_str()).map_err(|_| "mkdir failed")
 }
 
 fn cmd_touch(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("touch: missing path")?;
-    saifs::touch(path).map_err(|_| "touch failed")
+    let path = resolve_relative_path(args.first().copied().ok_or("touch: missing path")?);
+    saifs::touch(path.as_str()).map_err(|_| "touch failed")
 }
 
 fn cmd_cat(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("cat: missing path")?;
-    let text = saifs::read_text(path).map_err(|_| "cat failed")?;
+    let path = resolve_relative_path(args.first().copied().ok_or("cat: missing path")?);
+    let text = saifs::read_text(path.as_str()).map_err(|_| "cat failed")?;
     if !text.is_empty() {
         console::println!("{}", text);
     }
@@ -85,6 +88,19 @@ fn cmd_cat(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_rm(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("rm: missing path")?;
-    saifs::remove(path).map_err(|_| "rm failed")
+    let path = resolve_relative_path(args.first().copied().ok_or("rm: missing path")?);
+    saifs::remove(path.as_str()).map_err(|_| "rm failed")
+}
+
+fn resolve_relative_path(path: &str) -> String {
+    if path.starts_with('/') {
+        return path.to_string();
+    }
+
+    let cwd = saifs::pwd();
+    if cwd == "/" {
+        format!("/{}", path)
+    } else {
+        format!("{}/{}", cwd, path)
+    }
 }

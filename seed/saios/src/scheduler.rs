@@ -184,11 +184,31 @@ fn thread_trampoline() -> ! {
 }
 
 fn pick_next(scheduler: &mut Scheduler) -> usize {
+    let mut idle_candidate: Option<usize> = None;
+
     while let Some(idx) = scheduler.run_queue.pop_front() {
-        if scheduler.threads[idx].thread.state == ThreadState::Ready {
-            return idx;
+        if scheduler.threads[idx].thread.state != ThreadState::Ready {
+            continue;
+        }
+
+        if idx == scheduler.idle {
+            idle_candidate = Some(idx);
+            continue;
+        }
+
+        if let Some(idle_idx) = idle_candidate.take() {
+            scheduler.run_queue.push_back(idle_idx);
+        }
+
+        return idx;
+    }
+
+    if let Some(idle_idx) = idle_candidate {
+        if scheduler.threads[idle_idx].thread.state == ThreadState::Ready {
+            return idle_idx;
         }
     }
+
     scheduler.idle
 }
 

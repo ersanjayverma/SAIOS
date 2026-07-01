@@ -39,8 +39,15 @@ impl ShellEngine {
     }
 
     pub fn run(&mut self) {
+        console::println!("[BOOTCHK] shell.engine.run");
+        let mut first_prompt = true;
+
         while self.ctx.session.running {
             if self.needs_prompt {
+                if first_prompt {
+                    console::println!("[BOOTCHK] shell.engine.first_prompt");
+                    first_prompt = false;
+                }
                 self.render_prompt();
                 self.needs_prompt = false;
             }

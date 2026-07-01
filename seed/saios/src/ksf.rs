@@ -565,11 +565,14 @@ impl KernelService for ShellService {
     }
 
     fn initialize(&mut self) -> Result<(), &'static str> {
+        crate::console::println!("[BOOTCHK] shell.initialize.enter");
         shell::init();
+        crate::console::println!("[BOOTCHK] shell.initialize.ok");
         Ok(())
     }
 
     fn start(&mut self) -> Result<(), &'static str> {
+        crate::console::println!("[BOOTCHK] shell.start.enter");
         shell::start_service()
     }
 
