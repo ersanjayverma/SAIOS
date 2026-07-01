@@ -6,8 +6,8 @@ use crate::pmm;
 use crate::scheduler;
 use crate::shell::commands;
 use crate::shell::parser::ParsedCommand;
+use crate::saifs;
 use crate::timer;
-use crate::vfs;
 
 fn print_help() {
     console::println!("help");
@@ -190,24 +190,24 @@ pub fn execute(parsed: ParsedCommand<'_>) {
             }
         }
         commands::LS => {
-            let path = parsed.args.first().copied();
-            match vfs::ls(path) {
+            let path = parsed.args.first().copied().unwrap_or(".");
+            match saifs::list(path) {
                 Ok(entries) => {
                     for name in entries {
                         console::println!("{}", name);
                     }
                 }
-                Err(e) => console::println!("ls: {}", e),
+                Err(e) => console::println!("ls: {:?}", e),
             }
         }
         commands::PWD => {
-            console::println!("{}", vfs::pwd());
+            console::println!("{}", saifs::pwd());
         }
         commands::CD => {
             match parsed.args.first().copied() {
                 Some(path) => {
-                    if let Err(e) = vfs::cd(path) {
-                        console::println!("cd: {}", e);
+                    if let Err(e) = saifs::cd(path) {
+                        console::println!("cd: {:?}", e);
                     }
                 }
                 None => console::println!("cd: missing path"),
@@ -216,8 +216,8 @@ pub fn execute(parsed: ParsedCommand<'_>) {
         commands::MKDIR => {
             match parsed.args.first().copied() {
                 Some(path) => {
-                    if let Err(e) = vfs::mkdir(path) {
-                        console::println!("mkdir: {}", e);
+                    if let Err(e) = saifs::mkdir(path) {
+                        console::println!("mkdir: {:?}", e);
                     }
                 }
                 None => console::println!("mkdir: missing path"),
@@ -226,8 +226,8 @@ pub fn execute(parsed: ParsedCommand<'_>) {
         commands::TOUCH => {
             match parsed.args.first().copied() {
                 Some(path) => {
-                    if let Err(e) = vfs::touch(path) {
-                        console::println!("touch: {}", e);
+                    if let Err(e) = saifs::touch(path) {
+                        console::println!("touch: {:?}", e);
                     }
                 }
                 None => console::println!("touch: missing path"),
@@ -235,13 +235,13 @@ pub fn execute(parsed: ParsedCommand<'_>) {
         }
         commands::CAT => {
             match parsed.args.first().copied() {
-                Some(path) => match vfs::cat(path) {
+                Some(path) => match saifs::read_text(path) {
                     Ok(contents) => {
                         if !contents.is_empty() {
                             console::println!("{}", contents);
                         }
                     }
-                    Err(e) => console::println!("cat: {}", e),
+                    Err(e) => console::println!("cat: {:?}", e),
                 },
                 None => console::println!("cat: missing path"),
             }
@@ -249,8 +249,8 @@ pub fn execute(parsed: ParsedCommand<'_>) {
         commands::RM => {
             match parsed.args.first().copied() {
                 Some(path) => {
-                    if let Err(e) = vfs::rm(path) {
-                        console::println!("rm: {}", e);
+                    if let Err(e) = saifs::remove(path) {
+                        console::println!("rm: {:?}", e);
                     }
                 }
                 None => console::println!("rm: missing path"),
