@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use crate::console;
 use crate::heap;
@@ -83,8 +84,28 @@ pub fn register(registry: &mut CommandRegistry) {
     }));
     registry.register(Box::new(StaticCommand {
         name: "exec",
-        description: "Execute a demo program",
-        handler: cmd_run,
+        description: "Execute program with args/env and return exit code",
+        handler: cmd_exec,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "env",
+        description: "List shell environment variables",
+        handler: cmd_env,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "setenv",
+        description: "Set shell environment variable",
+        handler: cmd_setenv,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "unsetenv",
+        description: "Remove shell environment variable",
+        handler: cmd_unsetenv,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "status",
+        description: "Show last exit code",
+        handler: cmd_status,
     }));
     registry.register(Box::new(StaticCommand {
         name: "objects",
@@ -315,9 +336,102 @@ fn cmd_panic(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     panic!("panic command invoked")
 }
 
-fn cmd_run(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+fn cmd_run(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let program = args.first().copied().ok_or("run: missing program name")?;
-    crate::shell::programs::launch(program)
+    let program_args = &args[1..];
+    let exit_code = crate::shell::programs::execute(
+        program,
+        program_args,
+        ctx.session.environment.as_slice(),
+    )?;
+    ctx.session.last_exit_code = exit_code;
+    if exit_code != 0 {
+        console::println!("exit {}", exit_code);
+    }
+    Ok(())
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    match token.split_once('=') {
+        Some((key, _)) => !key.is_empty(),
+        None => false,
+    }
+}
+
+fn upsert_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
+    for (k, v) in env.iter_mut() {
+        if k == key {
+            *v = value.to_string();
+            return;
+        }
+    }
+    env.push((key.to_string(), value.to_string()));
+}
+
+fn remove_env(env: &mut Vec<(String, String)>, key: &str) {
+    env.retain(|(k, _)| k != key);
+}
+
+fn cmd_exec(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    if args.is_empty() {
+        return Err("exec: missing program name");
+    }
+
+    let mut idx = 0usize;
+    let mut overlays: Vec<(String, String)> = Vec::new();
+
+    while idx < args.len() && is_env_assignment(args[idx]) {
+        let (key, value) = args[idx].split_once('=').ok_or("exec: invalid env assignment")?;
+        overlays.push((key.to_string(), value.to_string()));
+        idx += 1;
+    }
+
+    if idx >= args.len() {
+        return Err("exec: missing program name");
+    }
+
+    let program = args[idx];
+    let program_args = &args[idx + 1..];
+
+    let saved_env = ctx.session.environment.clone();
+    for (k, v) in &overlays {
+        upsert_env(&mut ctx.session.environment, k.as_str(), v.as_str());
+    }
+
+    let run = crate::shell::programs::execute(program, program_args, ctx.session.environment.as_slice());
+    ctx.session.environment = saved_env;
+
+    let exit_code = run?;
+    ctx.session.last_exit_code = exit_code;
+    if exit_code != 0 {
+        console::println!("exit {}", exit_code);
+    }
+    Ok(())
+}
+
+fn cmd_env(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    for (k, v) in &ctx.session.environment {
+        console::println!("{}={}", k, v);
+    }
+    Ok(())
+}
+
+fn cmd_setenv(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let key = args.first().copied().ok_or("setenv: missing key")?;
+    let value = args.get(1).copied().ok_or("setenv: missing value")?;
+    upsert_env(&mut ctx.session.environment, key, value);
+    Ok(())
+}
+
+fn cmd_unsetenv(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let key = args.first().copied().ok_or("unsetenv: missing key")?;
+    remove_env(&mut ctx.session.environment, key);
+    Ok(())
+}
+
+fn cmd_status(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    console::println!("{}", ctx.session.last_exit_code);
+    Ok(())
 }
 
 fn cmd_objects(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {

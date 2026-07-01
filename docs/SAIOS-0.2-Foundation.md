@@ -86,3 +86,132 @@ Boot
 -> Scheduler + idle
 
 This establishes continuity for future transition from in-kernel shell service to user-mode system process with minimal shell-engine rewrite.
+
+## Self-Hosting Vertical Slice Roadmap
+
+After reliable boot-to-shell, subsystem growth should follow a self-hosting sequence.
+Priority is operator-visible capabilities, validated live in terminal, before expansion into networking or graphics.
+
+### Phase 1: Stable Shell
+
+Scope:
+
+- REPL lifecycle and prompt stability
+- Line editing and input reliability
+- Built-in command reliability
+- Command history and dispatch correctness
+
+Demo gate:
+
+- Boots to shell prompt without manual recovery
+- Accepts repeated command execution without hangs
+- Handles unknown commands and editing behavior predictably
+
+### Phase 2: Process Execution
+
+Scope:
+
+- `exec` and program launch path
+- ELF argument passing
+- Environment variables
+- Exit codes
+
+Demo gate:
+
+- Launches at least one nontrivial ELF program
+- Returns deterministic exit code
+- Preserves shell session integrity across launches
+
+### Phase 3: Filesystem Usability
+
+Scope:
+
+- `ls`, `cd`, `pwd` path semantics
+- `cat`, `mkdir`, `rm`, `touch`
+- Reliable read/write behavior
+
+Demo gate:
+
+- Relative and absolute paths behave consistently
+- File create/read/remove sequence works end to end
+
+### Phase 4: Process Management
+
+Scope:
+
+- `ps`
+- `kill`
+- Background jobs (`&`)
+- `wait`
+- Signal behavior
+
+Demo gate:
+
+- Foreground and background jobs are both observable and controllable
+- Process termination and wait semantics are deterministic
+
+### Phase 5: Scripting
+
+Scope:
+
+- Batch execution
+- Startup script (`/etc/profile` equivalent)
+- Variable expansion
+- Pipes deferred to a later phase
+
+Demo gate:
+
+- Boots and executes startup script deterministically
+- Executes repeatable task script without operator intervention
+
+### Phase 6: Developer Experience
+
+Scope:
+
+- `dmesg`, `mem`, `cpu`, `mount`, `uname`, `time`
+
+Demo gate:
+
+- Every command reports actionable data tied to runtime state
+- Output is stable enough for troubleshooting sessions
+
+### Phase 7: SAIRU Integration
+
+Scope:
+
+- `sairu health`
+- `sairu diagnose`
+- `sairu explain`
+- `sairu trace`
+
+Demo gate:
+
+- Operator can diagnose at least one injected failure from shell-only workflow
+
+## Daily Driver Alpha Gate
+
+Milestone objective after Phase 7:
+
+Boot -> Login -> SISH -> Edit files -> Run programs -> Compile software -> Debug software -> Network access
+
+This is the first point where SAIOS behaves like an operating system environment rather than a kernel-first prototype.
+
+## Progress Measurement Rule
+
+Track progress by terminal-demonstrable capabilities, not code volume:
+
+- It boots.
+- It accepts commands.
+- It runs programs.
+- It manages processes.
+- It diagnoses itself.
+
+Each milestone must end with a live shell demonstration script that can be replayed in the same order on every boot.
+
+## Immediate Next Sprint (Post Boot-to-Shell)
+
+1. Close shell/path semantics and command reliability regressions.
+2. Finish process execution contract (`exec`, args, env, exit code).
+3. Add process lifecycle controls (`ps`, `kill`, `wait`, background jobs).
+4. Add startup script execution path and deterministic boot script behavior.
+5. Add one end-to-end terminal demo checklist and keep it green on each change.

@@ -2,7 +2,7 @@
 
 Status: Implemented (service-based runtime)
 Owner: Shell and platform architecture
-Last updated: 2026-07-02
+Last updated: 2026-07-03
 
 ## Purpose
 
@@ -133,9 +133,23 @@ Current implementation uses session-backed prompt text, and can switch to user/p
 Primary object-first interface:
 
 - help
+- echo
 - version
 - clear
 - exit
+- history
+- time
+- mem
+- cpu
+- ps
+- dmesg
+- panic
+- run
+- exec
+- env
+- setenv
+- unsetenv
+- status
 - objects
 - providers
 - service
@@ -198,6 +212,33 @@ POSIX-like compatibility surface:
 
 Compatibility commands are intentionally isolated from the native command set implementation.
 
+## Process Execution Contract
+
+`exec` is now the primary process execution entry point.
+
+Capabilities:
+
+- Program name + positional argument forwarding
+- Temporary inline environment overlay (`KEY=VALUE` prefix on `exec`)
+- Shell-level environment store (`setenv`, `unsetenv`, `env`)
+- Exit code capture in session state
+- Last exit status query via `status`
+
+Examples:
+
+- `exec hello one two`
+- `exec MODE=debug hello world`
+- `exec false` then `status`
+
+Current built-in demo programs:
+
+- `hello`
+- `true`
+- `false`
+- `argc`
+- `env`
+- `fail <code>`
+
 ## Execution Flow
 
 1. KSF starts shell service and spawns shell thread.
@@ -206,7 +247,8 @@ Compatibility commands are intentionally isolated from the native command set im
 4. Parser tokenizes into command and args.
 5. Dispatcher resolves command in registry.
 6. Command executes with mutable CommandContext.
-7. ShellResult is reported to console.
+7. If no command matches, dispatcher attempts program execution fallback.
+8. Exit code is persisted in session state for `status` and diagnostics.
 
 ## Error Model
 

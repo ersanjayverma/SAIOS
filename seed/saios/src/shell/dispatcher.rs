@@ -21,11 +21,18 @@ impl CommandDispatcher {
         match registry.find(parsed.command) {
             Some(command) => command.execute(ctx, args),
             None => {
-                if super::programs::launch(parsed.command).is_ok() {
-                    Ok(())
-                } else {
-                    console::println!("Unknown command: {}", parsed.command);
-                    Ok(())
+                match super::programs::execute(parsed.command, args, ctx.session.environment.as_slice()) {
+                    Ok(exit_code) => {
+                        ctx.session.last_exit_code = exit_code;
+                        if exit_code != 0 {
+                            console::println!("exit {}", exit_code);
+                        }
+                        Ok(())
+                    }
+                    Err(_) => {
+                        console::println!("Unknown command: {}", parsed.command);
+                        Ok(())
+                    }
                 }
             }
         }
