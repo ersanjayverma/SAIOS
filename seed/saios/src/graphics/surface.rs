@@ -1,19 +1,59 @@
-use alloc::vec;
 use alloc::vec::Vec;
+
+enum PixelStorage {
+    Owned(Vec<u32>),
+    Borrowed(&'static mut [u32]),
+}
 
 pub struct Surface {
     width: usize,
     height: usize,
-    pixels: Vec<u32>,
+    pixels: PixelStorage,
 }
 
 impl Surface {
-    pub fn new(width: usize, height: usize) -> Self {
-        let pixels = vec![0; width.saturating_mul(height)];
-        Self {
+    pub fn try_new(width: usize, height: usize) -> Option<Self> {
+        let len = width.saturating_mul(height);
+        let mut pixels = Vec::new();
+        if pixels.try_reserve_exact(len).is_err() {
+            return None;
+        }
+        pixels.resize(len, 0);
+        Some(Self {
             width,
             height,
-            pixels,
+            pixels: PixelStorage::Owned(pixels),
+        })
+    }
+
+    pub fn new_borrowed(width: usize, height: usize, pixels: &'static mut [u32]) -> Option<Self> {
+        let len = width.saturating_mul(height);
+        if pixels.len() < len {
+            return None;
+        }
+
+        for p in pixels.iter_mut().take(len) {
+            *p = 0;
+        }
+
+        Some(Self {
+            width,
+            height,
+            pixels: PixelStorage::Borrowed(pixels),
+        })
+    }
+
+    fn pixels_slice(&self) -> &[u32] {
+        match &self.pixels {
+            PixelStorage::Owned(v) => v.as_slice(),
+            PixelStorage::Borrowed(s) => s,
+        }
+    }
+
+    fn pixels_slice_mut(&mut self) -> &mut [u32] {
+        match &mut self.pixels {
+            PixelStorage::Owned(v) => v.as_mut_slice(),
+            PixelStorage::Borrowed(s) => s,
         }
     }
 
@@ -26,11 +66,11 @@ impl Surface {
     }
 
     pub fn pixels(&self) -> &[u32] {
-        self.pixels.as_slice()
+        self.pixels_slice()
     }
 
     pub fn clear(&mut self, color: u32) {
-        self.pixels.fill(color);
+        self.pixels_slice_mut().fill(color);
     }
 
     pub fn put_pixel(&mut self, x: usize, y: usize, color: u32) {
@@ -38,7 +78,9 @@ impl Surface {
             return;
         }
 
-        self.pixels[y * self.width + x] = color;
+        let width = self.width;
+        let idx = y.saturating_mul(width).saturating_add(x);
+        self.pixels_slice_mut()[idx] = color;
     }
 
     pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
@@ -103,7 +145,7 @@ impl Surface {
                 let sx = src_x.saturating_add(x);
                 let sy = src_y.saturating_add(y);
                 if sx < self.width && sy < self.height {
-                    temp.push(self.pixels[sy * self.width + sx]);
+                    temp.push(self.pixels_slice()[sy * self.width + sx]);
                 } else {
                     temp.push(0);
                 }
@@ -116,7 +158,9 @@ impl Surface {
                 let dx = dst_x.saturating_add(x);
                 let dy = dst_y.saturating_add(y);
                 if dx < self.width && dy < self.height {
-                    self.pixels[dy * self.width + dx] = temp[idx];
+                    let width_self = self.width;
+                    let out_idx = dy.saturating_mul(width_self).saturating_add(dx);
+                    self.pixels_slice_mut()[out_idx] = temp[idx];
                 }
                 idx += 1;
             }
