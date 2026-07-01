@@ -1,12 +1,14 @@
-mod builtins;
-mod commands;
+mod command;
+mod compatibility;
+mod engine;
 mod parser;
+mod registry;
+mod session;
+mod native;
 
 use crate::console;
 use crate::object_manager;
 use crate::saifs;
-
-const PROMPT: &str = "SAIOS v0.1>";
 
 pub fn init() {
     console::clear();
@@ -15,12 +17,6 @@ pub fn init() {
 }
 
 pub fn run() -> ! {
-    loop {
-        console::print(PROMPT);
-        let line = console::read_line();
-
-        if let Some(parsed) = parser::parse_line(line.as_str()) {
-            builtins::execute(parsed);
-        }
-    }
+    let mut engine = engine::ShellEngine::new();
+    engine.run()
 }
