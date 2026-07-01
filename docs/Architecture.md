@@ -10,7 +10,24 @@ This document defines the architecture contracts for SAIOS Abstract Information 
 
 This is a contract-first document. It defines what must be true before additional subsystem features are added.
 
-See [docs/SOM.md](SOM.md) for the normative object contract.
+See [docs/SOM.md](SOM.md) for the SOM baseline object contract and [docs/SNOM.md](SNOM.md) for the frozen native object ABI and reflection contract.
+
+SNOM ABI version compatibility policy: [docs/adr/ADR-0013-object-abi-versioning-policy.md](adr/ADR-0013-object-abi-versioning-policy.md).
+
+## Framework Naming
+
+SIF (SAIOS Information Framework) is the architecture umbrella.
+
+SIF includes:
+
+- Object Manager
+- Provider Framework
+- Query Engine
+- Event Bus
+- Relationship Graph
+- SAIFS (namespace and filesystem service)
+
+SAIFS is a component of SIF, not the umbrella itself.
 
 ## Foundational Rule
 
@@ -25,6 +42,7 @@ Corollary:
 ## Core Components
 
 - SOM: universal object header, taxonomy, capabilities, operations, relationships, lifecycle, and event semantics.
+- SNOM: frozen object ABI, metadata model, operation model, relationship model, and reflection contracts.
 - Object Manager: global object identity, registry, lifecycle, metadata baseline.
 - Provider Framework: subsystem discovery and object contribution through provider contracts.
 - Query Engine: first-class object discovery service over kind, health, provider, and graph context.

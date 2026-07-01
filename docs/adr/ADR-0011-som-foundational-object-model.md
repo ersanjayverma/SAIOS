@@ -62,5 +62,7 @@ A subsystem is SOM-compliant when:
 ## Related Documents
 
 - [docs/SOM.md](../SOM.md)
+- [docs/SNOM.md](../SNOM.md)
 - [docs/Architecture.md](../Architecture.md)
 - [docs/adr/ADR-0010-saifs-object-namespace-architecture.md](ADR-0010-saifs-object-namespace-architecture.md)
+- [docs/adr/ADR-0012-snom-object-abi-and-sif-umbrella.md](ADR-0012-snom-object-abi-and-sif-umbrella.md)
