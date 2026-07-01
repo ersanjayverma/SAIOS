@@ -7,6 +7,7 @@ pub const HEAP: &str = "heap";
 pub const PCI: &str = "pci";
 pub const TICKS: &str = "ticks";
 pub const UPTIME: &str = "uptime";
+pub const THREADS: &str = "threads";
 pub const PANIC: &str = "panic";
 pub const REBOOT: &str = "reboot";
 pub const SHUTDOWN: &str = "shutdown";

@@ -44,6 +44,7 @@ unsafe extern "C" {
 #[unsafe(no_mangle)]
 extern "C" fn saios_timer_tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::scheduler::on_timer_tick();
     // PIC EOI for IRQ0.
     outb(0x20, 0x20);
 }
@@ -116,6 +117,7 @@ pub fn sleep(ms: u64) {
     let target = ticks().saturating_add(tick_delta);
 
     while ticks() < target {
+        crate::scheduler::maybe_preempt();
         core::hint::spin_loop();
     }
 }

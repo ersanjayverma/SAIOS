@@ -9,6 +9,7 @@ pub mod console;
 pub mod heap;
 pub mod pci;
 pub mod pmm;
+pub mod scheduler;
 pub mod shell;
 pub mod seed;
 pub mod timer;
@@ -45,6 +46,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
 
     heap::init();
     timer::init();
+    scheduler::init();
     interrupt::enable();
    
     let seed = Seed::init(boot_info as *const SaiosBootInfo);

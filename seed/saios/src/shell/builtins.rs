@@ -2,6 +2,7 @@ use crate::console;
 use crate::heap;
 use crate::pci;
 use crate::pmm;
+use crate::scheduler;
 use crate::shell::commands;
 use crate::shell::parser::ParsedCommand;
 use crate::timer;
@@ -16,6 +17,7 @@ fn print_help() {
     console::println!("pci");
     console::println!("ticks");
     console::println!("uptime");
+    console::println!("threads");
     console::println!("panic");
     console::println!("reboot");
     console::println!("shutdown");
@@ -30,6 +32,16 @@ fn print_uptime() {
     let millis = total_ms % 1000;
 
     console::println!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis);
+}
+
+fn state_name(state: scheduler::ThreadState) -> &'static str {
+    match state {
+        scheduler::ThreadState::Ready => "Ready",
+        scheduler::ThreadState::Running => "Running",
+        scheduler::ThreadState::Sleeping => "Sleeping",
+        scheduler::ThreadState::Blocked => "Blocked",
+        scheduler::ThreadState::Dead => "Dead",
+    }
 }
 
 fn halt_forever() -> ! {
@@ -95,6 +107,12 @@ pub fn execute(parsed: ParsedCommand<'_>) {
         }
         commands::UPTIME => {
             print_uptime();
+        }
+        commands::THREADS => {
+            console::println!("ID   State");
+            for t in scheduler::threads() {
+                console::println!("{}    {}", t.id, state_name(t.state));
+            }
         }
         commands::PANIC => {
             panic!("panic command invoked");
