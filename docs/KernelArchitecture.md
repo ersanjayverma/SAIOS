@@ -56,6 +56,15 @@ Rules:
 
 Services perform work over objects and events.
 
+Service lifecycle orchestration is owned by KSF (Kernel Service Framework).
+
+KSF responsibilities:
+
+- register services
+- resolve dependency-aware startup order
+- track service lifecycle states
+- expose runtime service control APIs for shell and tooling
+
 Reference services:
 
 - Logger
@@ -125,7 +134,8 @@ Firmware
 -> Scheduler
 -> DeviceManager
 -> Drivers
--> Services
+-> KSF (ServiceManager + service startup)
+-> Services Running
 -> Shell
 -> User Space
 ```
@@ -198,3 +208,8 @@ These services are baseline and should not be duplicated by subsystems:
 The corresponding code-level contract module is:
 
 - [seed/saios/src/kernel_arch.rs](../seed/saios/src/kernel_arch.rs)
+- [seed/saios/src/ksf.rs](../seed/saios/src/ksf.rs)
+
+Related architecture document:
+
+- [docs/KSF.md](KSF.md)

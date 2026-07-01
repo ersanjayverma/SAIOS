@@ -18,7 +18,6 @@ impl Seed {
         scheduler::spawn(thread_a);
         scheduler::spawn(thread_b);
 
-        shell::init();
         shell::run()
     }
 }

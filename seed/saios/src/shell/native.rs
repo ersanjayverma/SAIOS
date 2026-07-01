@@ -3,6 +3,7 @@ use alloc::string::String;
 
 use crate::console;
 use crate::heap;
+use crate::ksf;
 use crate::object_manager;
 use crate::pci;
 use crate::saifs;
@@ -42,6 +43,11 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "providers",
         description: "List registered providers",
         handler: cmd_providers,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "service",
+        description: "Manage kernel services",
+        handler: cmd_service,
     }));
     registry.register(Box::new(StaticCommand {
         name: "services",
@@ -174,6 +180,62 @@ fn cmd_providers(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {
         );
     }
     Ok(())
+}
+
+fn cmd_service(_ctx: &mut ShellContext, args: &[&str]) -> ShellResult {
+    let action = args.first().copied().unwrap_or("list");
+
+    match action {
+        "list" => {
+            for svc in ksf::list() {
+                console::println!(
+                    "{} id={} state={:?} health={:?}",
+                    svc.name,
+                    svc.id.0,
+                    svc.state,
+                    svc.health
+                );
+            }
+            Ok(())
+        }
+        "start" => {
+            let name = args.get(1).copied().ok_or("service start: missing name")?;
+            ksf::start(name)
+        }
+        "stop" => {
+            let name = args.get(1).copied().ok_or("service stop: missing name")?;
+            ksf::stop(name)
+        }
+        "restart" => {
+            let name = args.get(1).copied().ok_or("service restart: missing name")?;
+            ksf::restart(name)
+        }
+        "health" => {
+            for (name, health) in ksf::health() {
+                console::println!("{} : {:?}", name, health);
+            }
+            Ok(())
+        }
+        "info" => {
+            let name = args.get(1).copied().ok_or("service info: missing name")?;
+            let info = ksf::info(name).ok_or("service info: not found")?;
+            console::println!("Name         : {}", info.name);
+            console::println!("Id           : {}", info.id.0);
+            console::println!("State        : {:?}", info.state);
+            console::println!("Health       : {:?}", info.health);
+            if info.dependencies.is_empty() {
+                console::println!("Dependencies : none");
+            } else {
+                console::print("Dependencies :");
+                for dep in info.dependencies {
+                    console::print(&alloc::format!(" {}", dep.0));
+                }
+                console::newline();
+            }
+            Ok(())
+        }
+        _ => Err("service: expected list|start|stop|restart|health|info"),
+    }
 }
 
 fn cmd_services(_ctx: &mut ShellContext, _args: &[&str]) -> ShellResult {

@@ -8,6 +8,7 @@ pub mod driver;
 pub mod console;
 pub mod heap;
 pub mod kernel_arch;
+pub mod ksf;
 pub mod object_manager;
 pub mod pci;
 pub mod pmm;
@@ -53,8 +54,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     }
 
     heap::init();
-    timer::init();
-    scheduler::init();
+    ksf::bootstrap().expect("KSF bootstrap failed");
     interrupt::enable();
    
     let seed = Seed::init(boot_info as *const SaiosBootInfo);

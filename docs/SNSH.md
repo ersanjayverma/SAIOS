@@ -105,7 +105,7 @@ Primary object-first interface:
 - exit
 - objects
 - providers
-- services
+- service
 - query
 - inspect
 - describe
@@ -122,6 +122,15 @@ Primary object-first interface:
 - pci
 - shutdown
 - reboot
+
+Service subcommands:
+
+- service list
+- service start <name>
+- service stop <name>
+- service restart <name>
+- service health
+- service info <name>
 
 ### Compatibility Commands
 
