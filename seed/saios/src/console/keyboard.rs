@@ -1,4 +1,5 @@
 use hal::arch::x86_64::io::inb;
+use core::cell::Cell;
 
 pub enum KeyEvent {
     Character(char),
@@ -6,6 +7,11 @@ pub enum KeyEvent {
     Backspace,
     Escape,
     Tab,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    CtrlC,
 }
 
 struct Ps2Driver;
@@ -100,6 +106,8 @@ impl ScancodeDecoder {
 pub struct KeyboardDriver {
     ps2: Ps2Driver,
     decoder: ScancodeDecoder,
+    extended: Cell<bool>,
+    ctrl_down: Cell<bool>,
 }
 
 impl KeyboardDriver {
@@ -107,11 +115,50 @@ impl KeyboardDriver {
         Self {
             ps2: Ps2Driver::new(),
             decoder: ScancodeDecoder::new(),
+            extended: Cell::new(false),
+            ctrl_down: Cell::new(false),
         }
     }
 
     pub fn poll_event(&self) -> Option<KeyEvent> {
         let scancode = self.ps2.read_scancode()?;
-        self.decoder.decode(scancode)
+
+        if scancode == 0xE0 {
+            self.extended.set(true);
+            return None;
+        }
+
+        let extended = self.extended.replace(false);
+        let released = (scancode & 0x80) != 0;
+        let code = scancode & 0x7F;
+
+        if !extended {
+            if code == 0x1D {
+                self.ctrl_down.set(!released);
+                return None;
+            }
+
+            if released {
+                return None;
+            }
+
+            if self.ctrl_down.get() && code == 0x2E {
+                return Some(KeyEvent::CtrlC);
+            }
+
+            return self.decoder.decode(code);
+        }
+
+        if released {
+            return None;
+        }
+
+        match code {
+            0x48 => Some(KeyEvent::ArrowUp),
+            0x50 => Some(KeyEvent::ArrowDown),
+            0x4B => Some(KeyEvent::ArrowLeft),
+            0x4D => Some(KeyEvent::ArrowRight),
+            _ => None,
+        }
     }
 }

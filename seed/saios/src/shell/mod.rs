@@ -5,6 +5,7 @@ mod dispatcher;
 mod engine;
 mod parser;
 mod prompt;
+mod programs;
 mod registry;
 mod service;
 mod session;
@@ -16,6 +17,10 @@ use crate::saifs;
 
 pub fn init() {
     console::clear();
+    console::println!("SAIOS v0.10");
+    console::println!("UEFI Boot");
+    console::println!("Launching SISH...");
+    console::newline();
     object_manager::init();
     saifs::init();
 }

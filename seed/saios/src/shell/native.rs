@@ -1,5 +1,5 @@
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
 use crate::console;
 use crate::heap;
@@ -7,6 +7,7 @@ use crate::kernel::testing;
 use crate::ksf;
 use crate::object_manager;
 use crate::pci;
+use crate::pmm;
 use crate::saifs;
 use crate::scheduler;
 use crate::shell::command::{ShellResult, StaticCommand};
@@ -19,6 +20,11 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "help",
         description: "List registered commands",
         handler: cmd_help,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "echo",
+        description: "Print text to console",
+        handler: cmd_echo,
     }));
     registry.register(Box::new(StaticCommand {
         name: "version",
@@ -34,6 +40,51 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "exit",
         description: "Exit shell session",
         handler: cmd_exit,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "history",
+        description: "Show command history",
+        handler: cmd_history,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "time",
+        description: "Show monotonic system time",
+        handler: cmd_time,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "mem",
+        description: "Show memory usage",
+        handler: cmd_mem,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "cpu",
+        description: "Show CPU information",
+        handler: cmd_cpu,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "ps",
+        description: "List active threads",
+        handler: cmd_ps,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "dmesg",
+        description: "Show recent kernel events",
+        handler: cmd_dmesg,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "panic",
+        description: "Trigger kernel panic",
+        handler: cmd_panic,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "run",
+        description: "Run a demo program",
+        handler: cmd_run,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "exec",
+        description: "Execute a demo program",
+        handler: cmd_run,
     }));
     registry.register(Box::new(StaticCommand {
         name: "objects",
@@ -164,6 +215,19 @@ fn cmd_version(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
+fn cmd_echo(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let mut first = true;
+    for arg in args {
+        if !first {
+            console::print(" ");
+        }
+        console::print(arg);
+        first = false;
+    }
+    console::newline();
+    Ok(())
+}
+
 fn cmd_clear(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::clear();
     Ok(())
@@ -172,6 +236,88 @@ fn cmd_clear(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
 fn cmd_exit(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     ctx.session.running = false;
     Ok(())
+}
+
+fn cmd_history(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    for (idx, line) in ctx.session.history.iter().enumerate() {
+        console::println!("{} {}", idx + 1, line);
+    }
+    Ok(())
+}
+
+fn cmd_time(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    let uptime = timer::uptime();
+    let total_ms = uptime.as_millis() as u64;
+    console::println!("ticks={} monotonic_ms={}", timer::ticks(), total_ms);
+    Ok(())
+}
+
+fn cmd_mem(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    console::println!("Total RAM : {} MB", pmm::total_ram_mb());
+    console::println!("Pages     : {}", pmm::total_pages());
+    console::println!("Used      : {}", pmm::used_pages());
+    console::println!("Free      : {}", pmm::free_pages());
+    Ok(())
+}
+
+fn trim_nul_bytes(bytes: &[u8]) -> String {
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1] == 0 {
+        end -= 1;
+    }
+    String::from_utf8_lossy(&bytes[..end]).trim().to_string()
+}
+
+fn cmd_cpu(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    let vendor = trim_nul_bytes(&hal::arch::x86_64::cpuid::vendor());
+    let brand = trim_nul_bytes(&hal::arch::x86_64::cpuid::brand());
+    let features = hal::arch::x86_64::cpuid::features();
+
+    console::println!("Vendor : {}", vendor);
+    console::println!("Brand  : {}", brand);
+    console::println!(
+        "Logical processors : {}",
+        hal::arch::x86_64::cpuid::logical_processors()
+    );
+    console::println!(
+        "Features: apic={} msr={} tsc={} sse={} sse2={} avx={}",
+        features.apic,
+        features.msr,
+        features.tsc,
+        features.sse,
+        features.sse2,
+        features.avx
+    );
+    Ok(())
+}
+
+fn cmd_ps(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    console::println!("ID   State");
+    for t in scheduler::threads() {
+        console::println!("{}    {:?}", t.id, t.state);
+    }
+    Ok(())
+}
+
+fn cmd_dmesg(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let limit = args
+        .first()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(64);
+
+    for line in object_manager::events(limit) {
+        console::println!("{}", line);
+    }
+    Ok(())
+}
+
+fn cmd_panic(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    panic!("panic command invoked")
+}
+
+fn cmd_run(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let program = args.first().copied().ok_or("run: missing program name")?;
+    crate::shell::programs::launch(program)
 }
 
 fn cmd_objects(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {

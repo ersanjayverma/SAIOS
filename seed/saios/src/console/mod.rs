@@ -110,6 +110,20 @@ impl<B: ConsoleBackend> Console<B> {
         self.backend.set_cursor(self.cursor.x, self.cursor.y);
     }
 
+    fn move_cursor_left(&mut self) {
+        if self.cursor.x > 0 {
+            self.cursor.x -= 1;
+            self.backend.set_cursor(self.cursor.x, self.cursor.y);
+        }
+    }
+
+    fn move_cursor_right(&mut self) {
+        if self.cursor.x + 1 < self.cursor.width {
+            self.cursor.x += 1;
+            self.backend.set_cursor(self.cursor.x, self.cursor.y);
+        }
+    }
+
     fn newline(&mut self) {
         self.cursor.x = 0;
         self.cursor.y += 1;
@@ -257,6 +271,22 @@ pub fn set_cursor(x: usize, y: usize) {
     let _ = try_with_console(|console| console.set_cursor(x, y));
 }
 
+pub fn move_cursor_left() {
+    if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let _ = try_with_console(|console| console.move_cursor_left());
+}
+
+pub fn move_cursor_right() {
+    if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let _ = try_with_console(|console| console.move_cursor_right());
+}
+
 pub fn newline() {
     put_char('\n');
 }
@@ -290,30 +320,101 @@ pub fn panic_println(s: &str) {
 }
 
 pub fn poll_input() -> Option<String<256>> {
+    fn redraw_line(prev_len: usize, prev_cursor: usize) {
+        // SAFETY: single-core early kernel context.
+        let input = unsafe { &mut *INPUT_BUFFER.get() };
+
+        for _ in prev_cursor..prev_len {
+            move_cursor_right();
+        }
+
+        for _ in 0..prev_len {
+            put_char('\x08');
+        }
+
+        let rendered = input.render();
+        for ch in rendered.chars() {
+            put_char(ch);
+        }
+
+        let new_len = input.len();
+        let new_cursor = input.cursor();
+        for _ in new_cursor..new_len {
+            move_cursor_left();
+        }
+    }
+
     // SAFETY: single-core early kernel context.
     let key_event = unsafe { (*KEYBOARD.get()).poll_event() }?;
 
+    let prev_len = unsafe { (*INPUT_BUFFER.get()).len() };
+    let prev_cursor = unsafe { (*INPUT_BUFFER.get()).cursor() };
+
     match key_event {
         KeyEvent::Character(ch) => {
-            unsafe { (*INPUT_BUFFER.get()).push(ch) };
-            put_char(ch);
+            let inserted = unsafe { (*INPUT_BUFFER.get()).insert(ch) };
+            if inserted {
+                if prev_cursor == prev_len {
+                    put_char(ch);
+                } else {
+                    redraw_line(prev_len, prev_cursor);
+                }
+            }
             None
         }
         KeyEvent::Backspace => {
             let erased = unsafe { (*INPUT_BUFFER.get()).backspace() };
             if erased {
-                put_char('\x08');
+                redraw_line(prev_len, prev_cursor);
             }
             None
         }
+        KeyEvent::ArrowLeft => {
+            if unsafe { (*INPUT_BUFFER.get()).move_left() } {
+                move_cursor_left();
+            }
+            None
+        }
+        KeyEvent::ArrowRight => {
+            if unsafe { (*INPUT_BUFFER.get()).move_right() } {
+                move_cursor_right();
+            }
+            None
+        }
+        KeyEvent::ArrowUp => {
+            let line = unsafe { (*INPUT_BUFFER.get()).history_prev() };
+            if let Some(line) = line {
+                unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
+                redraw_line(prev_len, prev_cursor);
+            }
+            None
+        }
+        KeyEvent::ArrowDown => {
+            let line = unsafe { (*INPUT_BUFFER.get()).history_next() };
+            if let Some(line) = line {
+                unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
+                redraw_line(prev_len, prev_cursor);
+            }
+            None
+        }
+        KeyEvent::CtrlC => {
+            newline();
+            unsafe { (*INPUT_BUFFER.get()).clear() };
+            Some(String::new())
+        }
         KeyEvent::Enter => {
             newline();
-            let line = unsafe { (*INPUT_BUFFER.get()).take() };
-            unsafe { (*INPUT_BUFFER.get()).clear() };
+            let line = unsafe { (*INPUT_BUFFER.get()).submit() };
             Some(line)
         }
         KeyEvent::Tab => {
-            put_char('\t');
+            let inserted = unsafe { (*INPUT_BUFFER.get()).insert(' ') };
+            let inserted2 = unsafe { (*INPUT_BUFFER.get()).insert(' ') };
+            let inserted3 = unsafe { (*INPUT_BUFFER.get()).insert(' ') };
+            let inserted4 = unsafe { (*INPUT_BUFFER.get()).insert(' ') };
+            if inserted && inserted2 && inserted3 && inserted4 {
+                redraw_line(prev_len, prev_cursor);
+            }
             None
         }
         KeyEvent::Escape => None,
