@@ -57,6 +57,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     }
 
     heap::init();
+    let _ = console::promote_framebuffer_renderer();
     ksf::bootstrap().expect("KSF bootstrap failed");
     interrupt::enable();
     if cfg!(debug_assertions) {

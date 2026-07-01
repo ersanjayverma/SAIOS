@@ -237,6 +237,14 @@ pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
     });
 }
 
+pub fn promote_framebuffer_renderer() -> bool {
+    if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
+        return false;
+    }
+
+    try_with_console(|console| console.backend.right_mut().ensure_renderer_ready()).unwrap_or(false)
+}
+
 pub fn put_char(c: char) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         SerialConsole::emergency_put_char(c);

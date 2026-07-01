@@ -61,6 +61,11 @@ impl FramebufferConsole {
         }
     }
 
+    pub fn ensure_renderer_ready(&mut self) -> bool {
+        self.try_init_surface();
+        self.renderer_ready
+    }
+
     fn put_char_direct(&mut self, c: char) {
         if let Some(display) = self.display.as_mut() {
             let px = self.cursor_x * FONT_WIDTH;
