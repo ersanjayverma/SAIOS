@@ -16,7 +16,7 @@ pub fn run() -> ! {
         let line = console::read_line();
 
         if let Some(parsed) = parser::parse_line(line.as_str()) {
-            let _ = builtins::execute(parsed);
+            builtins::execute(parsed);
         }
     }
 }

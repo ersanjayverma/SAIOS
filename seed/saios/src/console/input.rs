@@ -23,6 +23,7 @@ impl InputBuffer {
         self.buffer.clear();
     }
 
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         self.buffer.as_str()
     }

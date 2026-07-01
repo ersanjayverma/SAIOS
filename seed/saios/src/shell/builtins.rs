@@ -2,29 +2,32 @@ use crate::console;
 use crate::shell::commands;
 use crate::shell::parser::ParsedCommand;
 
-pub enum DispatchOutcome {
-    Continue,
+fn print_help() {
+    console::println!("help");
+    console::println!("clear");
+    console::println!("version");
+    console::println!("echo");
+    console::println!("panic");
+    console::println!("reboot");
+    console::println!("shutdown");
 }
 
-pub fn execute(parsed: ParsedCommand<'_>) -> DispatchOutcome {
+fn halt_forever() -> ! {
+    loop {
+        hal::arch::x86_64::cpu::hlt();
+    }
+}
+
+pub fn execute(parsed: ParsedCommand<'_>) {
     match parsed.command {
         commands::HELP => {
-            console::println!("help");
-            console::println!("clear");
-            console::println!("version");
-            console::println!("echo");
-            console::println!("panic");
-            console::println!("reboot");
-            console::println!("shutdown");
-            DispatchOutcome::Continue
+            print_help();
         }
         commands::CLEAR => {
             console::clear();
-            DispatchOutcome::Continue
         }
         commands::VERSION => {
             console::println!("SAIOS v0.1");
-            DispatchOutcome::Continue
         }
         commands::ECHO => {
             let mut first = true;
@@ -36,7 +39,6 @@ pub fn execute(parsed: ParsedCommand<'_>) -> DispatchOutcome {
                 first = false;
             }
             console::newline();
-            DispatchOutcome::Continue
         }
         commands::PANIC => {
             panic!("panic command invoked");
@@ -44,19 +46,14 @@ pub fn execute(parsed: ParsedCommand<'_>) -> DispatchOutcome {
         commands::REBOOT => {
             // 8042 keyboard controller pulse reset line.
             hal::arch::x86_64::io::outb(0x64, 0xFE);
-            loop {
-                hal::arch::x86_64::cpu::hlt();
-            }
+            halt_forever();
         }
         commands::SHUTDOWN => {
             console::println!("Shutdown requested");
-            loop {
-                hal::arch::x86_64::cpu::hlt();
-            }
+            halt_forever();
         }
         _ => {
             console::println!("Unknown command");
-            DispatchOutcome::Continue
         }
     }
 }

@@ -62,7 +62,8 @@ const fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
 }
 
-pub unsafe fn init(entries: &[MemoryRegion]) {
+/// Initialize the page allocator from the firmware-provided memory map.
+pub fn init(entries: &[MemoryRegion]) {
     let pmm = unsafe { &mut *PMM.get() };
     pmm.reset();
 
@@ -95,7 +96,8 @@ pub unsafe fn init(entries: &[MemoryRegion]) {
     }
 }
 
-pub unsafe fn alloc_page() -> Option<u64> {
+/// Allocate one 4 KiB physical page.
+pub fn alloc_page() -> Option<u64> {
     let pmm = unsafe { &mut *PMM.get() };
     if !pmm.initialized || pmm.free_pages == 0 || pmm.tracked_pages == 0 {
         return None;
@@ -120,7 +122,8 @@ pub unsafe fn alloc_page() -> Option<u64> {
     None
 }
 
-pub unsafe fn free_page(phys_addr: u64) -> bool {
+/// Free one 4 KiB physical page.
+pub fn free_page(phys_addr: u64) -> bool {
     if phys_addr & (PAGE_SIZE - 1) != 0 {
         return false;
     }
@@ -144,7 +147,8 @@ pub unsafe fn free_page(phys_addr: u64) -> bool {
     true
 }
 
-pub unsafe fn reserve(base: u64, length: u64) {
+/// Mark a physical address range as used.
+pub fn reserve(base: u64, length: u64) {
     let pmm = unsafe { &mut *PMM.get() };
     if !pmm.initialized || length == 0 {
         return;
@@ -162,7 +166,8 @@ pub unsafe fn reserve(base: u64, length: u64) {
     }
 }
 
-pub unsafe fn used() -> u64 {
+/// Bytes currently marked as used in the tracked PMM range.
+pub fn used() -> u64 {
     let pmm = unsafe { &*PMM.get() };
     if !pmm.initialized {
         return 0;
@@ -170,7 +175,8 @@ pub unsafe fn used() -> u64 {
     ((pmm.tracked_pages - pmm.free_pages) as u64) * PAGE_SIZE
 }
 
-pub unsafe fn available() -> u64 {
+/// Bytes currently available in the tracked PMM range.
+pub fn available() -> u64 {
     let pmm = unsafe { &*PMM.get() };
     if !pmm.initialized {
         return 0;

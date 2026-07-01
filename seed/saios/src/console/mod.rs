@@ -287,10 +287,6 @@ pub fn panic_println(s: &str) {
     panic_write_str("\n");
 }
 
-pub fn prompt() {
-    print("> ");
-}
-
 pub fn poll_input() -> Option<String<256>> {
     // SAFETY: single-core early kernel context.
     let key_event = unsafe { (*KEYBOARD.get()).poll_event() }?;

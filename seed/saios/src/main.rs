@@ -15,21 +15,19 @@ use seed::Seed;
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     interrupt::disable();
-    unsafe { console::attach_framebuffer((*boot_info).framebuffer) };
+    let boot_info = unsafe { &*boot_info };
+    console::attach_framebuffer(boot_info.framebuffer);
     driver::console::init();
     gdt::init();
     idt::init();
 
     // Convert the raw pointer and count into a temporary Rust slice
     let _entries_slice = unsafe {
-        core::slice::from_raw_parts(
-            (*boot_info).memorymap.entries,
-            (*boot_info).memorymap.entry_count,
-        )
+        core::slice::from_raw_parts(boot_info.memorymap.entries, boot_info.memorymap.entry_count)
     };
     // Initialize PMM with the boot memory map and take one page for PML4.
-    unsafe { init(_entries_slice) };
-    let pml4_phys = unsafe { alloc_page() }.expect("PMM: no free pages for PML4");
+    init(_entries_slice);
+    let pml4_phys = alloc_page().expect("PMM: no free pages for PML4");
     let pml4_ptr = pml4_phys as *mut Table;
     unsafe { (*pml4_ptr).clear() };
     // Recursive mapping: last PML4 slot points to the PML4 itself.
@@ -37,7 +35,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
         (*pml4_ptr).entries[511].set_page(pml4_phys, paging::FLAG_WRITABLE);
     }
    
-    let seed = Seed::init(boot_info);
+    let seed = Seed::init(boot_info as *const SaiosBootInfo);
     seed.run()
 }
 
