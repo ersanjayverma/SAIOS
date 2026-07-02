@@ -33,13 +33,11 @@ pub fn glyph_row(ch: char, row16: usize) -> u8 {
         return 0;
     }
 
-    // Keep a light-weight 8x16 appearance by drawing on even scanlines only.
-    // This avoids the doubled-row look that makes text appear overly bold.
-    if (row16 & 1) != 0 {
-        return 0;
-    }
-
-    let row8 = core::cmp::min(row16 / 2, 7);
+    // Scale the 8-row source glyph to fill all 16 scanlines by doubling each
+    // row.  Rows 0..1 → source row 0, rows 2..3 → source row 1, …,
+    // rows 14..15 → source row 7.  This produces solid, clearly readable
+    // glyphs with no horizontal gaps between scanlines.
+    let row8 = row16 / 2;
 
     if let Some(rows) = lookup_font8x8(ch) {
         return rows[row8];
