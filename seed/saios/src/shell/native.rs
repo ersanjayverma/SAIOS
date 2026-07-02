@@ -9,6 +9,7 @@ use crate::kernel::device;
 use crate::kernel::driver;
 use crate::kernel::event;
 use crate::kernel::object as kom;
+use crate::kernel::package_image;
 use crate::kernel::process;
 use crate::kernel::sairu;
 use crate::kernel::syscall;
@@ -126,6 +127,11 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "crt",
         description: "Show or probe C runtime startup contract",
         handler: cmd_crt,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "pkgimg",
+        description: "Show or remount package image profile",
+        handler: cmd_pkgimg,
     }));
     registry.register(Box::new(StaticCommand {
         name: "env",
@@ -732,6 +738,19 @@ fn cmd_crt(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     Err("usage: crt [abi|probe <program> [args...]]")
+}
+
+fn cmd_pkgimg(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    if args.first().copied() == Some("mount") || args.first().copied() == Some("remount") {
+        package_image::mount_default()?;
+    }
+
+    let s = package_image::status();
+    console::println!("mounted={}", s.mounted);
+    console::println!("profile={}", s.profile);
+    console::println!("manifest={}", s.manifest);
+    console::println!("roots={} bins={}", s.roots, s.bins);
+    Ok(())
 }
 
 fn cmd_dashboard(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {

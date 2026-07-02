@@ -2,6 +2,10 @@ pub trait ConsoleBackend {
     fn put_char(&mut self, c: char);
     fn clear(&mut self);
     fn set_cursor(&mut self, x: usize, y: usize);
+
+    fn scroll_up(&mut self, _rows: usize) -> bool {
+        false
+    }
 }
 
 pub struct MirrorConsole<A, B> {
@@ -37,5 +41,11 @@ where
     fn set_cursor(&mut self, x: usize, y: usize) {
         self.left.set_cursor(x, y);
         self.right.set_cursor(x, y);
+    }
+
+    fn scroll_up(&mut self, rows: usize) -> bool {
+        let left_ok = self.left.scroll_up(rows);
+        let right_ok = self.right.scroll_up(rows);
+        left_ok && right_ok
     }
 }

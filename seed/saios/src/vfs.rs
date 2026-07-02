@@ -391,7 +391,26 @@ fn seed_standard_tree(fs: &mut TmpFs) {
         let _ = fs.mkdir(path);
     }
 
-    let user_programs = ["hello", "true", "false", "argc", "env", "fail"];
+    let user_programs = [
+        "hello",
+        "true",
+        "false",
+        "argc",
+        "env",
+        "fail",
+        "ls",
+        "cat",
+        "cp",
+        "mv",
+        "rm",
+        "mkdir",
+        "ps",
+        "kill",
+        "top",
+        "uname",
+        "calc",
+        "stress",
+    ];
     for name in user_programs {
         let _ = fs.create(format!("/bin/{}", name).as_str());
     }

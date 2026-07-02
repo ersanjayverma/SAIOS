@@ -327,4 +327,10 @@ impl ConsoleBackend for SerialConsole {
         // ANSI cursor is 1-based.
         Self::write_escape(format_args!("\x1b[{};{}H", y + 1, x + 1));
     }
+
+    fn scroll_up(&mut self, rows: usize) -> bool {
+        let rows = core::cmp::max(1, rows);
+        Self::write_escape(format_args!("\x1b[{}S", rows));
+        true
+    }
 }

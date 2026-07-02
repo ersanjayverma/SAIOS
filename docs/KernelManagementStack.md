@@ -358,6 +358,56 @@ Shell visibility:
 - `crt abi`
 - `crt probe <program> [args...]`
 
+## 6.3 Core Userland Programs (Phase 4/6)
+
+The `/bin` runtime surface now includes user-launchable programs resolved through the process runtime path:
+
+- `hello`
+- `calc`
+- `stress`
+- `ls`
+- `cat`
+- `cp`
+- `mv`
+- `rm`
+- `mkdir`
+- `ps`
+- `kill`
+- `top`
+- `uname`
+
+Behavior notes:
+
+- Programs are launched through Process Manager execution (`exec` and unknown-command fallback).
+- `/bin/<name>` lookup remains the default resolution path for external commands.
+- Process-start events include `argc` and `envc` metadata from CRT startup block preparation.
+
+## 6.4 Package Image Runtime (Phase 5/6)
+
+Package-image style root provisioning is now integrated as a runtime profile mount step.
+
+Implemented behavior:
+
+- Default package profile: `saios-base`
+- Root layout ensured at runtime:
+  - `/boot`
+  - `/bin`
+  - `/etc`
+  - `/home`
+  - `/proc`
+  - `/dev`
+  - `/tmp`
+  - `/usr`
+- Manifest materialized at `/boot/package.manifest`
+- `/etc/profile` and `/etc/hostname` seeded by profile mount
+- `/bin` entries for core userland programs are ensured by package profile mount
+
+Shell visibility/control:
+
+- `pkgimg`
+- `pkgimg mount`
+- `pkgimg remount`
+
 `jobs` supports filtering:
 
 - `jobs running`

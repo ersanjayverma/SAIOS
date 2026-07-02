@@ -12,6 +12,7 @@ mod session;
 mod native;
 
 use crate::console;
+use crate::kernel::package_image;
 use crate::kernel::object as kom;
 use crate::object_manager;
 use crate::saifs;
@@ -25,6 +26,7 @@ pub fn init() {
     console::newline();
     object_manager::init();
     saifs::init();
+    let _ = package_image::mount_default();
     kom::init();
 }
 

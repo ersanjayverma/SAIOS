@@ -3,22 +3,10 @@ use efi_main::graphics::FramebufferInfo;
 use crate::graphics::display::{Display, FramebufferDisplay};
 use crate::graphics::framebuffer::Color;
 use crate::graphics::font::{glyph_row, FONT_HEIGHT, FONT_WIDTH};
-use crate::graphics::renderer::Renderer;
-use crate::graphics::surface::Surface;
-use hal::arch::x86_64::sync::StaticCell;
-
-const BACKBUFFER_WIDTH: usize = 1024;
-const BACKBUFFER_HEIGHT: usize = 768;
-const BACKBUFFER_CAPACITY: usize = BACKBUFFER_WIDTH * BACKBUFFER_HEIGHT;
 const TAB_WIDTH: usize = 4;
-
-static BACKBUFFER_PIXELS: StaticCell<[u32; BACKBUFFER_CAPACITY]> =
-    StaticCell::new([0; BACKBUFFER_CAPACITY]);
 
 pub struct FramebufferConsole {
     display: Option<FramebufferDisplay>,
-    surface: Option<Surface>,
-    renderer_ready: bool,
     cursor_x: usize,
     cursor_y: usize,
     fg: Color,
@@ -29,8 +17,6 @@ impl FramebufferConsole {
     pub const fn new() -> Self {
         Self {
             display: None,
-            surface: None,
-            renderer_ready: false,
             cursor_x: 0,
             cursor_y: 0,
             fg: Color::WHITE,
@@ -38,33 +24,8 @@ impl FramebufferConsole {
         }
     }
 
-    fn try_init_surface(&mut self) {
-        if self.renderer_ready {
-            return;
-        }
-
-        if let Some(display) = self.display.as_ref() {
-            let width = display.width();
-            let height = display.height();
-            let needed = width.saturating_mul(height);
-
-            if needed <= BACKBUFFER_CAPACITY {
-                // SAFETY: single-console singleton in early kernel context.
-                let pixels = unsafe { &mut *BACKBUFFER_PIXELS.get() };
-                self.surface = Surface::new_borrowed(width, height, &mut pixels[..needed]);
-            }
-
-            if self.surface.is_none() {
-                self.surface = Surface::try_new(width, height);
-            }
-
-            self.renderer_ready = self.surface.is_some();
-        }
-    }
-
     pub fn ensure_renderer_ready(&mut self) -> bool {
-        self.try_init_surface();
-        self.renderer_ready
+        self.display.is_some()
     }
 
     fn text_bounds(&self) -> Option<(usize, usize)> {
@@ -90,12 +51,6 @@ impl FramebufferConsole {
             self.clear();
             self.cursor_x = 0;
             self.cursor_y = 0;
-            return;
-        }
-
-        if let Some(surface) = self.surface.as_mut() {
-            surface.scroll_up(shift_px, bg);
-            self.flush();
             return;
         }
 
@@ -220,19 +175,9 @@ impl FramebufferConsole {
     pub fn attach(&mut self, info: FramebufferInfo) {
         self.display = FramebufferDisplay::from_info(info);
 
-        self.surface = None;
-        self.renderer_ready = false;
-        self.try_init_surface();
-
         self.cursor_x = 0;
         self.cursor_y = 0;
         self.clear();
-    }
-
-    fn flush(&mut self) {
-        if let (Some(display), Some(surface)) = (self.display.as_mut(), self.surface.as_ref()) {
-            display.flush(surface.pixels(), surface.width(), surface.height());
-        }
     }
 
     pub fn text_columns(&self) -> Option<usize> {
@@ -265,33 +210,11 @@ impl ConsoleBackend for FramebufferConsole {
             _ => {}
         }
 
-        if !self.renderer_ready {
-            self.try_init_surface();
-        }
-
-        if let Some(surface) = self.surface.as_mut() {
-            let px = self.cursor_x * FONT_WIDTH;
-            let py = self.cursor_y * FONT_HEIGHT;
-            let mut renderer = Renderer::new(surface);
-            renderer.draw_char(px, py, c, self.fg.to_u32(), self.bg.to_u32());
-            self.flush();
-            self.cursor_x += 1;
-        } else {
-            self.put_char_direct(c);
-        }
+        self.put_char_direct(c);
     }
 
     fn clear(&mut self) {
-        if !self.renderer_ready {
-            self.try_init_surface();
-        }
-
-        if let Some(surface) = self.surface.as_mut() {
-            surface.clear(self.bg.to_u32());
-            self.flush();
-        } else {
-            self.clear_direct();
-        }
+        self.clear_direct();
 
         self.cursor_x = 0;
         self.cursor_y = 0;
@@ -300,5 +223,13 @@ impl ConsoleBackend for FramebufferConsole {
     fn set_cursor(&mut self, x: usize, y: usize) {
         self.cursor_x = x;
         self.cursor_y = y;
+    }
+
+    fn scroll_up(&mut self, rows: usize) -> bool {
+        let rows = core::cmp::max(1, rows);
+        for _ in 0..rows {
+            self.scroll_one_text_row();
+        }
+        true
     }
 }
