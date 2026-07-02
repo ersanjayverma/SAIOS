@@ -27,6 +27,39 @@ pub fn free_page(page: PhysAddr) {
     let _ = crate::driver::memory::free_page(page);
 }
 
+pub fn try_free_page(page: PhysAddr) -> bool {
+    crate::driver::memory::free_page(page)
+}
+
+pub fn free_pages_range(base: PhysAddr, count: usize) -> bool {
+    if count == 0 {
+        return false;
+    }
+
+    let mut ok = true;
+    let mut current = base;
+    for _ in 0..count {
+        if !crate::driver::memory::free_page(current) {
+            ok = false;
+        }
+        current = current.saturating_add(PAGE_SIZE);
+    }
+
+    ok
+}
+
+pub fn reserve(base: PhysAddr, length: u64) {
+    crate::driver::memory::reserve(base, length);
+}
+
+pub fn available_bytes() -> u64 {
+    crate::driver::memory::available()
+}
+
+pub fn used_bytes() -> u64 {
+    crate::driver::memory::used()
+}
+
 pub fn total_pages() -> usize {
     crate::driver::memory::total_pages()
 }

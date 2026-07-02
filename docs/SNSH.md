@@ -144,7 +144,7 @@ Primary object-first interface:
 - ps
 - dmesg
 - panic
-- run
+- spawn
 - exec
 - env
 - setenv
@@ -224,20 +224,37 @@ Capabilities:
 - Exit code capture in session state
 - Last exit status query via `status`
 
+`spawn` starts a process and returns PID through shell output.
+
 Examples:
 
 - `exec hello one two`
 - `exec MODE=debug hello world`
 - `exec false` then `status`
+- `spawn shell`
 
-Current built-in demo programs:
+Current binary-backed programs seeded in package image include:
 
 - `hello`
-- `true`
-- `false`
-- `argc`
-- `env`
-- `fail <code>`
+- `calc`
+- `editor`
+- `shell`
+- `ls`
+- `cat`
+- `cp`
+- `mv`
+- `rm`
+- `mkdir`
+- `ps`
+- `kill`
+- `top`
+- `uname`
+- `stress`
+- `cc`
+
+Runtime note:
+
+- Execution is binary-metadata driven and no longer dependent on demo-only `run` flow.
 
 ## Execution Flow
 

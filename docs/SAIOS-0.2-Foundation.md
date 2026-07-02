@@ -122,6 +122,13 @@ Demo gate:
 - Returns deterministic exit code
 - Preserves shell session integrity across launches
 
+Status update:
+
+- `exec`, `spawn`, `exit`, and `wait` process APIs are implemented and integrated.
+- Program resolution uses explicit path and `/bin/<name>` probing.
+- Runtime process lifecycle is recorded in Process Manager with PID and exit status.
+- Binary metadata path now supports PIE and dynamic-link contracts.
+
 ### Phase 3: Filesystem Usability
 
 Scope:
@@ -211,7 +218,7 @@ Each milestone must end with a live shell demonstration script that can be repla
 ## Immediate Next Sprint (Post Boot-to-Shell)
 
 1. Close shell/path semantics and command reliability regressions.
-2. Finish process execution contract (`exec`, args, env, exit code).
-3. Add process lifecycle controls (`ps`, `kill`, `wait`, background jobs).
-4. Add startup script execution path and deterministic boot script behavior.
+2. Add process lifecycle controls (`ps`, `kill`, `wait`, background jobs) hardening.
+3. Add startup script execution path and deterministic boot script behavior hardening.
+4. Add VMM intermediate page-table frame reclamation when tables become empty.
 5. Add one end-to-end terminal demo checklist and keep it green on each change.

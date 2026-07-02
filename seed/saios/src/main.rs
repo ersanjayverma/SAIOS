@@ -24,6 +24,7 @@ pub mod som;
 pub mod snom;
 pub mod seed;
 pub mod timer;
+pub mod vmm;
 pub mod vfs;
 use efi_main::SaiosBootInfo;
 use hal::arch::paging::{self, Table};
@@ -53,6 +54,8 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     unsafe {
         (*pml4_ptr).entries[511].set_page(pml4_phys, paging::FLAG_WRITABLE);
     }
+
+    vmm::init(pml4_phys).expect("VMM: failed to initialize kernel virtual memory manager");
 
     heap::init();
     kernel::timeline::init();

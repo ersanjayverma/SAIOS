@@ -165,6 +165,8 @@ Process manager is implemented in `kernel/process.rs`.
 - Track kernel-managed process records
 - Expose process table to SNSH jobs flow
 - Provide `kill(pid)` and `wait(pid)` APIs
+- Provide `spawn(name, args, env)` and `exec(name, args, env)` launch paths
+- Provide explicit `exit(pid, code)` completion API
 - Emit lifecycle events to Event Bus
 
 ### Current process commands
@@ -173,6 +175,8 @@ Process manager is implemented in `kernel/process.rs`.
 - `jobs`
 - `kill <pid>`
 - `wait <pid>`
+- `spawn <program> [args...]`
+- `exec [KEY=VALUE ...] <program> [args...]`
 
 ### External program runtime path (implemented slice)
 
@@ -180,15 +184,27 @@ Process manager is implemented in `kernel/process.rs`.
 - Program resolution checks explicit paths and `/bin/<name>` before launch.
 - Process lifecycle is recorded per launch with PID allocation and exit-code completion.
 - Event Bus receives process start/stop events with pid and exit metadata.
+- Binary metadata path includes PIE load-bias metadata handling.
+- Dynamic-link metadata path validates interpreter, needed libraries, and required symbols before launch.
 
 Seeded `/bin` entries currently include:
 
 - `hello`
-- `true`
-- `false`
-- `argc`
-- `env`
-- `fail`
+- `calc`
+- `editor`
+- `shell`
+- `ls`
+- `cat`
+- `cp`
+- `mv`
+- `rm`
+- `mkdir`
+- `ps`
+- `kill`
+- `top`
+- `uname`
+- `stress`
+- `cc`
 
 ## 7. Virtual Filesystem Shell Surface (Phase 6)
 

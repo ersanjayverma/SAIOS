@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use crate::heap;
 use crate::kernel::testing::report::{VerifyCheck, VerifyReport};
 use crate::pmm;
+use crate::vmm;
 
 pub mod tests;
 
@@ -26,6 +27,14 @@ pub fn verify() -> VerifyReport {
         VerifyCheck::fail("Page accounting", "free + used mismatch")
     });
 
+    checks.push(if pmm::available_bytes() + pmm::used_bytes()
+        == (pmm::total_pages() as u64).saturating_mul(pmm::PAGE_SIZE)
+    {
+        VerifyCheck::pass("PMM byte accounting", "available + used == total bytes")
+    } else {
+        VerifyCheck::fail("PMM byte accounting", "byte accounting mismatch")
+    });
+
     checks.push(if heap_stats.total > 0 {
         VerifyCheck::pass("Heap initialized", "heap arena configured")
     } else {
@@ -37,6 +46,11 @@ pub fn verify() -> VerifyReport {
     } else {
         VerifyCheck::fail("Heap bounds", "heap used exceeds total")
     });
+
+    let vmm_report = vmm::verify();
+    for check in vmm_report.checks {
+        checks.push(check);
+    }
 
     VerifyReport {
         target: "memory",

@@ -162,6 +162,45 @@ Shell placement rule:
 
 - Shell is a KSF-managed service and scheduled task.
 - Boot code must not enter shell loops directly.
+
+## Memory Manager Status (Implemented)
+
+Current memory stack is split into PMM and VMM responsibilities:
+
+- PMM (`pmm` over `driver/memory`) owns physical-page accounting and allocation.
+- VMM (`vmm`) owns virtual mappings and hardware page-table updates.
+
+Implemented PMM capabilities:
+
+- 4 KiB page allocation (`alloc_page`, `alloc_pages`)
+- single-page and range free helpers
+- reserve API passthrough for physical ranges
+- page and byte accounting (`total/free/used`)
+
+Implemented VMM capabilities:
+
+- kernel VMM initialization from boot PML4
+- map / unmap / translate contracts
+- owned mappings with physical release on unmap
+- higher-half kernel mapping policy
+- hardware-backed page-table operations through recursive mapping
+- per-page TLB invalidation on map/unmap
+
+Operational note:
+
+- VMM no longer acts as metadata-only bookkeeping; map/unmap now writes live page tables.
+
+## Process and Loader Status (Implemented Slice)
+
+Current process/runtime slice includes:
+
+- process lifecycle APIs: `spawn`, `exec`, `exit`, `wait`
+- executable resolution via explicit path and `/bin/<name>` search
+- binary metadata-based loader entry selection
+- PIE metadata support with load bias computation
+- dynamic-link metadata support with interpreter, needed libraries, and symbol resolution checks
+
+Package image now seeds executable and shared-object metadata required for this path.
 ```
 
 ## Execution Context Model
