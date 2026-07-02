@@ -34,9 +34,24 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_help,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "registry",
+        description: "Show command registry",
+        handler: cmd_registry,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "echo",
         description: "Print text to console",
         handler: cmd_echo,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "grep",
+        description: "Filter stdin by substring",
+        handler: cmd_grep,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "wc",
+        description: "Count stdin lines/words/bytes",
+        handler: cmd_wc,
     }));
     registry.register(Box::new(StaticCommand {
         name: "version",
@@ -149,9 +164,34 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_unsetenv,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "alias",
+        description: "Create or list aliases",
+        handler: cmd_alias,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "unalias",
+        description: "Remove alias by name",
+        handler: cmd_unalias,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "aliases",
+        description: "List configured aliases",
+        handler: cmd_aliases,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "status",
         description: "Show last exit code",
         handler: cmd_status,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "source",
+        description: "Run script file in current shell context",
+        handler: cmd_source,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: ".",
+        description: "Alias for source",
+        handler: cmd_source,
     }));
     registry.register(Box::new(StaticCommand {
         name: "dashboard",
@@ -397,12 +437,26 @@ fn cmd_help(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
+fn cmd_registry(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    for item in &ctx.command_catalog {
+        console::println!("{} - {}", item.name, item.description);
+    }
+    Ok(())
+}
+
 fn cmd_version(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
-    console::println!("SAIOS v0.1 SNSH");
+    console::println!("SAIOS v1.0 SISH");
     Ok(())
 }
 
 fn cmd_echo(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    if args.is_empty() {
+        if let Some(stdin) = _ctx.env_get("SISH_STDIN") {
+            console::println!("{}", stdin);
+        }
+        return Ok(());
+    }
+
     let mut first = true;
     for arg in args {
         if !first {
@@ -412,6 +466,26 @@ fn cmd_echo(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
         first = false;
     }
     console::newline();
+    Ok(())
+}
+
+fn cmd_grep(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let needle = args.first().copied().ok_or("grep: missing pattern")?;
+    let input = ctx.env_get("SISH_STDIN").ok_or("grep: no stdin")?;
+    for line in input.lines() {
+        if line.contains(needle) {
+            console::println!("{}", line);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_wc(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    let input = ctx.env_get("SISH_STDIN").ok_or("wc: no stdin")?;
+    let lines = input.lines().count();
+    let words = input.split_whitespace().count();
+    let bytes = input.as_bytes().len();
+    console::println!("{} {} {}", lines, words, bytes);
     Ok(())
 }
 
@@ -655,8 +729,48 @@ fn cmd_unsetenv(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
+fn cmd_aliases(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    for (name, value) in &ctx.session.aliases {
+        console::println!("alias {}='{}'", name, value);
+    }
+    Ok(())
+}
+
+fn cmd_alias(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    if args.is_empty() {
+        return cmd_aliases(ctx, args);
+    }
+
+    if let Some((name, value)) = args[0].split_once('=') {
+        if name.is_empty() {
+            return Err("alias: invalid name");
+        }
+        ctx.alias_set(name, value);
+        return Ok(());
+    }
+
+    if args.len() < 2 {
+        return Err("alias: usage alias NAME VALUE");
+    }
+
+    let name = args[0];
+    let value = args[1..].join(" ");
+    ctx.alias_set(name, value.as_str());
+    Ok(())
+}
+
+fn cmd_unalias(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let name = args.first().copied().ok_or("unalias: missing name")?;
+    ctx.alias_unset(name);
+    Ok(())
+}
+
 fn cmd_status(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!("{}", ctx.session.last_exit_code);
+    Ok(())
+}
+
+fn cmd_source(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 

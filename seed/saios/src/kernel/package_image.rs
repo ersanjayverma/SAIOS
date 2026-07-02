@@ -5,7 +5,17 @@ use crate::vfs;
 const PROFILE: &str = "saios-base";
 const MANIFEST_PATH: &str = "/boot/package.manifest";
 
-const ROOT_DIRS: &[&str] = &["/boot", "/bin", "/etc", "/home", "/proc", "/dev", "/tmp", "/usr"];
+const ROOT_DIRS: &[&str] = &[
+    "/boot",
+    "/bin",
+    "/etc",
+    "/home",
+    "/proc",
+    "/dev",
+    "/tmp",
+    "/usr",
+    "/system",
+];
 
 const BIN_ENTRIES: &[&str] = &[
     "hello",

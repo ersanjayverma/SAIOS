@@ -79,6 +79,16 @@ fn cmd_touch(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_cat(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    if args.is_empty() {
+        if let Some(stdin) = _ctx.env_get("SISH_STDIN") {
+            if !stdin.is_empty() {
+                console::println!("{}", stdin);
+            }
+            return Ok(());
+        }
+        return Err("cat: missing path");
+    }
+
     let path = resolve_relative_path(args.first().copied().ok_or("cat: missing path")?);
     let text = saifs::read_text(path.as_str()).map_err(|_| "cat failed")?;
     if !text.is_empty() {

@@ -29,6 +29,8 @@ struct ProcessManager {
     initialized: bool,
     records: Vec<ProcessRecord>,
     next_pid: u64,
+    init_pid: Option<u64>,
+    shell_pid: Option<u64>,
 }
 
 impl ProcessManager {
@@ -37,20 +39,9 @@ impl ProcessManager {
             initialized: false,
             records: Vec::new(),
             next_pid: 1,
+            init_pid: None,
+            shell_pid: None,
         }
-    }
-
-    fn spawn_seed_process(&mut self, name: &str) {
-        let pid = self.next_pid;
-        self.next_pid = self.next_pid.saturating_add(1);
-        self.records.push(ProcessRecord {
-            pid,
-            name: name.to_string(),
-            state: ProcessState::Running,
-            thread_count: 1,
-            exit_code: None,
-        });
-        event::publish(EventKind::ProcessStarted, "process", "snsh started");
     }
 
     fn spawn(&mut self, name: &str) -> u64 {
@@ -123,9 +114,63 @@ pub fn init() {
         if m.initialized {
             return;
         }
-        m.spawn_seed_process("snsh");
         m.initialized = true;
     });
+}
+
+pub fn start_pid1(path: &str) -> u64 {
+    with_manager_mut(|m| {
+        if let Some(pid) = m.init_pid {
+            return pid;
+        }
+
+        let pid = m.next_pid;
+        m.next_pid = m.next_pid.saturating_add(1);
+        m.records.push(ProcessRecord {
+            pid,
+            name: path.to_string(),
+            state: ProcessState::Running,
+            thread_count: 1,
+            exit_code: None,
+        });
+        m.init_pid = Some(pid);
+        event::publish(
+            EventKind::ProcessStarted,
+            "process",
+            alloc::format!("pid={} {} started", pid, path).as_str(),
+        );
+        pid
+    })
+}
+
+pub fn finish_pid1(code: i32) -> Result<(), &'static str> {
+    with_manager_mut(|m| {
+        let pid = m.init_pid.ok_or("pid1: not started")?;
+        m.exit(pid, code)?;
+        event::publish(
+            EventKind::ProcessStopped,
+            "process",
+            alloc::format!("pid={} exit={}", pid, code).as_str(),
+        );
+        Ok(())
+    })
+}
+
+pub fn ensure_shell_process(name: &str) -> u64 {
+    with_manager_mut(|m| {
+        if let Some(pid) = m.shell_pid {
+            return pid;
+        }
+
+        let pid = m.spawn(name);
+        m.shell_pid = Some(pid);
+        event::publish(
+            EventKind::ProcessStarted,
+            "process",
+            alloc::format!("pid={} {} started", pid, name).as_str(),
+        );
+        pid
+    })
 }
 
 pub fn jobs() -> Vec<ProcessRecord> {

@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::command::Command;
@@ -36,6 +37,12 @@ impl CommandRegistry {
             .iter()
             .find(|cmd| cmd.name().eq_ignore_ascii_case(name))
             .map(|cmd| cmd.as_ref())
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.commands.iter().map(|c| c.name().into()).collect();
+        out.sort();
+        out
     }
 
     pub fn list(&self) -> Vec<CommandInfo> {

@@ -58,7 +58,7 @@ pub fn init() {
         }
 
         let _ = r.register(ObjectType::Kernel, "saios", ObjectState::Running);
-        let _ = r.register(ObjectType::Process, "snsh", ObjectState::Running);
+        let _ = r.register(ObjectType::Process, "sish", ObjectState::Running);
         let _ = r.register(ObjectType::Mount, "/", ObjectState::Running);
     });
 }

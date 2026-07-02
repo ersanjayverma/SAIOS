@@ -7,6 +7,7 @@ mod serial;
 pub mod tests;
 
 use core::fmt::{self, Write};
+use alloc::string::String as AllocString;
 use alloc::vec::Vec;
 
 use backend::{ConsoleBackend, MirrorConsole};
@@ -39,6 +40,22 @@ struct Console<B: ConsoleBackend> {
     buffer: [[char; MAX_WIDTH]; MAX_HEIGHT],
 }
 
+struct OutputCapture {
+    active: bool,
+    suppress_console: bool,
+    buffer: AllocString,
+}
+
+impl OutputCapture {
+    const fn new() -> Self {
+        Self {
+            active: false,
+            suppress_console: false,
+            buffer: AllocString::new(),
+        }
+    }
+}
+
 impl<B: ConsoleBackend> Console<B> {
     const fn new(backend: B, width: usize, height: usize) -> Self {
         Self {
@@ -59,6 +76,12 @@ impl<B: ConsoleBackend> Console<B> {
     }
 
     fn put_char(&mut self, c: char) {
+        if capture_char(c) {
+            if should_suppress_output() {
+                return;
+            }
+        }
+
         match c {
             '\n' => self.newline(),
             '\r' => {
@@ -195,9 +218,47 @@ static CONSOLE: StaticCell<Console<DefaultBackend>> =
 
 static CONSOLE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static CONSOLE_LOCKED: AtomicBool = AtomicBool::new(false);
+static CAPTURE_LOCKED: AtomicBool = AtomicBool::new(false);
 static INPUT_BUFFER: StaticCell<InputBuffer> = StaticCell::new(InputBuffer::new());
 static KEYBOARD: StaticCell<KeyboardDriver> = StaticCell::new(KeyboardDriver::new());
 static INPUT_PROMPT: StaticCell<String<64>> = StaticCell::new(String::new());
+static OUTPUT_CAPTURE: StaticCell<OutputCapture> = StaticCell::new(OutputCapture::new());
+
+fn capture_lock() {
+    while CAPTURE_LOCKED
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+fn capture_unlock() {
+    CAPTURE_LOCKED.store(false, Ordering::Release);
+}
+
+fn capture_char(c: char) -> bool {
+    capture_lock();
+    // SAFETY: guarded by capture lock.
+    let capture = unsafe { &mut *OUTPUT_CAPTURE.get() };
+    let active = capture.active;
+    if active {
+        capture.buffer.push(c);
+    }
+    capture_unlock();
+    active
+}
+
+fn should_suppress_output() -> bool {
+    capture_lock();
+    // SAFETY: guarded by capture lock.
+    let suppress = unsafe {
+        let capture = &*OUTPUT_CAPTURE.get();
+        capture.active && capture.suppress_console
+    };
+    capture_unlock();
+    suppress
+}
 
 fn with_console<R>(f: impl FnOnce(&mut Console<DefaultBackend>) -> R) -> R {
     // SAFETY: single-core early kernel context; mutable global console singleton.
@@ -297,6 +358,31 @@ pub fn set_input_prompt(prompt: &str) {
             }
         }
     }
+}
+
+pub fn begin_output_capture(suppress_console: bool) {
+    capture_lock();
+    // SAFETY: guarded by capture lock.
+    unsafe {
+        let capture = &mut *OUTPUT_CAPTURE.get();
+        capture.active = true;
+        capture.suppress_console = suppress_console;
+        capture.buffer.clear();
+    }
+    capture_unlock();
+}
+
+pub fn end_output_capture() -> AllocString {
+    capture_lock();
+    // SAFETY: guarded by capture lock.
+    let out = unsafe {
+        let capture = &mut *OUTPUT_CAPTURE.get();
+        capture.active = false;
+        capture.suppress_console = false;
+        core::mem::take(&mut capture.buffer)
+    };
+    capture_unlock();
+    out
 }
 
 pub fn set_cursor(x: usize, y: usize) {
@@ -641,11 +727,11 @@ pub fn poll_input() -> Option<String<256>> {
             Some(line)
         }
         KeyEvent::Tab => {
-            let inserted = unsafe { (*INPUT_BUFFER.get()).insert(' ') };
-            let inserted2 = unsafe { (*INPUT_BUFFER.get()).insert(' ') };
-            let inserted3 = unsafe { (*INPUT_BUFFER.get()).insert(' ') };
-            let inserted4 = unsafe { (*INPUT_BUFFER.get()).insert(' ') };
-            if inserted && inserted2 && inserted3 && inserted4 {
+            let rendered = unsafe { (*INPUT_BUFFER.get()).render() };
+            let cursor = unsafe { (*INPUT_BUFFER.get()).cursor() };
+            let completed = crate::shell::complete_for_console(rendered.as_str(), cursor);
+            if let Some(new_line) = completed {
+                unsafe { (*INPUT_BUFFER.get()).set_line(new_line.as_str()) };
                 redraw_line(prev_len_cells, prev_cursor_cells);
             }
             None

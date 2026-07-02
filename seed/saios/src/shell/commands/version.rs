@@ -14,6 +14,6 @@ pub fn register(registry: &mut CommandRegistry) {
 }
 
 fn cmd_version(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
-    console::println!("SAIOS v0.1 SNSH");
+    console::println!("SAIOS v1.0 SISH");
     Ok(())
 }
