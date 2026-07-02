@@ -373,7 +373,7 @@ impl NamespaceProvider for DefaultVfsProvider {
             }
         }
 
-        let node = vfs::open(&path).map_err(map_str_err)?;
+        let node = vfs::open_node(&path).map_err(map_str_err)?;
         let kind = match node.kind {
             vfs::FileType::File => SaifsNodeKind::File,
             vfs::FileType::Directory => SaifsNodeKind::Directory,
@@ -490,7 +490,7 @@ fn default_read(path: &str) -> Result<Vec<u8>, SaifsError> {
 }
 
 fn default_write(path: &str, data: &[u8]) -> Result<usize, SaifsError> {
-    vfs::write(path, data).map_err(map_str_err)?;
+    vfs::write_path(path, data).map_err(map_str_err)?;
     Ok(data.len())
 }
 

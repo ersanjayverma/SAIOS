@@ -1,5 +1,6 @@
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -20,6 +21,82 @@ pub struct VNode {
     pub kind: FileType,
 }
 
+pub type VfsFd = u32;
+
+#[derive(Debug, Copy, Clone)]
+pub enum SeekFrom {
+    Start(usize),
+    Current(isize),
+    End(isize),
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct OpenOptions {
+    pub read: bool,
+    pub write: bool,
+    pub create: bool,
+    pub truncate: bool,
+    pub append: bool,
+}
+
+impl OpenOptions {
+    pub const fn read_only() -> Self {
+        Self {
+            read: true,
+            write: false,
+            create: false,
+            truncate: false,
+            append: false,
+        }
+    }
+
+    pub const fn write_only_create() -> Self {
+        Self {
+            read: false,
+            write: true,
+            create: true,
+            truncate: true,
+            append: false,
+        }
+    }
+
+    pub const fn read_write_create() -> Self {
+        Self {
+            read: true,
+            write: true,
+            create: true,
+            truncate: false,
+            append: false,
+        }
+    }
+
+    pub const fn append_create() -> Self {
+        Self {
+            read: false,
+            write: true,
+            create: true,
+            truncate: false,
+            append: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OpenFile {
+    inode: u64,
+    offset: usize,
+    readable: bool,
+    writable: bool,
+    append: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MountRecord {
+    pub path: String,
+    pub fs_name: String,
+    pub read_only: bool,
+}
+
 #[derive(Clone)]
 struct Node {
     inode: u64,
@@ -32,7 +109,7 @@ struct Node {
 
 pub trait FileSystem {
     fn create(&mut self, path: &str) -> Result<(), &'static str>;
-    fn open(&self, path: &str) -> Result<VNode, &'static str>;
+    fn open_node(&self, path: &str) -> Result<VNode, &'static str>;
     fn read(&self, path: &str) -> Result<Vec<u8>, &'static str>;
     fn write(&mut self, path: &str, data: &[u8]) -> Result<(), &'static str>;
     fn remove(&mut self, path: &str) -> Result<(), &'static str>;
@@ -281,6 +358,83 @@ impl TmpFs {
             format!("/{}", parts.join("/"))
         }
     }
+
+    fn rename_path(&mut self, from: &str, to: &str) -> Result<(), &'static str> {
+        let inode = self.resolve(from)?;
+        if inode == self.root {
+            return Err("cannot rename root");
+        }
+
+        let (new_parent, new_name) = self.resolve_parent_and_name(to)?;
+        if self.lookup_child_by_name(new_parent, &new_name).is_some() {
+            return Err("destination exists");
+        }
+
+        let old_parent = self.node(inode)?.parent.ok_or("missing parent")?;
+        {
+            let parent = self.node_mut(old_parent)?;
+            parent.children.retain(|&c| c != inode);
+        }
+        {
+            let parent = self.node_mut(new_parent)?;
+            parent.children.push(inode);
+        }
+
+        let node = self.node_mut(inode)?;
+        node.name = new_name;
+        node.parent = Some(new_parent);
+        Ok(())
+    }
+
+    fn read_inode_range(
+        &self,
+        inode: u64,
+        offset: usize,
+        max_len: usize,
+    ) -> Result<Vec<u8>, &'static str> {
+        let node = self.node(inode)?;
+        if node.kind != FileType::File {
+            return Err("not a file");
+        }
+        if offset >= node.data.len() {
+            return Ok(Vec::new());
+        }
+
+        let end = core::cmp::min(node.data.len(), offset.saturating_add(max_len));
+        Ok(node.data[offset..end].to_vec())
+    }
+
+    fn write_inode_at(&mut self, inode: u64, offset: usize, data: &[u8]) -> Result<usize, &'static str> {
+        let node = self.node_mut(inode)?;
+        if node.kind != FileType::File {
+            return Err("not a file");
+        }
+
+        let need_len = offset.saturating_add(data.len());
+        if need_len > node.data.len() {
+            node.data.resize(need_len, 0);
+        }
+
+        node.data[offset..offset + data.len()].copy_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn truncate_inode(&mut self, inode: u64) -> Result<(), &'static str> {
+        let node = self.node_mut(inode)?;
+        if node.kind != FileType::File {
+            return Err("not a file");
+        }
+        node.data.clear();
+        Ok(())
+    }
+
+    fn inode_len(&self, inode: u64) -> Result<usize, &'static str> {
+        let node = self.node(inode)?;
+        if node.kind != FileType::File {
+            return Err("not a file");
+        }
+        Ok(node.data.len())
+    }
 }
 
 impl FileSystem for TmpFs {
@@ -290,7 +444,7 @@ impl FileSystem for TmpFs {
         Ok(())
     }
 
-    fn open(&self, path: &str) -> Result<VNode, &'static str> {
+    fn open_node(&self, path: &str) -> Result<VNode, &'static str> {
         let inode = self.resolve(path)?;
         let node = self.node(inode)?;
         Ok(VNode {
@@ -350,13 +504,74 @@ impl FileSystem for TmpFs {
 
 struct VfsState {
     fs: TmpFs,
+    open_files: Vec<Option<OpenFile>>,
+    mounts: Vec<MountRecord>,
 }
 
 impl VfsState {
     fn new() -> Self {
         let mut fs = TmpFs::new();
         seed_standard_tree(&mut fs);
-        Self { fs }
+        Self {
+            fs,
+            open_files: Vec::new(),
+            mounts: vec![MountRecord {
+                path: "/".to_string(),
+                fs_name: "tmpfs".to_string(),
+                read_only: false,
+            }],
+        }
+    }
+
+    fn alloc_fd(&mut self, file: OpenFile) -> VfsFd {
+        if let Some((idx, slot)) = self
+            .open_files
+            .iter_mut()
+            .enumerate()
+            .find(|(_, slot)| slot.is_none())
+        {
+            *slot = Some(file);
+            return idx as VfsFd;
+        }
+
+        self.open_files.push(Some(file));
+        (self.open_files.len() - 1) as VfsFd
+    }
+
+    fn get_open_file(&self, fd: VfsFd) -> Result<&OpenFile, &'static str> {
+        self.open_files
+            .get(fd as usize)
+            .and_then(|slot| slot.as_ref())
+            .ok_or("bad file descriptor")
+    }
+
+    fn get_open_file_mut(&mut self, fd: VfsFd) -> Result<&mut OpenFile, &'static str> {
+        self.open_files
+            .get_mut(fd as usize)
+            .and_then(|slot| slot.as_mut())
+            .ok_or("bad file descriptor")
+    }
+
+    fn close_fd(&mut self, fd: VfsFd) -> Result<(), &'static str> {
+        let slot = self
+            .open_files
+            .get_mut(fd as usize)
+            .ok_or("bad file descriptor")?;
+        if slot.is_none() {
+            return Err("bad file descriptor");
+        }
+        *slot = None;
+        Ok(())
+    }
+
+    fn invalidate_inode_descriptors(&mut self, inode: u64) {
+        for slot in &mut self.open_files {
+            if let Some(open) = slot {
+                if open.inode == inode {
+                    *slot = None;
+                }
+            }
+        }
     }
 }
 
@@ -483,6 +698,146 @@ pub fn touch(path: &str) -> Result<(), &'static str> {
     })
 }
 
+pub fn mount(path: &str, fs_name: &str, read_only: bool) -> Result<(), &'static str> {
+    with_vfs(|vfs| {
+        let abs = vfs.fs.normalized_path(path);
+        let inode = vfs.fs.resolve(&abs)?;
+        if vfs.fs.node(inode)?.kind != FileType::Directory {
+            return Err("mount target is not a directory");
+        }
+
+        if vfs.mounts.iter().any(|m| m.path == abs) {
+            return Err("already mounted");
+        }
+
+        vfs.mounts.push(MountRecord {
+            path: abs.clone(),
+            fs_name: fs_name.to_string(),
+            read_only,
+        });
+        object_manager::log_event(&format!("Mounted {} on {}", fs_name, abs));
+        Ok(())
+    })
+}
+
+pub fn mounts() -> Vec<MountRecord> {
+    with_vfs(|vfs| vfs.mounts.clone())
+}
+
+pub fn open(path: &str, options: OpenOptions) -> Result<VfsFd, &'static str> {
+    with_vfs(|vfs| {
+        let abs = vfs.fs.normalized_path(path);
+        if !options.read && !options.write {
+            return Err("open requires read or write access");
+        }
+
+        if is_sys_path(&abs) && (options.write || options.create || options.truncate || options.append) {
+            return Err("read-only virtual path");
+        }
+
+        if options.create && !is_sys_path(&abs) && vfs.fs.resolve(path).is_err() {
+            vfs.fs.create(path)?;
+        }
+
+        let inode = vfs.fs.resolve(path)?;
+        let node = vfs.fs.node(inode)?;
+        if node.kind != FileType::File {
+            return Err("not a file");
+        }
+
+        if options.truncate {
+            if !options.write {
+                return Err("truncate requires write access");
+            }
+            vfs.fs.truncate_inode(inode)?;
+        }
+
+        let offset = if options.append {
+            vfs.fs.inode_len(inode)?
+        } else {
+            0
+        };
+
+        Ok(vfs.alloc_fd(OpenFile {
+            inode,
+            offset,
+            readable: options.read,
+            writable: options.write,
+            append: options.append,
+        }))
+    })
+}
+
+pub fn close(fd: VfsFd) -> Result<(), &'static str> {
+    with_vfs(|vfs| vfs.close_fd(fd))
+}
+
+pub fn read(fd: VfsFd, max_len: usize) -> Result<Vec<u8>, &'static str> {
+    with_vfs(|vfs| {
+        let (inode, offset, readable) = {
+            let of = vfs.get_open_file(fd)?;
+            (of.inode, of.offset, of.readable)
+        };
+
+        if !readable {
+            return Err("file descriptor is not readable");
+        }
+
+        let data = vfs.fs.read_inode_range(inode, offset, max_len)?;
+        let new_offset = offset.saturating_add(data.len());
+        vfs.get_open_file_mut(fd)?.offset = new_offset;
+        Ok(data)
+    })
+}
+
+pub fn write(fd: VfsFd, data: &[u8]) -> Result<usize, &'static str> {
+    with_vfs(|vfs| {
+        let (inode, mut offset, writable, append) = {
+            let of = vfs.get_open_file(fd)?;
+            (of.inode, of.offset, of.writable, of.append)
+        };
+
+        if !writable {
+            return Err("file descriptor is not writable");
+        }
+
+        if append {
+            offset = vfs.fs.inode_len(inode)?;
+        }
+
+        let written = vfs.fs.write_inode_at(inode, offset, data)?;
+        vfs.get_open_file_mut(fd)?.offset = offset.saturating_add(written);
+        Ok(written)
+    })
+}
+
+pub fn seek(fd: VfsFd, from: SeekFrom) -> Result<usize, &'static str> {
+    with_vfs(|vfs| {
+        let (inode, current) = {
+            let of = vfs.get_open_file(fd)?;
+            (of.inode, of.offset)
+        };
+        let len = vfs.fs.inode_len(inode)? as isize;
+
+        let target = match from {
+            SeekFrom::Start(pos) => pos as isize,
+            SeekFrom::Current(delta) => (current as isize).saturating_add(delta),
+            SeekFrom::End(delta) => len.saturating_add(delta),
+        };
+
+        let clamped = if target < 0 {
+            0
+        } else if target > len {
+            len as usize
+        } else {
+            target as usize
+        };
+
+        vfs.get_open_file_mut(fd)?.offset = clamped;
+        Ok(clamped)
+    })
+}
+
 pub fn ls(path: Option<&str>) -> Result<Vec<String>, &'static str> {
     with_vfs(|vfs| {
         let req = path.unwrap_or(".");
@@ -496,27 +851,49 @@ pub fn ls(path: Option<&str>) -> Result<Vec<String>, &'static str> {
 }
 
 pub fn cat(path: &str) -> Result<String, &'static str> {
-    with_vfs(|vfs| {
-        let abs = vfs.fs.normalized_path(path);
-        if is_sys_path(&abs) {
-            let lines = object_manager::sys_read(&abs).ok_or("not a file")?;
-            return Ok(lines.join("\n"));
-        }
+    let abs = with_vfs(|vfs| vfs.fs.normalized_path(path));
+    if is_sys_path(&abs) {
+        let lines = object_manager::sys_read(&abs).ok_or("not a file")?;
+        return Ok(lines.join("\n"));
+    }
 
-        let bytes = vfs.fs.read(path)?;
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
-    })
+    let fd = open(path, OpenOptions::read_only())?;
+    let read_result = read(fd, usize::MAX);
+    let close_result = close(fd);
+    let bytes = read_result?;
+    close_result?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub fn rm(path: &str) -> Result<(), &'static str> {
+    unlink(path)
+}
+
+pub fn unlink(path: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
         if is_sys_path(&abs) {
             return Err("read-only virtual path");
         }
 
+        let inode = vfs.fs.resolve(path)?;
+        vfs.invalidate_inode_descriptors(inode);
         vfs.fs.remove(path)?;
         object_manager::log_event(&format!("Object removed: {}", abs));
+        Ok(())
+    })
+}
+
+pub fn rename(from: &str, to: &str) -> Result<(), &'static str> {
+    with_vfs(|vfs| {
+        let abs_from = vfs.fs.normalized_path(from);
+        let abs_to = vfs.fs.normalized_path(to);
+        if is_sys_path(&abs_from) || is_sys_path(&abs_to) {
+            return Err("read-only virtual path");
+        }
+
+        vfs.fs.rename_path(from, to)?;
+        object_manager::log_event(&format!("Renamed {} -> {}", abs_from, abs_to));
         Ok(())
     })
 }
@@ -537,16 +914,14 @@ pub fn pwd() -> String {
     with_vfs(|vfs| vfs.fs.cwd_path())
 }
 
-pub fn write(path: &str, data: &[u8]) -> Result<(), &'static str> {
-    with_vfs(|vfs| {
-        let abs = vfs.fs.normalized_path(path);
-        if is_sys_path(&abs) {
-            return Err("read-only virtual path");
-        }
-        vfs.fs.write(path, data)
-    })
+pub fn write_path(path: &str, data: &[u8]) -> Result<(), &'static str> {
+    let fd = open(path, OpenOptions::write_only_create())?;
+    let write_result = write(fd, data);
+    let close_result = close(fd);
+    write_result?;
+    close_result
 }
 
-pub fn open(path: &str) -> Result<VNode, &'static str> {
-    with_vfs(|vfs| vfs.fs.open(path))
+pub fn open_node(path: &str) -> Result<VNode, &'static str> {
+    with_vfs(|vfs| vfs.fs.open_node(path))
 }

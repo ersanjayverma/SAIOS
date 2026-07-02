@@ -80,7 +80,7 @@ fn write_manifest() -> Result<(), &'static str> {
     }
 
     ensure_file(MANIFEST_PATH)?;
-    vfs::write(MANIFEST_PATH, text.as_bytes())
+    vfs::write_path(MANIFEST_PATH, text.as_bytes())
 }
 
 pub fn mount_default() -> Result<(), &'static str> {
@@ -95,7 +95,7 @@ pub fn mount_default() -> Result<(), &'static str> {
 
     ensure_file("/etc/profile")?;
     ensure_file("/etc/hostname")?;
-    let _ = vfs::write("/etc/hostname", b"saios\n");
+    let _ = vfs::write_path("/etc/hostname", b"saios\n");
 
     write_manifest()?;
     MOUNTED.store(true, Ordering::Release);

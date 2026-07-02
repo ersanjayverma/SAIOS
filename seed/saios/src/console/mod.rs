@@ -292,10 +292,14 @@ pub fn init() {
     }
     let _ = driver::ensure_driver("serial", "0.1.0", "SAIOS", &[], driver::DriverStatus::Running);
     let _ = driver::ensure_driver("input", "0.1.0", "SAIOS", &["serial"], driver::DriverStatus::Running);
-    let _ = driver::ensure_driver("mouse", "0.1.0", "SAIOS", &["input"], driver::DriverStatus::Running);
+    let _ = driver::ensure_driver("hid", "0.1.0", "SAIOS", &["input"], driver::DriverStatus::Running);
+    let _ = driver::ensure_driver("hid-keyboard", "0.1.0", "SAIOS", &["hid"], driver::DriverStatus::Running);
+    let _ = driver::ensure_driver("hid-mouse", "0.1.0", "SAIOS", &["hid"], driver::DriverStatus::Running);
+    // Keep legacy logical names for compatibility with existing scripts/tools.
+    let _ = driver::ensure_driver("mouse", "0.1.0", "SAIOS", &["hid-mouse"], driver::DriverStatus::Running);
     let _ = device::ensure_device("COM1", "serial", "uart", device::DeviceStatus::Online);
-    let _ = device::ensure_device("keyboard0", "input", "keyboard", device::DeviceStatus::Online);
-    let _ = device::ensure_device("mouse0", "mouse", "pointer", device::DeviceStatus::Online);
+    let _ = device::ensure_device("keyboard0", "hid-keyboard", "hid-keyboard", device::DeviceStatus::Online);
+    let _ = device::ensure_device("mouse0", "hid-mouse", "hid-pointer", device::DeviceStatus::Online);
     with_console(|console| console.init());
     unsafe {
         (*INPUT_BUFFER.get()).clear();

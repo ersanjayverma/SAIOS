@@ -145,7 +145,7 @@ fn ensure_init_script() {
     let _ = saifs::mkdir("/system");
     let _ = saifs::touch("/system/init");
     let script = b"# SAIOS init script\nsetenv HOSTNAME saios\nalias ll ls\n";
-    let _ = crate::vfs::write("/system/init", script);
+    let _ = crate::vfs::write_path("/system/init", script);
 }
 
 pub fn init() {

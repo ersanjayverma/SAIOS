@@ -334,18 +334,20 @@ impl ConsoleBackend for SerialConsole {
     }
 
     fn clear(&mut self) {
-        // ANSI clear screen + home cursor (works in most serial terminals).
-        Self::write_escape(format_args!("\x1b[2J\x1b[H"));
+        // Keep serial logs line-oriented: do not emit terminal control sequences.
+        Self::write_escape(format_args!("\r\n"));
     }
 
     fn set_cursor(&mut self, x: usize, y: usize) {
-        // ANSI cursor is 1-based.
-        Self::write_escape(format_args!("\x1b[{};{}H", y + 1, x + 1));
+        let _ = (x, y);
+        // Intentionally a no-op for serial to avoid polluting logs with ANSI cursor moves.
     }
 
     fn scroll_up(&mut self, rows: usize) -> bool {
         let rows = core::cmp::max(1, rows);
-        Self::write_escape(format_args!("\x1b[{}S", rows));
+        for _ in 0..rows {
+            Self::write_escape(format_args!("\r\n"));
+        }
         true
     }
 }

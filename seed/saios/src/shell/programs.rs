@@ -4,6 +4,7 @@ use crate::kernel::telemetry;
 use crate::saifs;
 use crate::saifs::Handle;
 use crate::timer;
+use crate::vfs;
 use alloc::format;
 use alloc::string::{String, ToString};
 
@@ -175,7 +176,7 @@ fn execute_compiled_stub(path: &str, args: &[&str]) -> ProgramResult {
 
 fn ls_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let path = resolve_relative_path(args.first().copied().unwrap_or("."));
-    let entries = saifs::list(path.as_str()).map_err(|_| "ls: failed")?;
+    let entries = vfs::ls(Some(path.as_str())).map_err(|_| "ls: failed")?;
     for e in entries {
         console::println!("{}", e);
     }
@@ -184,7 +185,12 @@ fn ls_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
 
 fn cat_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let path = resolve_relative_path(args.first().copied().ok_or("cat: missing path")?);
-    let text = saifs::read_text(path.as_str()).map_err(|_| "cat: failed")?;
+    let fd = vfs::open(path.as_str(), vfs::OpenOptions::read_only()).map_err(|_| "cat: open failed")?;
+    let read_result = vfs::read(fd, usize::MAX);
+    let close_result = vfs::close(fd);
+    let data = read_result.map_err(|_| "cat: read failed")?;
+    close_result.map_err(|_| "cat: close failed")?;
+    let text = String::from_utf8_lossy(&data).into_owned();
     if !text.is_empty() {
         console::println!("{}", text);
     }
@@ -193,13 +199,13 @@ fn cat_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
 
 fn mkdir_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let path = resolve_relative_path(args.first().copied().ok_or("mkdir: missing path")?);
-    saifs::mkdir(path.as_str()).map_err(|_| "mkdir: failed")?;
+    vfs::mkdir(path.as_str()).map_err(|_| "mkdir: failed")?;
     Ok(0)
 }
 
 fn rm_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let path = resolve_relative_path(args.first().copied().ok_or("rm: missing path")?);
-    saifs::remove(path.as_str()).map_err(|_| "rm: failed")?;
+    vfs::unlink(path.as_str()).map_err(|_| "rm: failed")?;
     Ok(0)
 }
 
@@ -207,19 +213,31 @@ fn cp_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let src = resolve_relative_path(args.first().copied().ok_or("cp: missing source")?);
     let dst = resolve_relative_path(args.get(1).copied().ok_or("cp: missing destination")?);
 
-    let src_handle = saifs::open(src.as_str()).map_err(|_| "cp: source open failed")?;
-    let data = src_handle.read().map_err(|_| "cp: source read failed")?;
+    let src_fd = vfs::open(src.as_str(), vfs::OpenOptions::read_only())
+        .map_err(|_| "cp: source open failed")?;
+    let read_result = vfs::read(src_fd, usize::MAX);
+    let src_close_result = vfs::close(src_fd);
+    let data = read_result.map_err(|_| "cp: source read failed")?;
+    src_close_result.map_err(|_| "cp: source close failed")?;
 
-    let _ = saifs::touch(dst.as_str());
-    let dst_handle = saifs::open(dst.as_str()).map_err(|_| "cp: destination open failed")?;
-    let _ = dst_handle.write(data.as_slice()).map_err(|_| "cp: destination write failed")?;
+    let dst_fd = vfs::open(dst.as_str(), vfs::OpenOptions::write_only_create())
+        .map_err(|_| "cp: destination open failed")?;
+    let write_result = vfs::write(dst_fd, data.as_slice());
+    let dst_close_result = vfs::close(dst_fd);
+    let _ = write_result.map_err(|_| "cp: destination write failed")?;
+    dst_close_result.map_err(|_| "cp: destination close failed")?;
     Ok(0)
 }
 
 fn mv_program(args: &[&str], env: &[(String, String)]) -> ProgramResult {
-    cp_program(args, env)?;
     let src = resolve_relative_path(args.first().copied().ok_or("mv: missing source")?);
-    saifs::remove(src.as_str()).map_err(|_| "mv: remove source failed")?;
+    let dst = resolve_relative_path(args.get(1).copied().ok_or("mv: missing destination")?);
+    if vfs::rename(src.as_str(), dst.as_str()).is_ok() {
+        return Ok(0);
+    }
+
+    cp_program(args, env)?;
+    vfs::unlink(src.as_str()).map_err(|_| "mv: remove source failed")?;
     Ok(0)
 }
 

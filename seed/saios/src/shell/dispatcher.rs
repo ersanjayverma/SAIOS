@@ -259,6 +259,6 @@ impl CommandDispatcher {
         };
 
         let _ = saifs::touch(path);
-        vfs::write(path, final_data.as_bytes())
+        vfs::write_path(path, final_data.as_bytes())
     }
 }
