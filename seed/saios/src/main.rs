@@ -63,10 +63,12 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     kernel::timeline::init();
     kernel::timeline::mark("Boot");
     kernel::timeline::mark("Memory");
-    console::attach_framebuffer(boot_info.framebuffer);
+    // Temporary isolation: keep graphics framebuffer detached until hardware
+    // console rendering is validated on real firmware.
+    // console::attach_framebuffer(boot_info.framebuffer);
     driver::console::init();
     kernel::timeline::mark("Heap");
-    let _ = console::promote_framebuffer_renderer();
+    // let _ = console::promote_framebuffer_renderer();
     ksf::bootstrap().expect("KSF bootstrap failed");
     kernel::timeline::mark("Services");
     interrupt::enable();

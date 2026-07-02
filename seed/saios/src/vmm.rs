@@ -443,6 +443,42 @@ pub fn alloc_and_map(pages: usize, flags: u64, owner: &str) -> Result<VirtAddr, 
     Ok(virt)
 }
 
+pub fn map_physical_anywhere(
+    phys_start: PhysAddr,
+    pages: usize,
+    flags: u64,
+    owner: &str,
+) -> Result<VirtAddr, &'static str> {
+    if pages == 0 {
+        return Err("vmm: pages must be > 0");
+    }
+    if !is_page_aligned(phys_start) {
+        return Err("vmm: physical address must be page aligned");
+    }
+
+    let virt = with_state_mut(|state| {
+        if !state.initialized {
+            return Err("vmm: not initialized");
+        }
+
+        let start = state.next_kernel_virt;
+        let end = checked_range_end(start, pages).ok_or("vmm: virtual range overflow")?;
+        state.next_kernel_virt = end;
+        Ok(start)
+    })?;
+
+    if let Err(e) = map(virt, phys_start, pages, flags, owner) {
+        with_state_mut(|state| {
+            if state.next_kernel_virt >= virt.saturating_add((pages as u64).saturating_mul(PAGE_SIZE)) {
+                state.next_kernel_virt = virt;
+            }
+        });
+        return Err(e);
+    }
+
+    Ok(virt)
+}
+
 pub fn unmap(virt_start: VirtAddr) -> Result<(), &'static str> {
     if !is_page_aligned(virt_start) {
         return Err("vmm: virtual address must be page aligned");

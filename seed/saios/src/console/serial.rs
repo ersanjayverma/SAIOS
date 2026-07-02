@@ -9,6 +9,9 @@ use hal::arch::x86_64::sync::StaticCell;
 
 const COM1_DATA: u16 = 0x3F8;
 const COM1_LINE_STATUS: u16 = COM1_DATA + 5;
+const SERIAL_INPUT_ENABLED: bool = false;
+const LSR_DATA_READY: u8 = 0x01;
+const LSR_ERROR_MASK: u8 = 0x1E;
 
 enum EscState {
     None,
@@ -81,9 +84,20 @@ static UTF8_DECODER: StaticCell<Utf8Decoder> = StaticCell::new(Utf8Decoder::new(
 static ESC_STATE: StaticCell<EscState> = StaticCell::new(EscState::None);
 
 fn poll_byte() -> Option<u8> {
-    if (inb(COM1_LINE_STATUS) & 0x01) == 0 {
+    if !SERIAL_INPUT_ENABLED {
         return None;
     }
+
+    let status = inb(COM1_LINE_STATUS);
+    if (status & LSR_DATA_READY) == 0 {
+        return None;
+    }
+
+    if (status & LSR_ERROR_MASK) != 0 {
+        let _ = inb(COM1_DATA);
+        return None;
+    }
+
     Some(inb(COM1_DATA))
 }
 

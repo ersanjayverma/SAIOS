@@ -336,8 +336,25 @@ fn framebuffer_scrollback_to_bottom() {
 }
 
 pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
+    let mut mapped_info = info;
+    if info.base != 0 && info.size != 0 {
+        let phys_base = info.base;
+        let page_base = phys_base & !0xFFFu64;
+        let page_offset = (phys_base - page_base) as usize;
+        let page_count = (page_offset + info.size + 4095) / 4096;
+
+        if let Ok(mapped_base) = crate::vmm::map_physical_anywhere(
+            page_base,
+            page_count,
+            crate::vmm::FLAG_WRITE | crate::vmm::FLAG_DEVICE,
+            "framebuffer",
+        ) {
+            mapped_info.base = mapped_base + page_offset as u64;
+        }
+    }
+
     with_console(|console| {
-        console.backend.right_mut().attach(info);
+        console.backend.right_mut().attach(mapped_info);
         let _ = driver::ensure_driver("framebuffer", "0.1.0", "SAIOS", &["serial"], driver::DriverStatus::Running);
         let _ = device::ensure_device("fb0", "framebuffer", "display", device::DeviceStatus::Online);
         if let (Some(columns), Some(rows)) = (

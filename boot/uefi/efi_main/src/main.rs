@@ -20,26 +20,14 @@ fn main() -> Status {
     }
     let boot_info = efi_main::initialize_boot_info();
 
-    let mut fb = efi_main::ui::Framebuffer {
-        info: boot_info.framebuffer.clone(),
-    };
-    let bmp = efi_main::ui::Bitmap::from_bytes(efi_main::ui::SPLASH)
-        .expect("Failed to load splash bitmap");
-
-    println!(
-        "BMP: {}x{} {}bpp stride={} pixel_data={}",
-        bmp.width,
-        bmp.height,
-        bmp.bpp,
-        bmp.stride,
-        bmp.pixels.len(),
-    );
-    bmp.draw(&mut fb);
     println!(
         "FB: {}x{} stride={} bpp={} size={}",
-        fb.info.width, fb.info.height, fb.info.stride, fb.info.bpp, fb.info.size,
+        boot_info.framebuffer.width,
+        boot_info.framebuffer.height,
+        boot_info.framebuffer.stride,
+        boot_info.framebuffer.bpp,
+        boot_info.framebuffer.size,
     );
-    self::sleep(Duration::from_secs(5));
     let seed_path = "\\SAIOS\\seed.elf";
     let mut loader = match load_seed(seed_path) {
         Ok(loader) => loader,
