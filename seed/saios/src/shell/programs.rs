@@ -59,6 +59,120 @@ fn resolve_relative_path(path: &str) -> String {
     }
 }
 
+fn parse_cc_output(args: &[&str]) -> Option<String> {
+    let mut i = 0usize;
+    while i < args.len() {
+        if args[i] == "-o" {
+            return args.get(i + 1).map(|s| (*s).to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
+fn infer_output_from_source(src: &str) -> String {
+    let base = src.rsplit('/').next().unwrap_or(src);
+    let stem = if let Some(stripped) = base.strip_suffix(".c") {
+        stripped
+    } else {
+        base
+    };
+
+    let dir = if let Some((d, _)) = src.rsplit_once('/') {
+        if d.is_empty() {
+            "/"
+        } else {
+            d
+        }
+    } else {
+        "."
+    };
+
+    if dir == "/" {
+        format!("/{}", stem)
+    } else if dir == "." {
+        stem.to_string()
+    } else {
+        format!("{}/{}", dir, stem)
+    }
+}
+
+fn extract_first_string_literal(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut start = None;
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'"' {
+            if let Some(s) = start {
+                if i > s + 1 {
+                    let lit = &source[s + 1..i];
+                    return Some(lit.replace("\\n", "\n"));
+                }
+                start = None;
+            } else {
+                start = Some(i);
+            }
+        }
+    }
+    None
+}
+
+fn cc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
+    let src_arg = args.first().copied().ok_or("cc: missing source file")?;
+    let src = resolve_relative_path(src_arg);
+    let source = saifs::read_text(src.as_str()).map_err(|_| "cc: source read failed")?;
+
+    let out = if let Some(o) = parse_cc_output(args) {
+        resolve_relative_path(o.as_str())
+    } else {
+        resolve_relative_path(infer_output_from_source(src.as_str()).as_str())
+    };
+
+    let message = extract_first_string_literal(source.as_str())
+        .unwrap_or_else(|| "Hello World".to_string());
+
+    let payload = format!(
+        "SAIOS_CC_STUB\nsource={}\nmessage={}\n",
+        src,
+        message.replace('\n', "\\n")
+    );
+
+    let _ = saifs::touch(out.as_str());
+    let out_handle = saifs::open(out.as_str()).map_err(|_| "cc: output open failed")?;
+    let _ = out_handle
+        .write(payload.as_bytes())
+        .map_err(|_| "cc: output write failed")?;
+
+    console::println!("cc: compiled {} -> {}", src, out);
+    Ok(0)
+}
+
+fn compiled_stub_message(path: &str) -> Option<String> {
+    let text = saifs::read_text(path).ok()?;
+    if !text.starts_with("SAIOS_CC_STUB") {
+        return None;
+    }
+
+    for line in text.lines() {
+        if let Some(msg) = line.strip_prefix("message=") {
+            return Some(msg.replace("\\n", "\n"));
+        }
+    }
+
+    Some("Hello World".to_string())
+}
+
+fn execute_compiled_stub(path: &str, args: &[&str]) -> ProgramResult {
+    let Some(msg) = compiled_stub_message(path) else {
+        return Err("program not found");
+    };
+
+    console::println!("{}", msg);
+    if !args.is_empty() {
+        console::println!("args: {}", args.join(" "));
+    }
+    Ok(0)
+}
+
 fn ls_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let path = resolve_relative_path(args.first().copied().unwrap_or("."));
     let entries = saifs::list(path.as_str()).map_err(|_| "ls: failed")?;
@@ -226,7 +340,15 @@ pub fn execute(name: &str, args: &[&str], env: &[(String, String)]) -> ProgramRe
         n if n.eq_ignore_ascii_case("uname") => Ok(uname_program(args, env)),
         n if n.eq_ignore_ascii_case("calc") => calc_program(args, env),
         n if n.eq_ignore_ascii_case("stress") => Ok(stress_program(args, env)),
+        n if n.eq_ignore_ascii_case("cc") => cc_program(args, env),
         _ => Err("program not found"),
+    }
+}
+
+pub fn execute_path(path: &str, name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
+    match execute(name, args, env) {
+        Ok(code) => Ok(code),
+        Err(_) => execute_compiled_stub(path, args),
     }
 }
 

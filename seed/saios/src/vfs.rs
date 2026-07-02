@@ -410,6 +410,7 @@ fn seed_standard_tree(fs: &mut TmpFs) {
         "uname",
         "calc",
         "stress",
+        "cc",
     ];
     for name in user_programs {
         let _ = fs.create(format!("/bin/{}", name).as_str());

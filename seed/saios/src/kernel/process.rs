@@ -198,7 +198,7 @@ pub fn exec(name: &str, args: &[&str], env: &[(String, String)]) -> Result<i32, 
         .as_str(),
     );
 
-    let run = programs::execute(program_name, args, env);
+    let run = programs::execute_path(resolved.as_str(), program_name, args, env);
 
     let exit_code = run.unwrap_or(127);
     with_manager_mut(|m| {

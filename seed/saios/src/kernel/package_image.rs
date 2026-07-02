@@ -21,6 +21,7 @@ const BIN_ENTRIES: &[&str] = &[
     "kill",
     "top",
     "uname",
+    "cc",
 ];
 
 static MOUNTED: AtomicBool = AtomicBool::new(false);

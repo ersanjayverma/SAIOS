@@ -408,6 +408,24 @@ Shell visibility/control:
 - `pkgimg mount`
 - `pkgimg remount`
 
+## 6.5 Self-hosting Development Scaffold (Phase 6/6)
+
+Initial self-hosting workflow scaffold is now wired:
+
+- `cc <source.c> [-o output]` user program compiles to a runnable SAIOS stub artifact
+- Compiled output embeds startup metadata and printable entry message payload
+- Path-based execution fallback allows `./program` style invocation for compiled stubs
+
+Demo-oriented flow now available:
+
+- `cc hello.c`
+- `./hello`
+
+Current scope:
+
+- This is a toolchain scaffold, not a full C compiler/runtime yet.
+- It establishes the shell/runtime contract needed for later real compiler integration.
+
 `jobs` supports filtering:
 
 - `jobs running`
