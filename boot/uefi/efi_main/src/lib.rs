@@ -112,7 +112,7 @@ pub fn initialize_boot_info() -> SaiosBootInfo {
         version: SAIOS_BOOT_VERSION,
         size: core::mem::size_of::<SaiosBootInfo>() as u32,
 
-        framebuffer: graphics::initialize().expect("Failed to initialize framebuffer"),
+        framebuffer: graphics::FramebufferInfo::empty(),
         memorymap: memorymap::MemoryMapInfo {
             entries: core::ptr::null(),
             entry_count: 0,

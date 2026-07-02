@@ -13,6 +13,20 @@ pub struct FramebufferInfo {
     pub pixel_format: PixelFormat,
     pub bpp: usize, // Bits per pixel
 }
+
+impl FramebufferInfo {
+    pub const fn empty() -> Self {
+        Self {
+            base: 0,
+            size: 0,
+            width: 0,
+            height: 0,
+            stride: 0,
+            pixel_format: PixelFormat::BltOnly,
+            bpp: 0,
+        }
+    }
+}
 pub fn initialize() -> uefi::Result<FramebufferInfo> {
     let handle = *boot::locate_handle_buffer(SearchType::ByProtocol(&GraphicsOutput::GUID))?
         .first()
