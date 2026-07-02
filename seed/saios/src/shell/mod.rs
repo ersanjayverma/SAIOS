@@ -5,7 +5,7 @@ mod dispatcher;
 mod engine;
 mod parser;
 mod prompt;
-mod programs;
+pub mod programs;
 mod registry;
 mod service;
 mod session;

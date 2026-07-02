@@ -4,7 +4,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
+use crate::kernel::crt;
 use crate::kernel::event::{self, EventKind};
+use crate::saifs;
+use crate::shell::programs;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum ProcessState {
@@ -48,6 +51,30 @@ impl ProcessManager {
             exit_code: None,
         });
         event::publish(EventKind::ProcessStarted, "process", "snsh started");
+    }
+
+    fn spawn(&mut self, name: &str) -> u64 {
+        let pid = self.next_pid;
+        self.next_pid = self.next_pid.saturating_add(1);
+        self.records.push(ProcessRecord {
+            pid,
+            name: name.to_string(),
+            state: ProcessState::Running,
+            thread_count: 1,
+            exit_code: None,
+        });
+        pid
+    }
+
+    fn exit(&mut self, pid: u64, code: i32) -> Result<(), &'static str> {
+        let rec = self
+            .records
+            .iter_mut()
+            .find(|r| r.pid == pid)
+            .ok_or("process: pid not found")?;
+        rec.state = ProcessState::Exited;
+        rec.exit_code = Some(code);
+        Ok(())
     }
 }
 
@@ -128,4 +155,60 @@ pub fn wait(pid: u64) -> Result<i32, &'static str> {
             .ok_or("wait: pid not found")?;
         Ok(rec.exit_code.unwrap_or(0))
     })
+}
+
+fn candidate_program_paths(name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if name.contains('/') {
+        out.push(name.to_string());
+        return out;
+    }
+
+    out.push(name.to_string());
+    out.push(alloc::format!("/bin/{}", name));
+    out
+}
+
+fn resolve_program_name(name: &str) -> Result<String, &'static str> {
+    let candidates = candidate_program_paths(name);
+    for candidate in candidates {
+        if saifs::open(candidate.as_str()).is_ok() {
+            return Ok(candidate);
+        }
+    }
+    Err("exec: program not found")
+}
+
+pub fn exec(name: &str, args: &[&str], env: &[(String, String)]) -> Result<i32, &'static str> {
+    let resolved = resolve_program_name(name)?;
+    let program_name = resolved.rsplit('/').next().unwrap_or(resolved.as_str());
+    let startup = crt::prepare_startup_block(program_name, args, env);
+
+    let pid = with_manager_mut(|m| m.spawn(resolved.as_str()));
+    event::publish(
+        EventKind::ProcessStarted,
+        "process",
+        alloc::format!(
+            "pid={} {} argc={} envc={}",
+            pid,
+            resolved,
+            startup.argc,
+            startup.envp.len()
+        )
+        .as_str(),
+    );
+
+    let run = programs::execute(program_name, args, env);
+
+    let exit_code = run.unwrap_or(127);
+    with_manager_mut(|m| {
+        let _ = m.exit(pid, exit_code);
+    });
+    event::publish(
+        EventKind::ProcessStopped,
+        "process",
+        alloc::format!("pid={} exit={}", pid, exit_code).as_str(),
+    );
+
+    Ok(exit_code)
 }

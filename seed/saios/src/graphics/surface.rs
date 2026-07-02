@@ -166,4 +166,19 @@ impl Surface {
             }
         }
     }
+
+    pub fn scroll_up(&mut self, rows: usize, fill: u32) {
+        if rows == 0 || self.width == 0 || self.height == 0 {
+            return;
+        }
+
+        let shift_rows = core::cmp::min(rows, self.height);
+        let row_pixels = self.width;
+        let shift = shift_rows.saturating_mul(row_pixels);
+        let len = self.width.saturating_mul(self.height);
+
+        let pixels = self.pixels_slice_mut();
+        pixels.copy_within(shift..len, 0);
+        pixels[len.saturating_sub(shift)..len].fill(fill);
+    }
 }

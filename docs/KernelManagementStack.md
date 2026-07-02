@@ -174,6 +174,22 @@ Process manager is implemented in `kernel/process.rs`.
 - `kill <pid>`
 - `wait <pid>`
 
+### External program runtime path (implemented slice)
+
+- `exec` and unknown-command fallback now route through Process Manager runtime APIs.
+- Program resolution checks explicit paths and `/bin/<name>` before launch.
+- Process lifecycle is recorded per launch with PID allocation and exit-code completion.
+- Event Bus receives process start/stop events with pid and exit metadata.
+
+Seeded `/bin` entries currently include:
+
+- `hello`
+- `true`
+- `false`
+- `argc`
+- `env`
+- `fail`
+
 ## 7. Virtual Filesystem Shell Surface (Phase 6)
 
 VFS/SAIFS is surfaced in shell compatibility + native commands.
@@ -295,6 +311,52 @@ SAIRU facade is implemented in `kernel/sairu.rs`.
 - `jobs`
 - `kill <pid>`
 - `wait <pid>`
+
+## 6.1 Syscall ABI (Phase 2/6)
+
+Initial stable syscall ABI surface is now defined in code:
+
+- `open`
+- `read`
+- `write`
+- `close`
+- `fork`
+- `exec`
+- `wait`
+- `exit`
+- `sleep`
+- `getpid`
+
+Current implementation status:
+
+- ABI versioned as `1.0.0`
+- Numeric syscall IDs frozen for the above set
+- Dispatcher is wired with implemented paths for `sleep` and `getpid`
+- Remaining calls return explicit `Unimplemented` error codes until subsystem handlers land
+
+Shell visibility:
+
+- `syscall abi`
+- `syscall check <id>`
+- `syscall invoke <name|id> [arg0]`
+
+## 6.2 C Runtime Scaffold (Phase 3/6)
+
+Initial C runtime foundation is now present as a kernel contract surface:
+
+- CRT ABI versioned as `1.0.0`
+- Startup block builder for `program`, `argc`, `argv`, and `envp`
+- Declared libc surface flags for `crt0`, `argv/envp`, `malloc/free`, and `printf`
+
+Process runtime integration:
+
+- Process launch path prepares a startup block before execution
+- Process-start event metadata now includes `argc` and `envc`
+
+Shell visibility:
+
+- `crt abi`
+- `crt probe <program> [args...]`
 
 `jobs` supports filtering:
 

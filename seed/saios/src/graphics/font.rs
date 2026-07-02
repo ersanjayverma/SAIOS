@@ -29,6 +29,16 @@ fn fallback_row(ch: char, row8: usize) -> u8 {
 }
 
 pub fn glyph_row(ch: char, row16: usize) -> u8 {
+    if row16 >= FONT_HEIGHT {
+        return 0;
+    }
+
+    // Keep a light-weight 8x16 appearance by drawing on even scanlines only.
+    // This avoids the doubled-row look that makes text appear overly bold.
+    if (row16 & 1) != 0 {
+        return 0;
+    }
+
     let row8 = core::cmp::min(row16 / 2, 7);
 
     if let Some(rows) = lookup_font8x8(ch) {

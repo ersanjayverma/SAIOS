@@ -1,33 +1,46 @@
-use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
+use heapless::{String, Vec as FixedVec};
 
 use hal::arch::x86_64::sync::StaticCell;
+
+const MAX_MARKS: usize = 256;
+const MAX_LABEL_LEN: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct TimelineMark {
     pub tick: u64,
-    pub label: String,
+    pub label: String<MAX_LABEL_LEN>,
 }
 
 struct Timeline {
-    marks: Vec<TimelineMark>,
+    marks: FixedVec<TimelineMark, MAX_MARKS>,
 }
 
 impl Timeline {
     fn new() -> Self {
-        Self { marks: Vec::new() }
+        Self {
+            marks: FixedVec::new(),
+        }
     }
 
     fn mark(&mut self, label: &str) {
         let tick = crate::timer::ticks();
-        self.marks.push(TimelineMark {
-            tick,
-            label: label.to_string(),
-        });
-        if self.marks.len() > 256 {
+        let mut fixed_label: String<MAX_LABEL_LEN> = String::new();
+        for ch in label.chars() {
+            if fixed_label.push(ch).is_err() {
+                break;
+            }
+        }
+
+        if self.marks.is_full() {
             let _ = self.marks.remove(0);
         }
+
+        let _ = self.marks.push(TimelineMark {
+            tick,
+            label: fixed_label,
+        });
     }
 }
 
@@ -77,6 +90,17 @@ pub fn init() {
 
 pub fn mark(label: &str) {
     with_tl_mut(|tl| tl.mark(label));
+}
+
+pub fn mark_service(service_name: &str) {
+    let mut label: String<MAX_LABEL_LEN> = String::new();
+    let _ = label.push_str("Service ");
+    for ch in service_name.chars() {
+        if label.push(ch).is_err() {
+            break;
+        }
+    }
+    mark(label.as_str());
 }
 
 pub fn recent(limit: usize) -> Vec<TimelineMark> {

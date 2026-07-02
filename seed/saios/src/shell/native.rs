@@ -4,12 +4,14 @@ use alloc::vec::Vec;
 
 use crate::console;
 use crate::heap;
+use crate::kernel::crt;
 use crate::kernel::device;
 use crate::kernel::driver;
 use crate::kernel::event;
 use crate::kernel::object as kom;
 use crate::kernel::process;
 use crate::kernel::sairu;
+use crate::kernel::syscall;
 use crate::kernel::testing;
 use crate::kernel::telemetry;
 use crate::kernel::timeline;
@@ -114,6 +116,16 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "exec",
         description: "Execute program with args/env and return exit code",
         handler: cmd_exec,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "syscall",
+        description: "Show or smoke-test stable syscall ABI",
+        handler: cmd_syscall,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "crt",
+        description: "Show or probe C runtime startup contract",
+        handler: cmd_crt,
     }));
     registry.register(Box::new(StaticCommand {
         name: "env",
@@ -551,11 +563,7 @@ fn cmd_panic(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
 fn cmd_run(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let program = args.first().copied().ok_or("run: missing program name")?;
     let program_args = &args[1..];
-    let exit_code = crate::shell::programs::execute(
-        program,
-        program_args,
-        ctx.session.environment.as_slice(),
-    )?;
+    let exit_code = process::exec(program, program_args, ctx.session.environment.as_slice())?;
     ctx.session.last_exit_code = exit_code;
     if exit_code != 0 {
         console::println!("exit {}", exit_code);
@@ -610,7 +618,7 @@ fn cmd_exec(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
         upsert_env(&mut ctx.session.environment, k.as_str(), v.as_str());
     }
 
-    let run = crate::shell::programs::execute(program, program_args, ctx.session.environment.as_slice());
+    let run = process::exec(program, program_args, ctx.session.environment.as_slice());
     ctx.session.environment = saved_env;
 
     let exit_code = run?;
@@ -644,6 +652,86 @@ fn cmd_unsetenv(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 fn cmd_status(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!("{}", ctx.session.last_exit_code);
     Ok(())
+}
+
+fn cmd_syscall(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    if args.is_empty() || args.first().copied() == Some("abi") {
+        let v = syscall::abi_version();
+        console::println!("syscall.abi={}.{}.{}", v.major, v.minor, v.patch);
+        console::println!("supported:");
+        for n in syscall::supported() {
+            console::println!("  {} {}", *n as u16, n.as_str());
+        }
+        return Ok(());
+    }
+
+    if args.first().copied() == Some("check") {
+        let raw = args
+            .get(1)
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or("syscall check: missing numeric id")?;
+        let n = syscall::SyscallNumber::from_raw(raw).ok_or("syscall check: unknown id")?;
+        console::println!("{} => {}", raw, n.as_str());
+        return Ok(());
+    }
+
+    if args.first().copied() == Some("invoke") {
+        let sel = args.get(1).copied().ok_or("syscall invoke: missing name or id")?;
+        let number = if let Ok(raw) = sel.parse::<u64>() {
+            syscall::SyscallNumber::from_raw(raw).ok_or("syscall invoke: unknown id")?
+        } else {
+            syscall::SyscallNumber::from_name(sel).ok_or("syscall invoke: unknown name")?
+        };
+
+        let arg0 = args
+            .get(2)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let req = syscall::SyscallRequest {
+            number,
+            args: [arg0, 0, 0, 0, 0, 0],
+        };
+        let ctx = syscall::SyscallContext { pid: 1 };
+
+        match syscall::dispatch(req, ctx) {
+            Ok(ret) => console::println!("ret={}", ret),
+            Err(e) => console::println!("err={} code={}", e, e.code()),
+        }
+        return Ok(());
+    }
+
+    Err("usage: syscall [abi|check <id>|invoke <name|id> [arg0]]")
+}
+
+fn cmd_crt(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    if args.is_empty() || args.first().copied() == Some("abi") {
+        let v = crt::abi_version();
+        let s = crt::libc_surface();
+        console::println!("crt.abi={}.{}.{}", v.major, v.minor, v.patch);
+        console::println!(
+            "surface crt0={} argv_envp={} malloc_free={} printf={}",
+            s.crt0,
+            s.argv_envp,
+            s.malloc_free,
+            s.printf
+        );
+        return Ok(());
+    }
+
+    if args.first().copied() == Some("probe") {
+        let program = args.get(1).copied().unwrap_or("hello");
+        let startup = crt::prepare_startup_block(program, &args[2..], ctx.session.environment.as_slice());
+        console::println!("program={}", startup.program);
+        console::println!("argc={}", startup.argc);
+        for (i, a) in startup.argv.iter().enumerate() {
+            console::println!("argv[{}]={}", i, a);
+        }
+        console::println!("envc={}", startup.envp.len());
+        return Ok(());
+    }
+
+    Err("usage: crt [abi|probe <program> [args...]]")
 }
 
 fn cmd_dashboard(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {

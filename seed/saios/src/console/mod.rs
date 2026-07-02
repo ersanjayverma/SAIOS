@@ -132,7 +132,6 @@ impl<B: ConsoleBackend> Console<B> {
     fn newline(&mut self) {
         self.cursor.x = 0;
         self.cursor.y += 1;
-        self.backend.put_char('\n');
 
         if self.cursor.y >= self.cursor.height {
             self.scroll();
@@ -159,14 +158,10 @@ impl<B: ConsoleBackend> Console<B> {
 
     fn redraw(&mut self) {
         self.backend.clear();
-        self.backend.set_cursor(0, 0);
-
         for y in 0..self.cursor.height {
+            self.backend.set_cursor(0, y);
             for x in 0..self.cursor.width {
                 self.backend.put_char(self.buffer[y][x]);
-            }
-            if y + 1 < self.cursor.height {
-                self.backend.put_char('\n');
             }
         }
 

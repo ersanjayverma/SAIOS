@@ -361,7 +361,19 @@ impl VfsState {
 }
 
 fn seed_standard_tree(fs: &mut TmpFs) {
-    let roots = ["/system", "/dev", "/proc", "/sys", "/home", "/tmp", "/var", "/boot"];
+    let roots = [
+        "/system",
+        "/dev",
+        "/proc",
+        "/sys",
+        "/home",
+        "/tmp",
+        "/var",
+        "/boot",
+        "/bin",
+        "/usr",
+        "/etc",
+    ];
     for path in roots {
         let _ = fs.mkdir(path);
     }
@@ -377,6 +389,11 @@ fn seed_standard_tree(fs: &mut TmpFs) {
     ];
     for path in sys_nodes {
         let _ = fs.mkdir(path);
+    }
+
+    let user_programs = ["hello", "true", "false", "argc", "env", "fail"];
+    for name in user_programs {
+        let _ = fs.create(format!("/bin/{}", name).as_str());
     }
 }
 

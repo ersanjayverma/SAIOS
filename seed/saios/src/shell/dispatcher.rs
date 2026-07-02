@@ -3,6 +3,7 @@ use super::parser;
 use super::registry::CommandRegistry;
 use super::session::CommandContext;
 use crate::console;
+use crate::kernel::process;
 
 pub struct CommandDispatcher;
 
@@ -21,7 +22,7 @@ impl CommandDispatcher {
         match registry.find(parsed.command) {
             Some(command) => command.execute(ctx, args),
             None => {
-                match super::programs::execute(parsed.command, args, ctx.session.environment.as_slice()) {
+                match process::exec(parsed.command, args, ctx.session.environment.as_slice()) {
                     Ok(exit_code) => {
                         ctx.session.last_exit_code = exit_code;
                         if exit_code != 0 {
