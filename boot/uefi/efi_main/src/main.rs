@@ -1,10 +1,10 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::time::Duration;
+use uefi::mem::memory_map::MemoryMap;
 use uefi::boot::{AllocateType, EventType, MemoryType, TimerTrigger, Tpl};
 use uefi::println;
 use uefi::proto::loaded_image::LoadedImage;
@@ -14,7 +14,10 @@ use uefi::*;
 
 #[entry]
 fn main() -> Status {
-    uefi::helpers::init().unwrap();
+    if let Err(e) = uefi::helpers::init() {
+        let _ = println!("UEFI init failed: {:?}", e);
+        return Status::LOAD_ERROR;
+    }
     let boot_info = efi_main::initialize_boot_info();
 
     let mut fb = efi_main::ui::Framebuffer {
@@ -38,15 +41,16 @@ fn main() -> Status {
     );
     self::sleep(Duration::from_secs(5));
     let seed_path = "\\SAIOS\\seed.elf";
-    let mut loader = load_seed(seed_path).unwrap();
+    let mut loader = match load_seed(seed_path) {
+        Ok(loader) => loader,
+        Err(e) => {
+            let _ = println!("load_seed failed: {:?}", e.status());
+            return e.status();
+        }
+    };
     let dynamic =
         if let Some(segment) = efi_main::find_dynamic_segment(&loader.image.program_headers) {
-            Some(efi_main::parse_dynamic(
-                &loader.image.bytes[..loader.image.elf_header.phoff as usize
-                    + (loader.image.elf_header.phnum as usize
-                        * loader.image.elf_header.phentsize as usize)],
-                segment,
-            ))
+            Some(efi_main::parse_dynamic(&loader.image.bytes, segment))
         } else {
             None
         };
@@ -64,10 +68,11 @@ fn main() -> Status {
         {
             let num_relocations = (rela_size / rela_entry_size) as usize;
             let mut relocations = Vec::with_capacity(num_relocations);
-            for _i in 0..num_relocations {
-                let offset =
-                    efi_main::virtual_to_file_offset(&loader.image.program_headers, rela_offset)
-                        .unwrap();
+            for i in 0..num_relocations {
+                let rela_vaddr = rela_offset.saturating_add((i as u64).saturating_mul(rela_entry_size));
+                let Some(offset) = efi_main::virtual_to_file_offset(&loader.image.program_headers, rela_vaddr) else {
+                    break;
+                };
                 if offset + core::mem::size_of::<efi_main::Elf64Rela>() > loader.image.bytes.len() {
                     break;
                 }
@@ -131,12 +136,37 @@ fn main() -> Status {
         "Allocating {} pages at aligned start address {:#x}",
         pages, aligned_start
     );
-    let base = boot::allocate_pages(
+    let mut used_fallback = false;
+    let base = match boot::allocate_pages(
         AllocateType::Address(aligned_start),
         MemoryType::LOADER_DATA,
         pages,
-    )
-    .expect("Failed to allocate memory for kernel image");
+    ) {
+        Ok(base) => base,
+        Err(_) => {
+            if loader.image.elf_header.elf_type != 3 {
+                let _ = println!(
+                    "Kernel fixed-address allocation failed at {:#x}; ELF type={} is not relocatable",
+                    aligned_start,
+                    loader.image.elf_header.elf_type
+                );
+                return Status::OUT_OF_RESOURCES;
+            }
+
+            let _ = println!(
+                "Kernel fixed-address allocation failed at {:#x}; retrying with AnyPages for ET_DYN",
+                aligned_start
+            );
+            used_fallback = true;
+            match boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages) {
+                Ok(base) => base,
+                Err(e) => {
+                    let _ = println!("Kernel fallback allocation failed: {:?}", e.status());
+                    return e.status();
+                }
+            }
+        }
+    };
     println!("Allocated at {:p}", base.as_ptr());
     println!("Copying segments to allocated memory");
     for i in 0..loader.image.elf_header.phnum {
@@ -165,8 +195,13 @@ fn main() -> Status {
         }
     }
     println!("All segments copied successfully");
-    // efi_main::apply_relocations(base.as_ptr() as u64, &loader.image.relocations)
-    //     .expect("Failed to apply relocations");
+    if used_fallback {
+        let load_bias = (base.as_ptr() as u64).wrapping_sub(aligned_start);
+        if let Err(e) = efi_main::apply_relocations(load_bias, &loader.image.relocations) {
+            let _ = println!("Fallback relocation failed: {}", e);
+            return Status::LOAD_ERROR;
+        }
+    }
     println!("All relocations applied successfully");
     println!("Initializing boot information");
 
@@ -197,8 +232,13 @@ fn main() -> Status {
     println!("Jump to kernel entry point");
     let stack_pages = 16;
 
-    let stack =
-        boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, stack_pages).unwrap();
+    let stack = match boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, stack_pages) {
+        Ok(stack) => stack,
+        Err(e) => {
+            let _ = println!("Stack allocation failed: {:?}", e.status());
+            return e.status();
+        }
+    };
 
     let stack_top = stack.as_ptr() as u64 + stack_pages as u64 * 4096;
     // Rust entry points expect call-compatible stack alignment (rsp % 16 == 8).
@@ -235,27 +275,9 @@ fn main() -> Status {
     )
     .expect("Failed to allocate stable memory-map storage");
 
-    // ── Capture the memory map AFTER all LOADER_DATA allocations ─────
-    //
-    // Every allocation (kernel, stack, boot-info, entries storage) is
-    // now visible in the memory map so the PMM can reserve them.
-    let mut mm_info = efi_main::memorymap::initialize().unwrap();
-
-    if mm_info.entry_count > 0 && !mm_info.entries.is_null() && mm_info.entry_count <= MAX_ENTRIES {
-        // Copy every entry out of the transient static buffer into the
-        // pre-allocated stable LOADER_DATA buffer.
-        unsafe {
-            let src = mm_info.entries;
-            let dst = entries_storage.as_ptr() as *mut efi_main::memorymap::MemoryRegion;
-            core::ptr::copy_nonoverlapping(src, dst, mm_info.entry_count);
-            mm_info.entries = dst;
-        }
-    }
-
-    unsafe {
-        (*boot_info_ptr).memorymap = mm_info;
-    }
-    let entry = loader.entry_point;
+    let entry = loader
+        .entry_point
+        .wrapping_add((base.as_ptr() as u64).wrapping_sub(aligned_start));
     drop(loader);
     let p = entry as *const u8;
     println!("===============================================",);
@@ -277,7 +299,35 @@ fn main() -> Status {
             *p.add(7),
         );
     }
-    let _final_uefi_map = unsafe { boot::exit_boot_services(None) };
+
+    let final_uefi_map = unsafe { boot::exit_boot_services(None) };
+    let final_entry_count = final_uefi_map.len();
+    if final_entry_count > MAX_ENTRIES {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    let dst = entries_storage.as_ptr() as *mut efi_main::memorymap::MemoryRegion;
+    for (idx, desc) in final_uefi_map.entries().enumerate() {
+        let region = efi_main::memorymap::MemoryRegion {
+            base: desc.phys_start,
+            length: desc.page_count * 4096,
+            region_type: efi_main::memorymap::convert_memory_type(desc.ty),
+            attributes: desc.att.bits(),
+        };
+
+        unsafe {
+            core::ptr::write(dst.add(idx), region);
+        }
+    }
+
+    unsafe {
+        (*boot_info_ptr).memorymap = efi_main::memorymap::MemoryMapInfo {
+            entries: dst,
+            entry_count: final_entry_count,
+        };
+    }
 
     unsafe {
         asm!(
@@ -370,18 +420,33 @@ pub fn load_seed(path: &str) -> uefi::Result<Loader> {
 
     println!("Read file into buffer");
 
-    let mut buffer = vec![0u8; 1024 * 1024 * 10]; // 1 MB buffer
-    let size = regular
-        .read(&mut buffer)
-        .map_err(|_| uefi::Error::from(uefi::Status::LOAD_ERROR))?;
-    buffer.truncate(size);
+    let mut buffer = Vec::with_capacity(1024 * 1024);
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = regular
+            .read(&mut chunk)
+            .map_err(|_| uefi::Error::from(uefi::Status::LOAD_ERROR))?;
+        if n == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..n]);
+    }
+    let size = buffer.len();
+    if size < core::mem::size_of::<efi_main::Elf64Header>() {
+        return Err(uefi::Error::from(uefi::Status::LOAD_ERROR));
+    }
     println!("Parse ELF header");
     drop(regular);
     drop(root);
     drop(fs);
     drop(loaded_image);
     drop(cstr_path);
-    let header = efi_main::load_elf64_header(&buffer[..size]).unwrap();
+    let header =
+        efi_main::load_elf64_header(&buffer[..size]).map_err(|_| uefi::Error::from(uefi::Status::LOAD_ERROR))?;
+
+    if header.ident[0..4] != [0x7F, b'E', b'L', b'F'] {
+        return Err(uefi::Error::from(uefi::Status::LOAD_ERROR));
+    }
     Ok(Loader {
         entry_point: header.entry,
         image: ElfImage {
@@ -390,9 +455,10 @@ pub fn load_seed(path: &str) -> uefi::Result<Loader> {
             program_headers: (0..header.phnum)
                 .map(|i| {
                     let offset = header.phoff as usize + i as usize * header.phentsize as usize;
-                    efi_main::load_program_header(&buffer[..size], offset).unwrap()
+                    efi_main::load_program_header(&buffer[..size], offset)
+                        .map_err(|_| uefi::Error::from(uefi::Status::LOAD_ERROR))
                 })
-                .collect(),
+                .collect::<uefi::Result<Vec<efi_main::Elf64ProgramHeader>>>()?,
             dynamic: None,
             relocations: Vec::new(),
         },

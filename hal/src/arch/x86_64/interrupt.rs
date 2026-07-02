@@ -30,18 +30,20 @@ pub fn are_enabled() -> bool {
     (rflags & (1 << 9)) != 0
 }
 
-pub fn without_interrupts<F: FnOnce()>(f: F) {
+pub fn without_interrupts<F: FnOnce() -> R, R>(f: F) -> R {
     let enabled = are_enabled();
 
     if enabled {
         disable();
     }
 
-    f();
+    let out = f();
 
     if enabled {
         enable();
     }
+
+    out
 }
 
 #[inline(always)]

@@ -90,7 +90,7 @@ pub fn initialize() -> uefi::Result<MemoryMapInfo> {
     })
 }
 
-fn convert_memory_type(ty: UefiMemoryType) -> MemoryType {
+pub fn convert_memory_type(ty: UefiMemoryType) -> MemoryType {
     match ty {
         UefiMemoryType::CONVENTIONAL => MemoryType::Usable,
         UefiMemoryType::LOADER_CODE | UefiMemoryType::LOADER_DATA => MemoryType::Loader,

@@ -6,11 +6,27 @@ extern crate alloc;
 #[macro_use]
 pub mod driver;
 pub mod console;
+pub mod graphics;
 pub mod heap;
+pub mod kernel;
+pub mod kernel_arch;
+pub mod ksf;
+pub mod memory;
+pub mod object_manager;
 pub mod pci;
 pub mod pmm;
+pub mod provider;
+pub mod saifs;
+pub mod scheduler;
 pub mod shell;
+pub mod sif;
+pub mod som;
+pub mod taskman;
+pub mod snom;
 pub mod seed;
+pub mod timer;
+pub mod vmm;
+pub mod vfs;
 use efi_main::SaiosBootInfo;
 use hal::arch::paging::{self, Table};
 use hal::arch::x86_64::{gdt, idt, interrupt};
@@ -23,8 +39,6 @@ static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     interrupt::disable();
     let boot_info = unsafe { &*boot_info };
-    console::attach_framebuffer(boot_info.framebuffer);
-    driver::console::init();
     gdt::init();
     idt::init();
 
@@ -42,9 +56,25 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
         (*pml4_ptr).entries[511].set_page(pml4_phys, paging::FLAG_WRITABLE);
     }
 
+    vmm::init(pml4_phys).expect("VMM: failed to initialize kernel virtual memory manager");
+
     heap::init();
+    kernel::timeline::init();
+    kernel::timeline::mark("Boot");
+    kernel::timeline::mark("Memory");
+    console::attach_framebuffer(boot_info.framebuffer);
+    driver::console::init();
+    kernel::timeline::mark("Heap");
+    let _ = console::promote_framebuffer_renderer();
+    ksf::bootstrap().expect("KSF bootstrap failed");
+    kernel::timeline::mark("Services");
+    interrupt::enable();
+    if cfg!(debug_assertions) {
+        kernel::testing::boot_self_test();
+    }
    
     let seed = Seed::init(boot_info as *const SaiosBootInfo);
+    kernel::timeline::mark("Ready");
     seed.run()
 }
 

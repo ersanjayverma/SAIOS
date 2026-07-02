@@ -7,6 +7,18 @@ edition = "2024"
 efi_main = { path = "../../boot/uefi/efi_main", default-features = false, features = ["uefi-boot"] }
 hal = {path = "../../hal" }
 heapless = { version = "0.9.3", default-features = false }
+font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
+bitflags = { version = "2.6", default-features = false }
+arrayvec = { version = "0.7", default-features = false }
+hashbrown = { version = "0.17.1", default-features = false }
+spin = { version = "0.12.1", default-features = false }
+unicode-width = { version = "0.2", default-features = false }
+utf8parse = { version = "0.2", default-features = false }
+bytemuck = { version = "1.24", default-features = false, features = ["derive", "min_const_generics"] }
+zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
+static_assertions = { version = "1.1", default-features = false }
+smallvec = { version = "1.13", default-features = false, features = ["const_new", "const_generics", "union"] }
+crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [profile.dev]
 panic = "abort"

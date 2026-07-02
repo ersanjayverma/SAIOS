@@ -1,5 +1,5 @@
 use efi_main::SaiosBootInfo;
-use crate::shell;
+use crate::scheduler;
 
 pub struct Seed {
     boot_info: *const SaiosBootInfo,
@@ -12,7 +12,14 @@ impl Seed {
 
     pub fn run(&self) -> ! {
         let _ = self.boot_info;
-        shell::init();
-        shell::run()
+
+        idle_loop()
+    }
+}
+
+fn idle_loop() -> ! {
+    loop {
+        scheduler::yield_now();
+        hal::arch::x86_64::cpu::hlt();
     }
 }
