@@ -659,6 +659,7 @@ fn execute_entry(entry: &str, args: &[&str], env: &[(String, String)]) -> Progra
         n if n.eq_ignore_ascii_case("uname") => Ok(uname_program(args, env)),
         n if n.eq_ignore_ascii_case("cc") => cc_program(args, env),
         n if n.eq_ignore_ascii_case("stress") => Ok(stress_program(args, env)),
+        n if n.eq_ignore_ascii_case("taskman") => crate::taskman::run(args, env),
         _ => Err("program not found"),
     }
 }

@@ -45,6 +45,7 @@ const BIN_ENTRIES: &[&str] = &[
     "uname",
     "stress",
     "cc",
+    "taskman",
 ];
 
 static MOUNTED: AtomicBool = AtomicBool::new(false);

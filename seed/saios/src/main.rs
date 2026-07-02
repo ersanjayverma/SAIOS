@@ -21,6 +21,7 @@ pub mod scheduler;
 pub mod shell;
 pub mod sif;
 pub mod som;
+pub mod taskman;
 pub mod snom;
 pub mod seed;
 pub mod timer;
