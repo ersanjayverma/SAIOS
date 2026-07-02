@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use crate::object_manager::{Health, ObjectStatus, ObjectType, Property, PropertyMap};
 use crate::som::{ObjectId, ProviderId};
 use crate::{pci, scheduler};
+use crate::driver::storage;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProviderType {
@@ -81,24 +82,55 @@ impl Provider for StorageProvider {
     }
 
     fn enumerate(&self) -> Vec<ProviderObject> {
-        vec![ProviderObject {
-            path: "storage/tmpfs".to_string(),
-            name: "tmpfs".to_string(),
-            object_type: ObjectType::Volume,
-            status: ObjectStatus::Online,
-            health: Health::Healthy,
-            parent_path: Some("storage".to_string()),
-            properties: vec![
-                Property {
-                    key: "Mode".to_string(),
-                    value: "RAM".to_string(),
-                },
-                Property {
-                    key: "Mounted".to_string(),
-                    value: "/".to_string(),
-                },
-            ],
-        }]
+        let mut out = Vec::new();
+        for volume in storage::volumes() {
+            let (status, health) = if volume.mounted_at.is_some() {
+                (ObjectStatus::Online, Health::Healthy)
+            } else {
+                (ObjectStatus::Offline, Health::Offline)
+            };
+
+            out.push(ProviderObject {
+                path: format!("storage/{}", volume.name),
+                name: volume.name,
+                object_type: ObjectType::Volume,
+                status,
+                health,
+                parent_path: Some("storage".to_string()),
+                properties: vec![
+                    Property {
+                        key: "Driver".to_string(),
+                        value: volume.filesystem.driver_name().to_string(),
+                    },
+                    Property {
+                        key: "Filesystem".to_string(),
+                        value: volume.filesystem.as_str().to_string(),
+                    },
+                    Property {
+                        key: "Backing".to_string(),
+                        value: volume.backing,
+                    },
+                    Property {
+                        key: "SectorSize".to_string(),
+                        value: volume.sector_size.to_string(),
+                    },
+                    Property {
+                        key: "SizeBytes".to_string(),
+                        value: volume.total_bytes.to_string(),
+                    },
+                    Property {
+                        key: "Mounted".to_string(),
+                        value: volume.mounted_at.unwrap_or_else(|| "-".to_string()),
+                    },
+                    Property {
+                        key: "Writable".to_string(),
+                        value: if volume.writable { "true" } else { "false" }.to_string(),
+                    },
+                ],
+            });
+        }
+
+        out
     }
 }
 

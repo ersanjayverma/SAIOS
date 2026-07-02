@@ -166,6 +166,16 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
     } else if name.eq_ignore_ascii_case("pci") {
         pci::init();
         Ok(())
+    } else if name.eq_ignore_ascii_case("storage")
+        || name.eq_ignore_ascii_case("ext4")
+        || name.eq_ignore_ascii_case("ntfs")
+        || name.eq_ignore_ascii_case("fat16")
+        || name.eq_ignore_ascii_case("fat32")
+        || name.eq_ignore_ascii_case("fat64")
+        || name.eq_ignore_ascii_case("fat128")
+    {
+        crate::driver::storage::rescan();
+        Ok(())
     } else {
         Ok(())
     }
@@ -182,6 +192,16 @@ fn run_reload_hook(name: &str) -> Result<(), &'static str> {
     } else if name.eq_ignore_ascii_case("pci") {
         pci::init();
         Ok(())
+    } else if name.eq_ignore_ascii_case("storage")
+        || name.eq_ignore_ascii_case("ext4")
+        || name.eq_ignore_ascii_case("ntfs")
+        || name.eq_ignore_ascii_case("fat16")
+        || name.eq_ignore_ascii_case("fat32")
+        || name.eq_ignore_ascii_case("fat64")
+        || name.eq_ignore_ascii_case("fat128")
+    {
+        crate::driver::storage::rescan();
+        Ok(())
     } else {
         Ok(())
     }
@@ -196,6 +216,13 @@ pub fn init() {
         // Drivers that have no early runtime registration site yet.
         let _ = r.ensure_driver("pci", "0.1.0", "SAIOS", &[], DriverStatus::Loaded);
         let _ = r.ensure_driver("network", "0.1.0", "SAIOS", &["pci"], DriverStatus::Stopped);
+        let _ = r.ensure_driver("storage", "0.1.0", "SAIOS", &["pci"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("ext4", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("ntfs", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("fat16", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("fat32", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("fat64", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("fat128", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
 
         r.refresh_devices();
         r.initialized = true;
