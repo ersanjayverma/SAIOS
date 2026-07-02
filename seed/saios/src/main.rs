@@ -38,17 +38,26 @@ static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
+    hal::arch::x86_64::console::_print(format_args!("kernel: _start enter\n"));
     interrupt::disable();
     let boot_info = unsafe { &*boot_info };
+    hal::arch::x86_64::console::_print(format_args!(
+        "kernel: boot_info map_entries={} fb_base={:#x}\n",
+        boot_info.memorymap.entry_count,
+        boot_info.framebuffer.base,
+    ));
     gdt::init();
     idt::init();
+    hal::arch::x86_64::console::_print(format_args!("kernel: gdt+idt ok\n"));
 
     // Convert the raw pointer and count into a temporary Rust slice
     let _entries_slice = unsafe {
         core::slice::from_raw_parts(boot_info.memorymap.entries, boot_info.memorymap.entry_count)
     };
+    hal::arch::x86_64::console::_print(format_args!("kernel: memory slice ok\n"));
     // Initialize PMM with the boot memory map and take one page for PML4.
     pmm::init(_entries_slice);
+    hal::arch::x86_64::console::_print(format_args!("kernel: pmm init ok\n"));
     let pml4_phys = pmm::alloc_page().expect("PMM: no free pages for PML4");
     let pml4_ptr = pml4_phys as *mut Table;
     unsafe { (*pml4_ptr).clear() };
@@ -58,8 +67,10 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     }
 
     vmm::init(pml4_phys).expect("VMM: failed to initialize kernel virtual memory manager");
+    hal::arch::x86_64::console::_print(format_args!("kernel: vmm init ok\n"));
 
     heap::init();
+    hal::arch::x86_64::console::_print(format_args!("kernel: heap init ok\n"));
     kernel::timeline::init();
     kernel::timeline::mark("Boot");
     kernel::timeline::mark("Memory");

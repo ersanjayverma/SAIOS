@@ -196,17 +196,7 @@ fn main() -> Status {
         boot_info.version >> 16,
         boot_info.version & 0xFFFF
     );
-    println!("Struct Size:   {} bytes", boot_info.size);
-    println!("----------------------------------------");
 
-    // Print the sub-structures using the derived Debug trait
-    println!("{:#?}", boot_info.framebuffer);
-    println!("{:#?}", boot_info.acpi);
-    println!("{:#?}", boot_info.smbios);
-    println!("{:#?}", boot_info.cpu);
-    println!("{:#?}", boot_info.firmware);
-
-    println!("========================================");
 
     println!("ELF entry = {:#x}", loader.entry_point);
     println!("Jump to kernel entry point");
@@ -316,6 +306,13 @@ fn main() -> Status {
             };
         }
     }
+
+    let _ = println!(
+        "handoff: entry={:#x} map_entries={} stack={:#x}",
+        entry,
+        unsafe { (*boot_info_ptr).memorymap.entry_count },
+        kernel_rsp,
+    );
 
     unsafe {
         asm!(
