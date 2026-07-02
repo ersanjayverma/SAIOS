@@ -25,6 +25,13 @@ pub mod ids {
     pub const HEALTH: ServiceId = ServiceId(9);
     pub const INPUT: ServiceId = ServiceId(10);
     pub const SHELL: ServiceId = ServiceId(11);
+    pub const VFS: ServiceId = ServiceId(12);
+    pub const DRIVER_MANAGER: ServiceId = ServiceId(13);
+    pub const DEVICE_MANAGER: ServiceId = ServiceId(14);
+    pub const PROCESS_MANAGER: ServiceId = ServiceId(15);
+    pub const IPC: ServiceId = ServiceId(16);
+    pub const NETWORK: ServiceId = ServiceId(17);
+    pub const SAIRU: ServiceId = ServiceId(18);
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -42,6 +49,7 @@ pub enum ServiceState {
 pub trait KernelService {
     fn id(&self) -> ServiceId;
     fn name(&self) -> &'static str;
+    fn version(&self) -> &'static str;
     fn dependencies(&self) -> &'static [ServiceId];
     fn initialize(&mut self) -> Result<(), &'static str>;
     fn start(&mut self) -> Result<(), &'static str>;
@@ -52,6 +60,7 @@ pub trait KernelService {
 pub struct ServiceSnapshot {
     pub id: ServiceId,
     pub name: String,
+    pub version: String,
     pub state: ServiceState,
     pub health: HealthState,
     pub dependencies: Vec<ServiceId>,
@@ -203,6 +212,7 @@ impl ServiceManager {
             .map(|(svc, state)| ServiceSnapshot {
                 id: svc.id(),
                 name: svc.name().to_string(),
+                version: svc.version().to_string(),
                 state: *state,
                 health: svc.health(),
                 dependencies: svc.dependencies().to_vec(),
@@ -254,6 +264,10 @@ impl KernelService for ConsoleService {
         "console"
     }
 
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
     fn dependencies(&self) -> &'static [ServiceId] {
         &[]
     }
@@ -282,6 +296,10 @@ impl KernelService for MemoryService {
 
     fn name(&self) -> &'static str {
         "memory"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -315,6 +333,10 @@ impl KernelService for ObjectService {
         "object"
     }
 
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
     fn dependencies(&self) -> &'static [ServiceId] {
         &[ids::MEMORY]
     }
@@ -344,6 +366,10 @@ impl KernelService for ProviderService {
 
     fn name(&self) -> &'static str {
         "provider"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -377,6 +403,10 @@ impl KernelService for SifService {
         "sif"
     }
 
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
     fn dependencies(&self) -> &'static [ServiceId] {
         &[ids::PROVIDER]
     }
@@ -406,6 +436,10 @@ impl KernelService for TimerService {
 
     fn name(&self) -> &'static str {
         "timer"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -439,6 +473,10 @@ impl KernelService for SchedulerService {
         "scheduler"
     }
 
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
     fn dependencies(&self) -> &'static [ServiceId] {
         &[ids::TIMER]
     }
@@ -470,11 +508,16 @@ impl KernelService for EventService {
         "event"
     }
 
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
     fn dependencies(&self) -> &'static [ServiceId] {
         &[ids::SIF]
     }
 
     fn initialize(&mut self) -> Result<(), &'static str> {
+        crate::kernel::event::init();
         Ok(())
     }
 
@@ -498,6 +541,10 @@ impl KernelService for HealthService {
 
     fn name(&self) -> &'static str {
         "health"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -530,6 +577,10 @@ impl KernelService for InputService {
         "input"
     }
 
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
     fn dependencies(&self) -> &'static [ServiceId] {
         &[ids::CONSOLE]
     }
@@ -560,6 +611,10 @@ impl KernelService for ShellService {
         "shell"
     }
 
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
     fn dependencies(&self) -> &'static [ServiceId] {
         &[ids::CONSOLE, ids::INPUT, ids::SIF, ids::SCHEDULER]
     }
@@ -583,6 +638,247 @@ impl KernelService for ShellService {
     }
 }
 
+struct VfsService;
+
+impl KernelService for VfsService {
+    fn id(&self) -> ServiceId {
+        ids::VFS
+    }
+
+    fn name(&self) -> &'static str {
+        "vfs"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
+    fn dependencies(&self) -> &'static [ServiceId] {
+        &[ids::SIF]
+    }
+
+    fn initialize(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {}
+
+    fn health(&self) -> HealthState {
+        HealthState::Healthy
+    }
+}
+
+struct DriverManagerService;
+
+impl KernelService for DriverManagerService {
+    fn id(&self) -> ServiceId {
+        ids::DRIVER_MANAGER
+    }
+
+    fn name(&self) -> &'static str {
+        "driver-manager"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
+    fn dependencies(&self) -> &'static [ServiceId] {
+        &[ids::OBJECT]
+    }
+
+    fn initialize(&mut self) -> Result<(), &'static str> {
+        crate::kernel::driver::init();
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {}
+
+    fn health(&self) -> HealthState {
+        HealthState::Healthy
+    }
+}
+
+struct DeviceManagerService;
+
+impl KernelService for DeviceManagerService {
+    fn id(&self) -> ServiceId {
+        ids::DEVICE_MANAGER
+    }
+
+    fn name(&self) -> &'static str {
+        "device-manager"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
+    fn dependencies(&self) -> &'static [ServiceId] {
+        &[ids::DRIVER_MANAGER]
+    }
+
+    fn initialize(&mut self) -> Result<(), &'static str> {
+        crate::kernel::device::init();
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {}
+
+    fn health(&self) -> HealthState {
+        HealthState::Healthy
+    }
+}
+
+struct ProcessManagerService;
+
+impl KernelService for ProcessManagerService {
+    fn id(&self) -> ServiceId {
+        ids::PROCESS_MANAGER
+    }
+
+    fn name(&self) -> &'static str {
+        "process-manager"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
+    fn dependencies(&self) -> &'static [ServiceId] {
+        &[ids::SCHEDULER]
+    }
+
+    fn initialize(&mut self) -> Result<(), &'static str> {
+        crate::kernel::process::init();
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {}
+
+    fn health(&self) -> HealthState {
+        HealthState::Healthy
+    }
+}
+
+struct IpcService;
+
+impl KernelService for IpcService {
+    fn id(&self) -> ServiceId {
+        ids::IPC
+    }
+
+    fn name(&self) -> &'static str {
+        "ipc"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
+    fn dependencies(&self) -> &'static [ServiceId] {
+        &[ids::PROCESS_MANAGER]
+    }
+
+    fn initialize(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {}
+
+    fn health(&self) -> HealthState {
+        HealthState::Healthy
+    }
+}
+
+struct NetworkService;
+
+impl KernelService for NetworkService {
+    fn id(&self) -> ServiceId {
+        ids::NETWORK
+    }
+
+    fn name(&self) -> &'static str {
+        "network"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
+    fn dependencies(&self) -> &'static [ServiceId] {
+        &[ids::IPC]
+    }
+
+    fn initialize(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {}
+
+    fn health(&self) -> HealthState {
+        HealthState::Warning
+    }
+}
+
+struct SairuService;
+
+impl KernelService for SairuService {
+    fn id(&self) -> ServiceId {
+        ids::SAIRU
+    }
+
+    fn name(&self) -> &'static str {
+        "sairu"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
+    fn dependencies(&self) -> &'static [ServiceId] {
+        &[ids::HEALTH, ids::EVENT]
+    }
+
+    fn initialize(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {}
+
+    fn health(&self) -> HealthState {
+        HealthState::Healthy
+    }
+}
+
 pub fn bootstrap() -> Result<(), &'static str> {
     with_manager(|manager| {
         manager.register(Box::new(ConsoleService));
@@ -595,6 +891,13 @@ pub fn bootstrap() -> Result<(), &'static str> {
         manager.register(Box::new(EventService));
         manager.register(Box::new(HealthService));
         manager.register(Box::new(InputService));
+        manager.register(Box::new(VfsService));
+        manager.register(Box::new(DriverManagerService));
+        manager.register(Box::new(DeviceManagerService));
+        manager.register(Box::new(ProcessManagerService));
+        manager.register(Box::new(IpcService));
+        manager.register(Box::new(NetworkService));
+        manager.register(Box::new(SairuService));
         manager.register(Box::new(ShellService));
         manager.start_all()
     })

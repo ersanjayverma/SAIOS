@@ -14,6 +14,8 @@ use cursor::Cursor;
 use framebuffer::FramebufferConsole;
 use hal::arch::x86_64::sync::StaticCell;
 use input::InputBuffer;
+use crate::kernel::device;
+use crate::kernel::driver;
 use keyboard::{KeyEvent, KeyboardDriver};
 use serial::{poll_input_event as poll_serial_input_event, SerialConsole};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -218,6 +220,10 @@ fn emergency_write_str(s: &str) {
 
 pub fn init() {
     SerialConsole::init();
+    let _ = driver::ensure_driver("serial", "0.1.0", "SAIOS", &[], driver::DriverStatus::Running);
+    let _ = driver::ensure_driver("input", "0.1.0", "SAIOS", &["serial"], driver::DriverStatus::Running);
+    let _ = device::ensure_device("COM1", "serial", "uart", device::DeviceStatus::Online);
+    let _ = device::ensure_device("keyboard0", "input", "keyboard", device::DeviceStatus::Online);
     with_console(|console| console.init());
     unsafe {
         (*INPUT_BUFFER.get()).clear();
@@ -228,6 +234,8 @@ pub fn init() {
 pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
     with_console(|console| {
         console.backend.right_mut().attach(info);
+        let _ = driver::ensure_driver("framebuffer", "0.1.0", "SAIOS", &["serial"], driver::DriverStatus::Running);
+        let _ = device::ensure_device("fb0", "framebuffer", "display", device::DeviceStatus::Online);
         if let (Some(columns), Some(rows)) = (
             console.backend.right_mut().text_columns(),
             console.backend.right_mut().text_rows(),

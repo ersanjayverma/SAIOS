@@ -58,9 +58,6 @@ pub fn init() {
         }
 
         let _ = r.register(ObjectType::Kernel, "saios", ObjectState::Running);
-        let _ = r.register(ObjectType::Driver, "serial", ObjectState::Running);
-        let _ = r.register(ObjectType::Driver, "framebuffer", ObjectState::Running);
-        let _ = r.register(ObjectType::Device, "COM1", ObjectState::Running);
         let _ = r.register(ObjectType::Process, "snsh", ObjectState::Running);
         let _ = r.register(ObjectType::Mount, "/", ObjectState::Running);
     });
