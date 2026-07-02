@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::time::Duration;
