@@ -5,4 +5,5 @@ pub mod object;
 pub mod process;
 pub mod sairu;
 pub mod telemetry;
+pub mod timeline;
 pub mod testing;

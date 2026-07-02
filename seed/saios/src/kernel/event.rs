@@ -176,3 +176,15 @@ pub fn recent(limit: usize) -> Vec<EventRecord> {
 pub fn counters() -> EventCounters {
     with_bus(|b| b.counters)
 }
+
+pub fn clear_stale(keep_latest: usize) {
+    with_bus_mut(|b| {
+        if b.events.len() <= keep_latest {
+            return;
+        }
+        let drop_count = b.events.len().saturating_sub(keep_latest);
+        for _ in 0..drop_count {
+            let _ = b.events.remove(0);
+        }
+    });
+}

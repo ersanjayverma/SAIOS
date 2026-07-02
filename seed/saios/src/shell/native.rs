@@ -12,6 +12,7 @@ use crate::kernel::process;
 use crate::kernel::sairu;
 use crate::kernel::testing;
 use crate::kernel::telemetry;
+use crate::kernel::timeline;
 use crate::ksf;
 use crate::object_manager;
 use crate::pci;
@@ -140,13 +141,28 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_dashboard,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "dash",
+        description: "Alias for dashboard",
+        handler: cmd_dashboard,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "stats",
         description: "Show KOM object statistics",
         handler: cmd_stats,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "st",
+        description: "Alias for stats",
+        handler: cmd_stats,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "objects",
         description: "List KOM objects (optionally filtered by type)",
+        handler: cmd_objects,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "obj",
+        description: "Alias for objects",
         handler: cmd_objects,
     }));
     registry.register(Box::new(StaticCommand {
@@ -160,8 +176,18 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_devices,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "dev",
+        description: "Alias for devices",
+        handler: cmd_devices,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "drivers",
         description: "List registered drivers",
+        handler: cmd_drivers,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "drv",
+        description: "Alias for drivers",
         handler: cmd_drivers,
     }));
     registry.register(Box::new(StaticCommand {
@@ -172,6 +198,11 @@ pub fn register(registry: &mut CommandRegistry) {
     registry.register(Box::new(StaticCommand {
         name: "service",
         description: "Manage kernel services",
+        handler: cmd_service,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "svc",
+        description: "Alias for service",
         handler: cmd_service,
     }));
     registry.register(Box::new(StaticCommand {
@@ -197,6 +228,11 @@ pub fn register(registry: &mut CommandRegistry) {
     registry.register(Box::new(StaticCommand {
         name: "services",
         description: "List service objects",
+        handler: cmd_services,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "svcs",
+        description: "Alias for services",
         handler: cmd_services,
     }));
     registry.register(Box::new(StaticCommand {
@@ -235,6 +271,11 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_events,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "ev",
+        description: "Alias for events",
+        handler: cmd_events,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "logs",
         description: "Alias for events",
         handler: cmd_events,
@@ -243,6 +284,26 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "mount",
         description: "List current mounts",
         handler: cmd_mounts,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "graph",
+        description: "Show dependency graph (e.g. graph services)",
+        handler: cmd_graph,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "gr",
+        description: "Alias for graph",
+        handler: cmd_graph,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "timeline",
+        description: "Show boot and service timeline",
+        handler: cmd_timeline,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "tl",
+        description: "Alias for timeline",
+        handler: cmd_timeline,
     }));
     registry.register(Box::new(StaticCommand {
         name: "tree",
@@ -293,6 +354,16 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "sairu",
         description: "SAIRU diagnostics interface",
         handler: cmd_sairu,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "recover",
+        description: "Run automated recovery actions",
+        handler: cmd_recover,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "rcv",
+        description: "Alias for recover",
+        handler: cmd_recover,
     }));
 }
 
@@ -399,8 +470,31 @@ fn cmd_ps(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
 
 fn cmd_jobs(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     let filter = _args.first().copied();
+    let sort_desc = _args
+        .iter()
+        .skip(1)
+        .find_map(|a| a.strip_prefix("sort="))
+        .is_some_and(|v| v.eq_ignore_ascii_case("desc"));
+    let filter = filter.map(|f| {
+        if f.eq_ignore_ascii_case("r") {
+            "running"
+        } else if f.eq_ignore_ascii_case("w") {
+            "waiting"
+        } else if f.eq_ignore_ascii_case("e") {
+            "exited"
+        } else {
+            f
+        }
+    });
+
+    let mut records = process::jobs();
+    records.sort_by_key(|p| p.pid);
+    if sort_desc {
+        records.reverse();
+    }
+
     console::println!("PID   STATE     NAME");
-    for p in process::jobs() {
+    for p in records {
         if let Some(f) = filter {
             let keep = if f.eq_ignore_ascii_case("running") {
                 matches!(p.state, process::ProcessState::Running)
@@ -560,6 +654,7 @@ fn cmd_dashboard(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     let drivers = driver::drivers();
     let jobs = process::jobs();
     let events = event::counters();
+    let (score, warnings) = sairu::health_score();
 
     let service_failed = services
         .iter()
@@ -599,7 +694,43 @@ fn cmd_dashboard(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     let event_bus_ready = telemetry.event_total >= events.total;
     let sairu_ready = true;
 
-    console::println!("=== SAIOS STATUS DASHBOARD ===");
+    let d = timer::uptime();
+    let total_ms = d.as_millis() as u64;
+    let hours = total_ms / 3_600_000;
+    let minutes = (total_ms % 3_600_000) / 60_000;
+    let seconds = (total_ms % 60_000) / 1000;
+
+    console::println!("========================================");
+    console::println!("SAIOS SYSTEM DASHBOARD");
+    console::println!("========================================");
+    console::println!("Boot            {}", if kom_ready { "OK" } else { "FAIL" });
+    console::println!("Memory          {}", if telemetry.ram_mb > 0 { "OK" } else { "FAIL" });
+    console::println!("Scheduler       {}", if telemetry.scheduler_threads > 0 { "OK" } else { "FAIL" });
+    console::println!("Processes       {} running", jobs.iter().filter(|p| matches!(p.state, process::ProcessState::Running)).count());
+    console::println!("Drivers         {}/{} healthy", drivers.len().saturating_sub(driver_faulted), drivers.len());
+    console::println!("Devices         {} online", devices.iter().filter(|d| matches!(d.status, device::DeviceStatus::Online)).count());
+    console::println!("Filesystem      {}", if telemetry.mount_count > 0 { "Mounted" } else { "Not Mounted" });
+    console::println!("Event Bus       {}", if event_bus_ready { "Active" } else { "Inactive" });
+    console::println!("Telemetry       {}", if telemetry.event_total > 0 { "Active" } else { "Warmup" });
+    console::println!("SAIRU           {}", if sairu_ready { "Healthy" } else { "Degraded" });
+    console::println!("CPU             {} logical", telemetry.cpu_logical);
+    console::println!("RAM             {} MiB", telemetry.ram_mb);
+    console::println!("Heap            {:.1} MiB / {:.1} MiB", (telemetry.heap_used_kb as f64) / 1024.0, (telemetry.heap_total_kb as f64) / 1024.0);
+    console::println!("Events          {}", telemetry.event_total);
+    console::println!("Objects         {}", kom_stats.total);
+    console::println!("Services        {}", services.len());
+    console::println!("Uptime          {:02}:{:02}:{:02}", hours, minutes, seconds);
+    console::println!("Overall Health  {}%", score);
+    console::println!("----------------------------------------");
+    if warnings.is_empty() {
+        console::println!("Warnings: none");
+    } else {
+        console::println!("Warnings:");
+        for w in warnings {
+            console::println!("- {}", w);
+        }
+    }
+    console::println!("----------------------------------------");
     console::println!("READY  KOM={} KSM={} DEV={} DRV={} PROC={} EVT={} SAIRU={}",
         kom_ready,
         ksm_ready,
@@ -639,12 +770,64 @@ fn cmd_dashboard(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         telemetry.event_total
     );
 
-    if service_failed > 0 || driver_faulted > 0 || device_faulted > 0 {
-        console::println!("ATTN issues detected: use services failed, drivers faulted, devices faulted");
-    } else {
-        console::println!("OK no failed services/drivers/devices");
+    console::println!("========================================");
+
+    Ok(())
+}
+
+fn cmd_graph(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let target = args.first().copied().unwrap_or("services");
+    if !target.eq_ignore_ascii_case("services") {
+        return Err("graph: expected services");
     }
 
+    let services = ksf::list();
+    if services.is_empty() {
+        console::println!("Kernel");
+        return Ok(());
+    }
+
+    console::println!("Kernel");
+
+    fn print_children(parent_id: Option<ksf::ServiceId>, all: &[ksf::ServiceSnapshot], depth: usize) {
+        for svc in all {
+            let is_child = match parent_id {
+                None => svc.dependencies.is_empty(),
+                Some(pid) => svc.dependencies.iter().any(|d| *d == pid),
+            };
+            if !is_child {
+                continue;
+            }
+
+            let indent = "  ".repeat(depth);
+            crate::console::println!("{}- {}", indent, svc.name);
+            print_children(Some(svc.id), all, depth + 1);
+        }
+    }
+
+    print_children(None, services.as_slice(), 1);
+    Ok(())
+}
+
+fn cmd_timeline(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let limit = args
+        .first()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(32);
+
+    for m in timeline::recent(limit) {
+        let ms = m.tick.saturating_mul(10);
+        let sec = ms / 1000;
+        let sub = ms % 1000;
+        console::println!("{:02}.{:03} {}", sec, sub, m.label);
+    }
+    Ok(())
+}
+
+fn cmd_recover(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    for line in sairu::recover() {
+        console::println!("{}", line);
+    }
     Ok(())
 }
 
@@ -704,8 +887,31 @@ fn cmd_providers(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
 
 fn cmd_devices(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     let filter = _args.first().copied();
+    let sort_desc = _args
+        .iter()
+        .skip(1)
+        .find_map(|a| a.strip_prefix("sort="))
+        .is_some_and(|v| v.eq_ignore_ascii_case("desc"));
+    let filter = filter.map(|f| {
+        if f.eq_ignore_ascii_case("o") {
+            "online"
+        } else if f.eq_ignore_ascii_case("off") {
+            "offline"
+        } else if f.eq_ignore_ascii_case("f") {
+            "faulted"
+        } else {
+            f
+        }
+    });
+
+    let mut records = device::devices();
+    records.sort_by(|a, b| a.name.cmp(&b.name));
+    if sort_desc {
+        records.reverse();
+    }
+
     console::println!("NAME       DRIVER       CLASS      STATUS     OBJECT");
-    for d in device::devices() {
+    for d in records {
         if let Some(f) = filter {
             let keep = if f.eq_ignore_ascii_case("online") {
                 matches!(d.status, device::DeviceStatus::Online)
@@ -735,8 +941,33 @@ fn cmd_devices(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
 
 fn cmd_drivers(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     let filter = _args.first().copied();
+    let sort_desc = _args
+        .iter()
+        .skip(1)
+        .find_map(|a| a.strip_prefix("sort="))
+        .is_some_and(|v| v.eq_ignore_ascii_case("desc"));
+    let filter = filter.map(|f| {
+        if f.eq_ignore_ascii_case("r") {
+            "running"
+        } else if f.eq_ignore_ascii_case("l") {
+            "loaded"
+        } else if f.eq_ignore_ascii_case("s") {
+            "stopped"
+        } else if f.eq_ignore_ascii_case("f") {
+            "faulted"
+        } else {
+            f
+        }
+    });
+
+    let mut records = driver::drivers();
+    records.sort_by(|a, b| a.name.cmp(&b.name));
+    if sort_desc {
+        records.reverse();
+    }
+
     console::println!("NAME       VERSION   STATUS    DEVICES   START STOP RELOAD FAULT OBJECT");
-    for d in driver::drivers() {
+    for d in records {
         if let Some(f) = filter {
             let keep = if f.eq_ignore_ascii_case("running") {
                 matches!(d.status, driver::DriverStatus::Running)
@@ -828,6 +1059,21 @@ fn cmd_driver(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
 fn cmd_service(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let action = args.first().copied().unwrap_or("list");
+    let action = if action.eq_ignore_ascii_case("ls") {
+        "list"
+    } else if action.eq_ignore_ascii_case("st") {
+        "start"
+    } else if action.eq_ignore_ascii_case("sp") {
+        "stop"
+    } else if action.eq_ignore_ascii_case("rs") {
+        "restart"
+    } else if action.eq_ignore_ascii_case("i") {
+        "info"
+    } else if action.eq_ignore_ascii_case("h") {
+        "health"
+    } else {
+        action
+    };
 
     match action {
         "list" => {
@@ -956,7 +1202,38 @@ fn cmd_verify(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
 fn cmd_services(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     let filter = _args.first().copied();
-    for svc in ksf::list() {
+    let sort_desc = _args
+        .iter()
+        .skip(1)
+        .find_map(|a| a.strip_prefix("sort="))
+        .is_some_and(|v| v.eq_ignore_ascii_case("desc"));
+    let filter = filter.map(|f| {
+        if f.eq_ignore_ascii_case("r") {
+            "running"
+        } else if f.eq_ignore_ascii_case("f") {
+            "failed"
+        } else if f.eq_ignore_ascii_case("s") {
+            "stopped"
+        } else if f.eq_ignore_ascii_case("h") {
+            "healthy"
+        } else if f.eq_ignore_ascii_case("w") {
+            "warning"
+        } else if f.eq_ignore_ascii_case("c") {
+            "critical"
+        } else if f.eq_ignore_ascii_case("o") {
+            "offline"
+        } else {
+            f
+        }
+    });
+
+    let mut records = ksf::list();
+    records.sort_by(|a, b| a.name.cmp(&b.name));
+    if sort_desc {
+        records.reverse();
+    }
+
+    for svc in records {
         if let Some(f) = filter {
             let keep = if f.eq_ignore_ascii_case("running") {
                 matches!(svc.state, ksf::ServiceState::Running)
@@ -1115,6 +1392,30 @@ fn cmd_diagnose(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
 fn cmd_explain(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = args.first().copied().ok_or("explain: missing object path")?;
+    if path.eq_ignore_ascii_case("heap") || path.eq_ignore_ascii_case("memory") {
+        let h = heap::stats();
+        let used_pct = if h.total == 0 {
+            0
+        } else {
+            (h.used.saturating_mul(100) / h.total) as u64
+        };
+        console::println!("Heap uses a grow-on-demand policy with guarded expansion.");
+        console::println!(
+            "Current Usage: {} MiB / {} MiB ({}%)",
+            h.used / (1024 * 1024),
+            h.total / (1024 * 1024),
+            used_pct
+        );
+        console::println!("Growth: starts at 32 MiB, expands in 2 MiB/4 MiB chunks, capped at 1 GiB.");
+        if used_pct >= 85 {
+            console::println!("Recommendation: run recover and inspect heavy services/drivers.");
+        } else if used_pct >= 70 {
+            console::println!("Recommendation: monitor allocations and event volume.");
+        } else {
+            console::println!("Recommendation: heap headroom is healthy.");
+        }
+        return Ok(());
+    }
     for line in object_manager::explain(path)? {
         console::println!("{}", line);
     }
@@ -1126,11 +1427,27 @@ fn cmd_events(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
         .first()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(16);
-    let source_filter = args.get(1).copied();
+    let mut source_filter: Option<&str> = None;
+    let mut sort_desc = true;
+    for token in args.iter().skip(1) {
+        if let Some(v) = token.strip_prefix("sort=") {
+            sort_desc = v.eq_ignore_ascii_case("desc");
+        } else {
+            source_filter = Some(token);
+        }
+    }
+
     for line in object_manager::events(limit) {
         console::println!("{}", line);
     }
-    for e in event::recent(limit) {
+
+    let mut records = event::recent(limit);
+    records.sort_by_key(|e| e.seq);
+    if sort_desc {
+        records.reverse();
+    }
+
+    for e in records {
         if let Some(source) = source_filter {
             if !e.source.contains(source) {
                 continue;
@@ -1278,7 +1595,13 @@ fn cmd_sairu(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             }
             Ok(())
         }
-        _ => Err("sairu: expected health|diagnose|explain"),
+        "recover" => {
+            for line in sairu::recover() {
+                console::println!("{}", line);
+            }
+            Ok(())
+        }
+        _ => Err("sairu: expected health|diagnose|explain|recover"),
     }
 }
 

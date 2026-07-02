@@ -36,6 +36,8 @@ static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     interrupt::disable();
+    kernel::timeline::init();
+    kernel::timeline::mark("Boot");
     let boot_info = unsafe { &*boot_info };
     console::attach_framebuffer(boot_info.framebuffer);
     driver::console::init();
@@ -48,6 +50,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     };
     // Initialize PMM with the boot memory map and take one page for PML4.
     pmm::init(_entries_slice);
+    kernel::timeline::mark("Memory");
     let pml4_phys = pmm::alloc_page().expect("PMM: no free pages for PML4");
     let pml4_ptr = pml4_phys as *mut Table;
     unsafe { (*pml4_ptr).clear() };
@@ -57,14 +60,17 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     }
 
     heap::init();
+    kernel::timeline::mark("Heap");
     let _ = console::promote_framebuffer_renderer();
     ksf::bootstrap().expect("KSF bootstrap failed");
+    kernel::timeline::mark("Services");
     interrupt::enable();
     if cfg!(debug_assertions) {
         kernel::testing::boot_self_test();
     }
    
     let seed = Seed::init(boot_info as *const SaiosBootInfo);
+    kernel::timeline::mark("Ready");
     seed.run()
 }
 

@@ -240,8 +240,10 @@ SAIRU facade is implemented in `kernel/sairu.rs`.
 ### Capabilities
 
 - `health`: summary from telemetry + services + recent events
+- `health_score`: normalized score + warnings for failed services, faulted drivers, reload churn, heap pressure
 - `diagnose`: driver fault/error inspection
 - `explain scheduler|memory`: architecture/context explanation
+- `recover`: restart failed services, reload faulted/stopped drivers, clear stale events, rerun diagnostics
 
 ### Shell commands
 
@@ -249,6 +251,7 @@ SAIRU facade is implemented in `kernel/sairu.rs`.
 - `sairu diagnose`
 - `sairu explain scheduler`
 - `sairu explain memory`
+- `sairu recover`
 
 ## 11. SNSH Commands
 
@@ -311,9 +314,14 @@ SAIRU facade is implemented in `kernel/sairu.rs`.
 - `events`
 - `stats`
 - `irq`
+- `dashboard` (health score + warnings)
+- `graph services`
+- `timeline [limit]`
+- `recover`
 - `sairu health`
 - `sairu diagnose`
 - `sairu explain <target>`
+- `sairu recover`
 
 Filtering support:
 
@@ -321,6 +329,36 @@ Filtering support:
 - `drivers running|loaded|stopped|faulted|<name-fragment>`
 - `devices online|offline|faulted|<name/driver/class-fragment>`
 - `events <limit> [source-fragment]`
+
+Abbreviated command aliases:
+
+- `dash` -> `dashboard`
+- `st` -> `stats`
+- `obj` -> `objects`
+- `dev` -> `devices`
+- `drv` -> `drivers`
+- `svc` -> `service`
+- `svcs` -> `services`
+- `ev` -> `events`
+- `gr` -> `graph`
+- `tl` -> `timeline`
+- `rcv` -> `recover`
+
+Abbreviated options:
+
+- `jobs r|w|e`
+- `services r|f|s|h|w|c|o`
+- `drivers r|l|s|f`
+- `devices o|off|f`
+- `service ls|st|sp|rs|i|h`
+
+Sorting option:
+
+- `sort=asc|desc` supported by `jobs`, `services`, `drivers`, `devices`, `events`
+- examples:
+  - `drivers f sort=desc`
+  - `services r sort=asc`
+  - `events 128 driver-manager sort=desc`
 
 ## 12. Current Milestone State
 
@@ -337,6 +375,7 @@ Filtering support:
 - Event Bus: done (lifecycle event stream + counters)
 - Telemetry: done (snapshot + shell visibility)
 - SAIRU: done (health/diagnose/explain)
+- Dashboard/Timeline/Recovery UX: done
 
 ## 13. Immediate Next Steps
 

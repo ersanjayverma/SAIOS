@@ -138,6 +138,7 @@ impl ServiceManager {
         match self.services[idx].start() {
             Ok(()) => {
                 self.states[idx] = ServiceState::Running;
+                crate::kernel::timeline::mark(alloc::format!("Service {}", self.services[idx].name()).as_str());
                 Ok(())
             }
             Err(e) => {
