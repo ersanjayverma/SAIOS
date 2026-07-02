@@ -486,7 +486,7 @@ fn map_str_err(err: &'static str) -> SaifsError {
 }
 
 fn default_read(path: &str) -> Result<Vec<u8>, SaifsError> {
-    Ok(vfs::cat(path).map_err(map_str_err)?.into_bytes())
+    vfs::read_path(path).map_err(map_str_err)
 }
 
 fn default_write(path: &str, data: &[u8]) -> Result<usize, SaifsError> {

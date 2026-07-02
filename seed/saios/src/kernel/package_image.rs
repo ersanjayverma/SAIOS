@@ -1,5 +1,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use alloc::vec;
+
 use crate::vfs;
 
 const PROFILE: &str = "saios-base";
@@ -101,42 +103,61 @@ fn write_manifest() -> Result<(), &'static str> {
 }
 
 fn write_binary(path: &str, entry: &str) -> Result<(), &'static str> {
-    let mut text = alloc::string::String::new();
-    text.push_str("SAIOS_BIN_V1\n");
-    text.push_str("entry=");
-    text.push_str(entry);
-    text.push('\n');
-    text.push_str("type=pie\n");
-    text.push_str("preferred_base=0x00400000\n");
-    text.push_str("dynamic=true\n");
-    text.push_str("interp=/lib/ld-saios.so\n");
+    let _ = entry;
+    const ELF_HEADER_SIZE: usize = 64;
+    const PROGRAM_HEADER_SIZE: usize = 56;
+    const IMAGE_SIZE: usize = ELF_HEADER_SIZE + PROGRAM_HEADER_SIZE;
 
-    let needed = if entry == "calc" {
-        "libc.so,libm.so"
-    } else if entry == "shell" {
-        "libc.so,libshell.so"
-    } else if entry == "editor" {
-        "libc.so,libui.so"
-    } else {
-        "libc.so"
-    };
-    text.push_str("needed=");
-    text.push_str(needed);
-    text.push('\n');
+    let mut elf = vec![0u8; IMAGE_SIZE];
 
-    let required = if entry == "calc" {
-        "malloc,free,printf,sin,cos"
-    } else if entry == "shell" {
-        "malloc,free,printf,shell_init,shell_run"
-    } else if entry == "editor" {
-        "malloc,free,printf,ui_init,text_edit"
-    } else {
-        "malloc,free,printf"
-    };
-    text.push_str("required=");
-    text.push_str(required);
-    text.push('\n');
-    vfs::write_path(path, text.as_bytes())
+    // e_ident
+    elf[0] = 0x7F;
+    elf[1] = b'E';
+    elf[2] = b'L';
+    elf[3] = b'F';
+    elf[4] = 2; // ELFCLASS64
+    elf[5] = 1; // little-endian
+    elf[6] = 1; // current version
+
+    fn put16(buf: &mut [u8], off: usize, value: u16) {
+        let b = value.to_le_bytes();
+        buf[off..off + 2].copy_from_slice(&b);
+    }
+    fn put32(buf: &mut [u8], off: usize, value: u32) {
+        let b = value.to_le_bytes();
+        buf[off..off + 4].copy_from_slice(&b);
+    }
+    fn put64(buf: &mut [u8], off: usize, value: u64) {
+        let b = value.to_le_bytes();
+        buf[off..off + 8].copy_from_slice(&b);
+    }
+
+    // ELF header fields.
+    put16(&mut elf, 16, 2); // ET_EXEC
+    put16(&mut elf, 18, 62); // EM_X86_64
+    put32(&mut elf, 20, 1); // EV_CURRENT
+    put64(&mut elf, 24, 0x0040_1000); // e_entry
+    put64(&mut elf, 32, ELF_HEADER_SIZE as u64); // e_phoff
+    put64(&mut elf, 40, 0); // e_shoff
+    put32(&mut elf, 48, 0); // e_flags
+    put16(&mut elf, 52, ELF_HEADER_SIZE as u16); // e_ehsize
+    put16(&mut elf, 54, PROGRAM_HEADER_SIZE as u16); // e_phentsize
+    put16(&mut elf, 56, 1); // e_phnum
+    put16(&mut elf, 58, 0); // e_shentsize
+    put16(&mut elf, 60, 0); // e_shnum
+    put16(&mut elf, 62, 0); // e_shstrndx
+
+    let ph = ELF_HEADER_SIZE;
+    put32(&mut elf, ph, 1); // PT_LOAD
+    put32(&mut elf, ph + 4, 0x5); // PF_R | PF_X
+    put64(&mut elf, ph + 8, 0); // p_offset
+    put64(&mut elf, ph + 16, 0x0040_0000); // p_vaddr
+    put64(&mut elf, ph + 24, 0x0040_0000); // p_paddr
+    put64(&mut elf, ph + 32, IMAGE_SIZE as u64); // p_filesz
+    put64(&mut elf, ph + 40, IMAGE_SIZE as u64); // p_memsz
+    put64(&mut elf, ph + 48, 0x1000); // p_align
+
+    vfs::write_path(path, elf.as_slice())
 }
 
 fn write_shared_library(path: &str, soname: &str, exports: &str) -> Result<(), &'static str> {

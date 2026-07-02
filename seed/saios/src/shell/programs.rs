@@ -11,6 +11,19 @@ use alloc::vec::Vec;
 
 type ProgramResult = Result<i32, &'static str>;
 
+const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
+const ELFCLASS64: u8 = 2;
+const ELFDATA2LSB: u8 = 1;
+const EM_X86_64: u16 = 62;
+const ET_DYN: u16 = 3;
+const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
+const PT_INTERP: u32 = 3;
+const DT_NULL: i64 = 0;
+const DT_NEEDED: i64 = 1;
+const DT_STRTAB: i64 = 5;
+const DT_STRSZ: i64 = 10;
+
 #[derive(Clone, Debug)]
 pub struct BinaryMetadata {
     pub entry: String,
@@ -356,6 +369,204 @@ fn parse_csv_values(raw: &str) -> Vec<String> {
     out
 }
 
+fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
+    let chunk = bytes.get(offset..end)?;
+    Some(u16::from_le_bytes([chunk[0], chunk[1]]))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    let chunk = bytes.get(offset..end)?;
+    Some(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize) -> Option<u64> {
+    let end = offset.checked_add(8)?;
+    let chunk = bytes.get(offset..end)?;
+    Some(u64::from_le_bytes([
+        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+    ]))
+}
+
+fn read_i64_le(bytes: &[u8], offset: usize) -> Option<i64> {
+    read_u64_le(bytes, offset).map(|v| v as i64)
+}
+
+fn read_cstring(bytes: &[u8], start: usize) -> Option<String> {
+    let mut end = start;
+    while end < bytes.len() {
+        if bytes[end] == 0 {
+            break;
+        }
+        end += 1;
+    }
+    if end > bytes.len() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(bytes.get(start..end)?).into_owned())
+}
+
+fn path_basename(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+#[derive(Clone, Copy)]
+struct ElfProgramHeader {
+    p_type: u32,
+    p_offset: u64,
+    p_vaddr: u64,
+    p_filesz: u64,
+}
+
+fn parse_elf_program_headers(bytes: &[u8]) -> Option<Vec<ElfProgramHeader>> {
+    if bytes.len() < 64 || bytes.get(0..4)? != ELF_MAGIC {
+        return None;
+    }
+    if *bytes.get(4)? != ELFCLASS64 || *bytes.get(5)? != ELFDATA2LSB {
+        return None;
+    }
+    if read_u16_le(bytes, 18)? != EM_X86_64 {
+        return None;
+    }
+
+    let phoff = read_u64_le(bytes, 32)? as usize;
+    let phentsize = read_u16_le(bytes, 54)? as usize;
+    let phnum = read_u16_le(bytes, 56)? as usize;
+
+    if phentsize < 56 {
+        return None;
+    }
+
+    let mut headers = Vec::new();
+    for i in 0..phnum {
+        let off = phoff.checked_add(i.checked_mul(phentsize)?)?;
+        let end = off.checked_add(56)?;
+        if end > bytes.len() {
+            return None;
+        }
+
+        headers.push(ElfProgramHeader {
+            p_type: read_u32_le(bytes, off)?,
+            p_offset: read_u64_le(bytes, off + 8)?,
+            p_vaddr: read_u64_le(bytes, off + 16)?,
+            p_filesz: read_u64_le(bytes, off + 32)?,
+        });
+    }
+
+    Some(headers)
+}
+
+fn vaddr_to_file_offset(program_headers: &[ElfProgramHeader], vaddr: u64) -> Option<usize> {
+    for ph in program_headers {
+        if ph.p_type != PT_LOAD {
+            continue;
+        }
+
+        let seg_start = ph.p_vaddr;
+        let seg_end = seg_start.checked_add(ph.p_filesz)?;
+        if vaddr >= seg_start && vaddr < seg_end {
+            let delta = vaddr.checked_sub(seg_start)?;
+            let file = ph.p_offset.checked_add(delta)?;
+            return usize::try_from(file).ok();
+        }
+    }
+    None
+}
+
+fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Option<BinaryMetadata> {
+    let program_headers = parse_elf_program_headers(bytes)?;
+    let e_type = read_u16_le(bytes, 16)?;
+    let entry_addr = read_u64_le(bytes, 24)?;
+    let mut dynamic = false;
+    let mut interpreter: Option<String> = None;
+    let mut needed_libraries: Vec<String> = Vec::new();
+
+    for ph in &program_headers {
+        if ph.p_type == PT_INTERP {
+            let start = usize::try_from(ph.p_offset).ok()?;
+            if start >= bytes.len() {
+                return None;
+            }
+            interpreter = read_cstring(bytes, start);
+            continue;
+        }
+
+        if ph.p_type == PT_DYNAMIC {
+            dynamic = true;
+            let dyn_start = usize::try_from(ph.p_offset).ok()?;
+            let dyn_size = usize::try_from(ph.p_filesz).ok()?;
+            let dyn_end = dyn_start.checked_add(dyn_size)?;
+            if dyn_end > bytes.len() {
+                return None;
+            }
+
+            let mut strtab_vaddr: Option<u64> = None;
+            let mut strtab_size: Option<usize> = None;
+            let mut needed_offsets: Vec<u64> = Vec::new();
+
+            let mut cursor = dyn_start;
+            while cursor + 16 <= dyn_end {
+                let d_tag = read_i64_le(bytes, cursor)?;
+                let d_val = read_u64_le(bytes, cursor + 8)?;
+                cursor += 16;
+
+                if d_tag == DT_NULL {
+                    break;
+                }
+                if d_tag == DT_NEEDED {
+                    needed_offsets.push(d_val);
+                    continue;
+                }
+                if d_tag == DT_STRTAB {
+                    strtab_vaddr = Some(d_val);
+                    continue;
+                }
+                if d_tag == DT_STRSZ {
+                    strtab_size = usize::try_from(d_val).ok();
+                }
+            }
+
+            if let (Some(strtab_addr), Some(size)) = (strtab_vaddr, strtab_size) {
+                if let Some(strtab_off) = vaddr_to_file_offset(program_headers.as_slice(), strtab_addr) {
+                    let strtab_end = strtab_off.saturating_add(size).min(bytes.len());
+                    for needed in needed_offsets {
+                        let rel = usize::try_from(needed).ok()?;
+                        let start = strtab_off.checked_add(rel)?;
+                        if start >= strtab_end {
+                            continue;
+                        }
+
+                        let mut end = start;
+                        while end < strtab_end && bytes[end] != 0 {
+                            end += 1;
+                        }
+                        if end > start {
+                            needed_libraries.push(String::from_utf8_lossy(&bytes[start..end]).into_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let preferred_base = if e_type == ET_DYN {
+        0x0040_0000
+    } else {
+        entry_addr & !0xFFF
+    };
+
+    Some(BinaryMetadata {
+        entry: path_basename(path),
+        pie: e_type == ET_DYN,
+        preferred_base,
+        dynamic,
+        interpreter,
+        needed_libraries,
+        required_symbols: Vec::new(),
+    })
+}
+
 pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
     let text = saifs::read_text(path).ok()?;
     if text.starts_with("SAIOS_BIN_V1") {
@@ -424,7 +635,10 @@ pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
             required_symbols,
         });
     }
-    None
+
+    let handle = saifs::open(path).ok()?;
+    let bytes = handle.read().ok()?;
+    parse_elf_metadata(path, bytes.as_slice())
 }
 
 fn execute_entry(entry: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {

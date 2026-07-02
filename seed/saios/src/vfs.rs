@@ -851,10 +851,15 @@ pub fn ls(path: Option<&str>) -> Result<Vec<String>, &'static str> {
 }
 
 pub fn cat(path: &str) -> Result<String, &'static str> {
+    let bytes = read_path(path)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+pub fn read_path(path: &str) -> Result<Vec<u8>, &'static str> {
     let abs = with_vfs(|vfs| vfs.fs.normalized_path(path));
     if is_sys_path(&abs) {
         let lines = object_manager::sys_read(&abs).ok_or("not a file")?;
-        return Ok(lines.join("\n"));
+        return Ok(lines.join("\n").into_bytes());
     }
 
     let fd = open(path, OpenOptions::read_only())?;
@@ -862,7 +867,7 @@ pub fn cat(path: &str) -> Result<String, &'static str> {
     let close_result = close(fd);
     let bytes = read_result?;
     close_result?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    Ok(bytes)
 }
 
 pub fn rm(path: &str) -> Result<(), &'static str> {
