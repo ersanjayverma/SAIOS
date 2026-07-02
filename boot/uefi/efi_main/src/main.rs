@@ -255,6 +255,12 @@ fn main() -> Status {
     )
     .expect("Failed to allocate stable memory-map storage");
 
+    let pre_exit_memorymap =
+        efi_main::memorymap::initialize().expect("Failed to capture pre-exit memory map");
+    unsafe {
+        (*boot_info_ptr).memorymap = pre_exit_memorymap;
+    }
+
     let entry = loader
         .entry_point
         .wrapping_add((base.as_ptr() as u64).wrapping_sub(aligned_start));
@@ -288,25 +294,27 @@ fn main() -> Status {
         }
     }
 
-    let dst = entries_storage.as_ptr() as *mut efi_main::memorymap::MemoryRegion;
-    for (idx, desc) in final_uefi_map.entries().enumerate() {
-        let region = efi_main::memorymap::MemoryRegion {
-            base: desc.phys_start,
-            length: desc.page_count * 4096,
-            region_type: efi_main::memorymap::convert_memory_type(desc.ty),
-            attributes: desc.att.bits(),
-        };
+    if final_entry_count != 0 {
+        let dst = entries_storage.as_ptr() as *mut efi_main::memorymap::MemoryRegion;
+        for (idx, desc) in final_uefi_map.entries().enumerate() {
+            let region = efi_main::memorymap::MemoryRegion {
+                base: desc.phys_start,
+                length: desc.page_count * 4096,
+                region_type: efi_main::memorymap::convert_memory_type(desc.ty),
+                attributes: desc.att.bits(),
+            };
+
+            unsafe {
+                core::ptr::write(dst.add(idx), region);
+            }
+        }
 
         unsafe {
-            core::ptr::write(dst.add(idx), region);
+            (*boot_info_ptr).memorymap = efi_main::memorymap::MemoryMapInfo {
+                entries: dst,
+                entry_count: final_entry_count,
+            };
         }
-    }
-
-    unsafe {
-        (*boot_info_ptr).memorymap = efi_main::memorymap::MemoryMapInfo {
-            entries: dst,
-            entry_count: final_entry_count,
-        };
     }
 
     unsafe {
