@@ -155,6 +155,8 @@ impl<B: ConsoleBackend> Console<B> {
     }
 
     fn newline(&mut self) {
+        // Backends like serial rely on explicit newline bytes; cursor moves alone are not visible.
+        self.backend.put_char('\n');
         self.cursor.x = 0;
         self.cursor.y += 1;
 
