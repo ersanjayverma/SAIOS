@@ -4,6 +4,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::time::Duration;
+use uefi::mem::memory_map::MemoryMap;
 use uefi::boot::{AllocateType, EventType, MemoryType, TimerTrigger, Tpl};
 use uefi::println;
 use uefi::proto::loaded_image::LoadedImage;
@@ -274,26 +275,6 @@ fn main() -> Status {
     )
     .expect("Failed to allocate stable memory-map storage");
 
-    // ── Capture the memory map AFTER all LOADER_DATA allocations ─────
-    //
-    // Every allocation (kernel, stack, boot-info, entries storage) is
-    // now visible in the memory map so the PMM can reserve them.
-    let mut mm_info = efi_main::memorymap::initialize().unwrap();
-
-    if mm_info.entry_count > 0 && !mm_info.entries.is_null() && mm_info.entry_count <= MAX_ENTRIES {
-        // Copy every entry out of the transient static buffer into the
-        // pre-allocated stable LOADER_DATA buffer.
-        unsafe {
-            let src = mm_info.entries;
-            let dst = entries_storage.as_ptr() as *mut efi_main::memorymap::MemoryRegion;
-            core::ptr::copy_nonoverlapping(src, dst, mm_info.entry_count);
-            mm_info.entries = dst;
-        }
-    }
-
-    unsafe {
-        (*boot_info_ptr).memorymap = mm_info;
-    }
     let entry = loader
         .entry_point
         .wrapping_add((base.as_ptr() as u64).wrapping_sub(aligned_start));
@@ -318,7 +299,35 @@ fn main() -> Status {
             *p.add(7),
         );
     }
-    let _final_uefi_map = unsafe { boot::exit_boot_services(None) };
+
+    let final_uefi_map = unsafe { boot::exit_boot_services(None) };
+    let final_entry_count = final_uefi_map.len();
+    if final_entry_count > MAX_ENTRIES {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    let dst = entries_storage.as_ptr() as *mut efi_main::memorymap::MemoryRegion;
+    for (idx, desc) in final_uefi_map.entries().enumerate() {
+        let region = efi_main::memorymap::MemoryRegion {
+            base: desc.phys_start,
+            length: desc.page_count * 4096,
+            region_type: efi_main::memorymap::convert_memory_type(desc.ty),
+            attributes: desc.att.bits(),
+        };
+
+        unsafe {
+            core::ptr::write(dst.add(idx), region);
+        }
+    }
+
+    unsafe {
+        (*boot_info_ptr).memorymap = efi_main::memorymap::MemoryMapInfo {
+            entries: dst,
+            entry_count: final_entry_count,
+        };
+    }
 
     unsafe {
         asm!(
