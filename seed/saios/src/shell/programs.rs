@@ -10,6 +10,13 @@ use alloc::string::{String, ToString};
 
 type ProgramResult = Result<i32, &'static str>;
 
+#[derive(Clone, Debug)]
+pub struct BinaryMetadata {
+    pub entry: String,
+    pub pie: bool,
+    pub preferred_base: u64,
+}
+
 fn hello_program(args: &[&str], env: &[(String, String)]) -> i32 {
     console::println!("Hello from user space!");
     if !args.is_empty() {
@@ -17,34 +24,6 @@ fn hello_program(args: &[&str], env: &[(String, String)]) -> i32 {
     }
     console::println!("env vars: {}", env.len());
     0
-}
-
-fn true_program(_args: &[&str], _env: &[(String, String)]) -> i32 {
-    0
-}
-
-fn false_program(_args: &[&str], _env: &[(String, String)]) -> i32 {
-    1
-}
-
-fn argc_program(args: &[&str], _env: &[(String, String)]) -> i32 {
-    console::println!("argc={}", args.len());
-    args.len() as i32
-}
-
-fn env_program(_args: &[&str], env: &[(String, String)]) -> i32 {
-    for (k, v) in env {
-        console::println!("{}={}", k, v);
-    }
-    0
-}
-
-fn fail_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
-    let code = args
-        .first()
-        .and_then(|raw| raw.parse::<i32>().ok())
-        .unwrap_or(1);
-    Ok(code)
 }
 
 fn resolve_relative_path(path: &str) -> String {
@@ -338,14 +317,75 @@ fn stress_program(_args: &[&str], _env: &[(String, String)]) -> i32 {
     0
 }
 
-pub fn execute(name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
-    match name {
+fn shell_program(_args: &[&str], _env: &[(String, String)]) -> i32 {
+    console::println!("shell binary: interactive mode is provided by SISH service");
+    0
+}
+
+fn editor_program(args: &[&str], _env: &[(String, String)]) -> i32 {
+    let target = args.first().copied().unwrap_or("untitled.txt");
+    console::println!("editor binary: interactive editor not wired yet");
+    console::println!("target: {}", target);
+    0
+}
+
+fn parse_u64_value(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        return u64::from_str_radix(hex, 16).ok();
+    }
+    trimmed.parse::<u64>().ok()
+}
+
+pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
+    let text = saifs::read_text(path).ok()?;
+    if text.starts_with("SAIOS_BIN_V1") {
+        let mut entry: Option<String> = None;
+        let mut pie = false;
+        let mut preferred_base = 0x0040_0000u64;
+
+        for line in text.lines() {
+            if let Some(raw_entry) = line.strip_prefix("entry=") {
+                let trimmed = raw_entry.trim();
+                if !trimmed.is_empty() {
+                    entry = Some(trimmed.to_string());
+                }
+                continue;
+            }
+
+            if let Some(raw) = line.strip_prefix("type=") {
+                if raw.trim().eq_ignore_ascii_case("pie") {
+                    pie = true;
+                }
+                continue;
+            }
+
+            if let Some(raw) = line.strip_prefix("preferred_base=") {
+                if let Some(base) = parse_u64_value(raw) {
+                    preferred_base = base;
+                }
+            }
+        }
+
+        let entry = entry?;
+        return Some(BinaryMetadata {
+            entry,
+            pie,
+            preferred_base,
+        });
+    }
+    None
+}
+
+fn execute_entry(entry: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
+    match entry {
         n if n.eq_ignore_ascii_case("hello") => Ok(hello_program(args, env)),
-        n if n.eq_ignore_ascii_case("true") => Ok(true_program(args, env)),
-        n if n.eq_ignore_ascii_case("false") => Ok(false_program(args, env)),
-        n if n.eq_ignore_ascii_case("argc") => Ok(argc_program(args, env)),
-        n if n.eq_ignore_ascii_case("env") => Ok(env_program(args, env)),
-        n if n.eq_ignore_ascii_case("fail") => fail_program(args, env),
+        n if n.eq_ignore_ascii_case("calc") => calc_program(args, env),
+        n if n.eq_ignore_ascii_case("editor") => Ok(editor_program(args, env)),
+        n if n.eq_ignore_ascii_case("shell") => Ok(shell_program(args, env)),
         n if n.eq_ignore_ascii_case("ls") => ls_program(args, env),
         n if n.eq_ignore_ascii_case("cat") => cat_program(args, env),
         n if n.eq_ignore_ascii_case("mkdir") => mkdir_program(args, env),
@@ -356,17 +396,40 @@ pub fn execute(name: &str, args: &[&str], env: &[(String, String)]) -> ProgramRe
         n if n.eq_ignore_ascii_case("kill") => kill_program(args, env),
         n if n.eq_ignore_ascii_case("top") => Ok(top_program(args, env)),
         n if n.eq_ignore_ascii_case("uname") => Ok(uname_program(args, env)),
-        n if n.eq_ignore_ascii_case("calc") => calc_program(args, env),
-        n if n.eq_ignore_ascii_case("stress") => Ok(stress_program(args, env)),
         n if n.eq_ignore_ascii_case("cc") => cc_program(args, env),
+        n if n.eq_ignore_ascii_case("stress") => Ok(stress_program(args, env)),
         _ => Err("program not found"),
     }
 }
 
 pub fn execute_path(path: &str, name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
-    match execute(name, args, env) {
-        Ok(code) => Ok(code),
-        Err(_) => execute_compiled_stub(path, args),
+    if compiled_stub_message(path).is_some() {
+        return execute_compiled_stub(path, args);
     }
+
+    let entry = binary_metadata(path)
+        .map(|m| m.entry)
+        .unwrap_or_else(|| name.to_string());
+    execute_entry(entry.as_str(), args, env)
+}
+
+pub fn spawn(name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
+    execute_entry(name, args, env)
+}
+
+pub fn exit(code: i32) -> ProgramResult {
+    Ok(code)
+}
+
+pub fn wait(code: i32) -> ProgramResult {
+    Ok(code)
+}
+
+pub fn exec(name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
+    execute_entry(name, args, env)
+}
+
+pub fn supports_binary(path: &str) -> bool {
+    binary_metadata(path).is_some() || compiled_stub_message(path).is_some()
 }
 

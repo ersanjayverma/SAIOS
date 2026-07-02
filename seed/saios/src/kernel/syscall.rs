@@ -1,5 +1,6 @@
 use core::fmt;
 
+use crate::kernel::process;
 use crate::timer;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -28,9 +29,10 @@ pub enum SyscallNumber {
     Exit = 8,
     Sleep = 9,
     GetPid = 10,
+    Spawn = 11,
 }
 
-const SUPPORTED: [SyscallNumber; 10] = [
+const SUPPORTED: [SyscallNumber; 11] = [
     SyscallNumber::Open,
     SyscallNumber::Read,
     SyscallNumber::Write,
@@ -41,6 +43,7 @@ const SUPPORTED: [SyscallNumber; 10] = [
     SyscallNumber::Exit,
     SyscallNumber::Sleep,
     SyscallNumber::GetPid,
+    SyscallNumber::Spawn,
 ];
 
 impl SyscallNumber {
@@ -56,6 +59,7 @@ impl SyscallNumber {
             SyscallNumber::Exit => "exit",
             SyscallNumber::Sleep => "sleep",
             SyscallNumber::GetPid => "getpid",
+            SyscallNumber::Spawn => "spawn",
         }
     }
 
@@ -71,6 +75,7 @@ impl SyscallNumber {
             8 => Some(SyscallNumber::Exit),
             9 => Some(SyscallNumber::Sleep),
             10 => Some(SyscallNumber::GetPid),
+            11 => Some(SyscallNumber::Spawn),
             _ => None,
         }
     }
@@ -96,9 +101,29 @@ impl SyscallNumber {
             Some(SyscallNumber::Sleep)
         } else if name.eq_ignore_ascii_case("getpid") {
             Some(SyscallNumber::GetPid)
+        } else if name.eq_ignore_ascii_case("spawn") {
+            Some(SyscallNumber::Spawn)
         } else {
             None
         }
+    }
+}
+
+fn selector_to_program(selector: u64) -> Option<&'static str> {
+    match selector {
+        1 => Some("hello"),
+        2 => Some("calc"),
+        3 => Some("editor"),
+        4 => Some("shell"),
+        5 => Some("ls"),
+        6 => Some("cat"),
+        7 => Some("cp"),
+        8 => Some("mv"),
+        9 => Some("rm"),
+        10 => Some("mkdir"),
+        11 => Some("ps"),
+        12 => Some("kill"),
+        _ => None,
     }
 }
 
@@ -156,13 +181,35 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             timer::sleep(ms);
             Ok(0)
         }
-        SyscallNumber::Exit => Ok(req.args[0]),
+        SyscallNumber::Exit => {
+            let code = req.args[0] as i32;
+            process::exit(ctx.pid, code).map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(code as u64)
+        }
+        SyscallNumber::Wait => {
+            let pid = req.args[0];
+            if pid == 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            let code = process::wait(pid).map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(code as u64)
+        }
+        SyscallNumber::Exec => {
+            let selector = req.args[0];
+            let name = selector_to_program(selector).ok_or(SyscallError::InvalidArgument)?;
+            let code = process::exec(name, &[], &[]).map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(code as u64)
+        }
+        SyscallNumber::Spawn => {
+            let selector = req.args[0];
+            let name = selector_to_program(selector).ok_or(SyscallError::InvalidArgument)?;
+            let pid = process::spawn(name, &[], &[]).map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(pid)
+        }
         SyscallNumber::Open
         | SyscallNumber::Read
         | SyscallNumber::Write
         | SyscallNumber::Close
-        | SyscallNumber::Fork
-        | SyscallNumber::Exec
-        | SyscallNumber::Wait => Err(SyscallError::Unimplemented),
+        | SyscallNumber::Fork => Err(SyscallError::Unimplemented),
     }
 }

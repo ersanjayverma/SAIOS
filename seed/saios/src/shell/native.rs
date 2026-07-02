@@ -124,9 +124,9 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_panic,
     }));
     registry.register(Box::new(StaticCommand {
-        name: "run",
-        description: "Run a demo program",
-        handler: cmd_run,
+        name: "spawn",
+        description: "Spawn program and print pid",
+        handler: cmd_spawn,
     }));
     registry.register(Box::new(StaticCommand {
         name: "exec",
@@ -640,14 +640,11 @@ fn cmd_panic(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     panic!("panic command invoked")
 }
 
-fn cmd_run(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let program = args.first().copied().ok_or("run: missing program name")?;
+fn cmd_spawn(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let program = args.first().copied().ok_or("spawn: missing program name")?;
     let program_args = &args[1..];
-    let exit_code = process::exec(program, program_args, ctx.session.environment.as_slice())?;
-    ctx.session.last_exit_code = exit_code;
-    if exit_code != 0 {
-        console::println!("exit {}", exit_code);
-    }
+    let pid = process::spawn(program, program_args, ctx.session.environment.as_slice())?;
+    console::println!("spawned pid={}", pid);
     Ok(())
 }
 

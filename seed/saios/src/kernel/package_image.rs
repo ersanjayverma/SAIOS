@@ -20,7 +20,8 @@ const ROOT_DIRS: &[&str] = &[
 const BIN_ENTRIES: &[&str] = &[
     "hello",
     "calc",
-    "stress",
+    "editor",
+    "shell",
     "ls",
     "cat",
     "cp",
@@ -31,6 +32,7 @@ const BIN_ENTRIES: &[&str] = &[
     "kill",
     "top",
     "uname",
+    "stress",
     "cc",
 ];
 
@@ -83,15 +85,33 @@ fn write_manifest() -> Result<(), &'static str> {
     vfs::write_path(MANIFEST_PATH, text.as_bytes())
 }
 
+fn write_binary(path: &str, entry: &str) -> Result<(), &'static str> {
+    let mut text = alloc::string::String::new();
+    text.push_str("SAIOS_BIN_V1\n");
+    text.push_str("entry=");
+    text.push_str(entry);
+    text.push('\n');
+    text.push_str("type=pie\n");
+    text.push_str("preferred_base=0x00400000\n");
+    vfs::write_path(path, text.as_bytes())
+}
+
+fn seed_binaries() -> Result<(), &'static str> {
+    for b in BIN_ENTRIES {
+        let path = alloc::format!("/bin/{}", b);
+        ensure_file(path.as_str())?;
+        write_binary(path.as_str(), b)?;
+    }
+
+    Ok(())
+}
+
 pub fn mount_default() -> Result<(), &'static str> {
     for d in ROOT_DIRS {
         ensure_dir(d)?;
     }
 
-    for b in BIN_ENTRIES {
-        let path = alloc::format!("/bin/{}", b);
-        ensure_file(path.as_str())?;
-    }
+    seed_binaries()?;
 
     ensure_file("/etc/profile")?;
     ensure_file("/etc/hostname")?;

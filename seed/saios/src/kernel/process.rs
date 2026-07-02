@@ -8,6 +8,7 @@ use crate::kernel::crt;
 use crate::kernel::event::{self, EventKind};
 use crate::saifs;
 use crate::shell::programs;
+use crate::timer;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum ProcessState {
@@ -23,6 +24,9 @@ pub struct ProcessRecord {
     pub state: ProcessState,
     pub thread_count: usize,
     pub exit_code: Option<i32>,
+    pub image_base: u64,
+    pub load_bias: u64,
+    pub pie_enabled: bool,
 }
 
 struct ProcessManager {
@@ -53,6 +57,9 @@ impl ProcessManager {
             state: ProcessState::Running,
             thread_count: 1,
             exit_code: None,
+            image_base: 0,
+            load_bias: 0,
+            pie_enabled: false,
         });
         pid
     }
@@ -65,6 +72,30 @@ impl ProcessManager {
             .ok_or("process: pid not found")?;
         rec.state = ProcessState::Exited;
         rec.exit_code = Some(code);
+        Ok(())
+    }
+
+    fn set_waiting(&mut self, pid: u64) -> Result<(), &'static str> {
+        let rec = self
+            .records
+            .iter_mut()
+            .find(|r| r.pid == pid)
+            .ok_or("process: pid not found")?;
+        if rec.state != ProcessState::Exited {
+            rec.state = ProcessState::Waiting;
+        }
+        Ok(())
+    }
+
+    fn set_running(&mut self, pid: u64) -> Result<(), &'static str> {
+        let rec = self
+            .records
+            .iter_mut()
+            .find(|r| r.pid == pid)
+            .ok_or("process: pid not found")?;
+        if rec.state != ProcessState::Exited {
+            rec.state = ProcessState::Running;
+        }
         Ok(())
     }
 }
@@ -132,6 +163,9 @@ pub fn start_pid1(path: &str) -> u64 {
             state: ProcessState::Running,
             thread_count: 1,
             exit_code: None,
+            image_base: 0,
+            load_bias: 0,
+            pie_enabled: false,
         });
         m.init_pid = Some(pid);
         event::publish(
@@ -192,14 +226,88 @@ pub fn kill(pid: u64) -> Result<(), &'static str> {
 }
 
 pub fn wait(pid: u64) -> Result<i32, &'static str> {
-    with_manager(|m| {
+    with_manager_mut(|m| {
+        let _ = m.set_waiting(pid);
         let rec = m
             .records
             .iter()
             .find(|r| r.pid == pid)
             .ok_or("wait: pid not found")?;
+        if rec.state != ProcessState::Exited {
+            return Err("wait: process still running");
+        }
         Ok(rec.exit_code.unwrap_or(0))
     })
+}
+
+pub fn exit(pid: u64, code: i32) -> Result<(), &'static str> {
+    with_manager_mut(|m| {
+        m.exit(pid, code)?;
+        event::publish(
+            EventKind::ProcessStopped,
+            "process",
+            alloc::format!("pid={} exit={}", pid, code).as_str(),
+        );
+        Ok(())
+    })
+}
+
+pub fn spawn(name: &str, args: &[&str], env: &[(String, String)]) -> Result<u64, &'static str> {
+    let resolved = resolve_program_name(name)?;
+    let program_name = resolved.rsplit('/').next().unwrap_or(resolved.as_str());
+    let startup = crt::prepare_startup_block(program_name, args, env);
+    let metadata = programs::binary_metadata(resolved.as_str());
+
+    let pid = with_manager_mut(|m| m.spawn(resolved.as_str()));
+    let (image_base, load_bias, pie_enabled) = if let Some(meta) = metadata {
+        if meta.pie {
+            let (base, bias) = compute_pie_layout(pid, meta.preferred_base);
+            (base, bias, true)
+        } else {
+            (meta.preferred_base, 0, false)
+        }
+    } else {
+        (0, 0, false)
+    };
+
+    with_manager_mut(|m| {
+        if let Some(rec) = m.records.iter_mut().find(|r| r.pid == pid) {
+            rec.image_base = image_base;
+            rec.load_bias = load_bias;
+            rec.pie_enabled = pie_enabled;
+        }
+    });
+
+    event::publish(
+        EventKind::ProcessStarted,
+        "process",
+        alloc::format!(
+            "pid={} {} argc={} envc={} pie={} base=0x{:x} bias=0x{:x}",
+            pid,
+            resolved,
+            startup.argc,
+            startup.envp.len(),
+            pie_enabled,
+            image_base,
+            load_bias
+        )
+        .as_str(),
+    );
+
+    let run = programs::execute_path(resolved.as_str(), program_name, args, env);
+    let exit_code = run.unwrap_or(127);
+
+    with_manager_mut(|m| {
+        let _ = m.set_running(pid);
+        let _ = m.exit(pid, exit_code);
+    });
+    event::publish(
+        EventKind::ProcessStopped,
+        "process",
+        alloc::format!("pid={} exit={}", pid, exit_code).as_str(),
+    );
+
+    Ok(pid)
 }
 
 fn candidate_program_paths(name: &str) -> Vec<String> {
@@ -224,36 +332,16 @@ fn resolve_program_name(name: &str) -> Result<String, &'static str> {
     Err("exec: program not found")
 }
 
+fn compute_pie_layout(pid: u64, preferred_base: u64) -> (u64, u64) {
+    let aslr_window = 0x0100_0000u64;
+    let granularity = 0x1000u64;
+    let entropy = timer::ticks() ^ pid.wrapping_mul(0x9E37_79B9_7F4A_7C15u64);
+    let offset = (entropy % aslr_window) & !(granularity - 1);
+    let base = preferred_base.saturating_add(offset);
+    (base, offset)
+}
+
 pub fn exec(name: &str, args: &[&str], env: &[(String, String)]) -> Result<i32, &'static str> {
-    let resolved = resolve_program_name(name)?;
-    let program_name = resolved.rsplit('/').next().unwrap_or(resolved.as_str());
-    let startup = crt::prepare_startup_block(program_name, args, env);
-
-    let pid = with_manager_mut(|m| m.spawn(resolved.as_str()));
-    event::publish(
-        EventKind::ProcessStarted,
-        "process",
-        alloc::format!(
-            "pid={} {} argc={} envc={}",
-            pid,
-            resolved,
-            startup.argc,
-            startup.envp.len()
-        )
-        .as_str(),
-    );
-
-    let run = programs::execute_path(resolved.as_str(), program_name, args, env);
-
-    let exit_code = run.unwrap_or(127);
-    with_manager_mut(|m| {
-        let _ = m.exit(pid, exit_code);
-    });
-    event::publish(
-        EventKind::ProcessStopped,
-        "process",
-        alloc::format!("pid={} exit={}", pid, exit_code).as_str(),
-    );
-
-    Ok(exit_code)
+    let pid = spawn(name, args, env)?;
+    wait(pid)
 }
