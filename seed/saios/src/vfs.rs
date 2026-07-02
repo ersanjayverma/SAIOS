@@ -588,6 +588,7 @@ fn seed_standard_tree(fs: &mut TmpFs) {
         "/bin",
         "/usr",
         "/etc",
+        "/mnt",
     ];
     for path in roots {
         let _ = fs.mkdir(path);
@@ -722,6 +723,24 @@ pub fn mount(path: &str, fs_name: &str, read_only: bool) -> Result<(), &'static 
 
 pub fn mounts() -> Vec<MountRecord> {
     with_vfs(|vfs| vfs.mounts.clone())
+}
+
+/// Remove a mount record registered at `path`.  The root mount (`/`) cannot
+/// be unmounted.  The directory node itself is left in place.
+pub fn umount(path: &str) -> Result<(), &'static str> {
+    with_vfs(|vfs| {
+        let abs = vfs.fs.normalized_path(path);
+        if abs == "/" {
+            return Err("cannot unmount root filesystem");
+        }
+        let before = vfs.mounts.len();
+        vfs.mounts.retain(|m| m.path != abs);
+        if vfs.mounts.len() == before {
+            return Err("not mounted");
+        }
+        object_manager::log_event(&format!("Unmounted {}", abs));
+        Ok(())
+    })
 }
 
 pub fn open(path: &str, options: OpenOptions) -> Result<VfsFd, &'static str> {

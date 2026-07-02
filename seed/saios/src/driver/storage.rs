@@ -43,6 +43,19 @@ impl FilesystemKind {
             FilesystemKind::Fat128 => "fat128",
         }
     }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "tmpfs"  => Some(Self::TmpFs),
+            "ext4"   => Some(Self::Ext4),
+            "ntfs"   => Some(Self::Ntfs),
+            "fat16"  => Some(Self::Fat16),
+            "fat32"  => Some(Self::Fat32),
+            "fat64"  => Some(Self::Fat64),
+            "fat128" => Some(Self::Fat128),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -389,4 +402,83 @@ pub fn volumes() -> Vec<DetectedVolume> {
 
 pub fn probe_image(image: &[u8]) -> Option<FilesystemKind> {
     probe_filesystem(image).map(|p| p.fs)
+}
+
+/// Return the volume with the given name, or `None` if it does not exist.
+pub fn find_volume(name: &str) -> Option<DetectedVolume> {
+    init();
+    with_state(|state| {
+        state
+            .volumes
+            .iter()
+            .find(|v| v.name.eq_ignore_ascii_case(name))
+            .cloned()
+    })
+}
+
+/// Record that volume `name` has been mounted at `path`.
+/// Returns an error if the volume does not exist or is already mounted
+/// elsewhere.
+pub fn mount_volume(name: &str, path: &str, read_only: bool) -> Result<(), &'static str> {
+    init();
+    with_state_mut(|state| {
+        let vol = state
+            .volumes
+            .iter_mut()
+            .find(|v| v.name.eq_ignore_ascii_case(name))
+            .ok_or("storage: volume not found")?;
+
+        if let Some(ref existing) = vol.mounted_at {
+            if existing == path {
+                return Err("storage: volume already mounted at this path");
+            }
+            return Err("storage: volume already mounted at a different path");
+        }
+
+        if read_only && !vol.writable {
+            // Already read-only media — fine.
+        } else if read_only {
+            // Honour the caller's explicit ro flag.
+        }
+
+        vol.mounted_at = Some(path.to_string());
+        Ok(())
+    })
+}
+
+/// Clear the `mounted_at` marker for whichever volume is mounted at `path`.
+/// Returns an error if no volume has that mount path.
+pub fn umount_volume(path: &str) -> Result<(), &'static str> {
+    init();
+    with_state_mut(|state| {
+        let vol = state
+            .volumes
+            .iter_mut()
+            .find(|v| v.mounted_at.as_deref() == Some(path))
+            .ok_or("storage: no volume mounted at that path")?;
+        vol.mounted_at = None;
+        Ok(())
+    })
+}
+
+/// Change the recorded filesystem type of a volume.  This models a format
+/// operation: the volume's FS label is updated and the volume is cleared of
+/// any existing mount binding.  Returns an error if the volume is currently
+/// mounted or does not exist.
+pub fn format_volume(name: &str, fs: FilesystemKind) -> Result<(), &'static str> {
+    init();
+    with_state_mut(|state| {
+        let vol = state
+            .volumes
+            .iter_mut()
+            .find(|v| v.name.eq_ignore_ascii_case(name))
+            .ok_or("storage: volume not found")?;
+
+        if vol.mounted_at.is_some() {
+            return Err("storage: volume is currently mounted; unmount before formatting");
+        }
+
+        vol.filesystem = fs;
+        Ok(())
+    })
 }

@@ -22,6 +22,8 @@ use crate::pci;
 use crate::pmm;
 use crate::saifs;
 use crate::scheduler;
+use crate::vfs;
+use crate::driver::storage as disk;
 use crate::shell::command::{ShellResult, StaticCommand};
 use crate::shell::registry::CommandRegistry;
 use crate::shell::session::CommandContext;
@@ -340,8 +342,13 @@ pub fn register(registry: &mut CommandRegistry) {
     }));
     registry.register(Box::new(StaticCommand {
         name: "mount",
-        description: "List current mounts",
-        handler: cmd_mounts,
+        description: "Mount storage volume or list mounts; see 'mount help'",
+        handler: cmd_mount,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "umount",
+        description: "Unmount a mounted path",
+        handler: cmd_umount,
     }));
     registry.register(Box::new(StaticCommand {
         name: "graph",
@@ -1676,15 +1683,114 @@ fn cmd_events(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
-fn cmd_mounts(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
-    for mount in saifs::mounts() {
-        console::println!(
-            "{} -> provider={} readonly={}",
-            mount.path,
-            mount.provider.0,
-            mount.read_only
-        );
+fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let sub = args.first().copied().unwrap_or("list");
+
+    match sub {
+        // ── mount list (default) ────────────────────────────────────────────
+        "list" | "ls" => {
+            // Show VFS-level mounts first
+            let vfs_mounts = vfs::mounts();
+            console::println!("── VFS Mounts ──────────────────────────────────────────────────");
+            console::println!("  {:<20}  {:<10}  {}", "PATH", "FS", "FLAGS");
+            for m in &vfs_mounts {
+                let flags = if m.read_only { "ro" } else { "rw" };
+                console::println!("  {:<20}  {:<10}  {}", m.path, m.fs_name, flags);
+            }
+            if vfs_mounts.is_empty() {
+                console::println!("  (none)");
+            }
+
+            // Show all storage volumes and their mount state
+            let volumes = disk::volumes();
+            console::println!("── Storage Volumes ─────────────────────────────────────────────");
+            console::println!("  {:<10}  {:<8}  {:>8}  {:<10}  {}",
+                "NAME", "FS", "SIZE(MB)", "BACKING", "MOUNTED AT");
+            for v in &volumes {
+                let size_mb = v.total_bytes / (1024 * 1024);
+                let mounted = v.mounted_at.as_deref().unwrap_or("—");
+                console::println!("  {:<10}  {:<8}  {:>8}  {:<10}  {}",
+                    v.name, v.filesystem.as_str(), size_mb, v.backing, mounted);
+            }
+            if volumes.is_empty() {
+                console::println!("  (no volumes detected)");
+            }
+            Ok(())
+        }
+
+        // ── mount scan ──────────────────────────────────────────────────────
+        "scan" => {
+            disk::rescan();
+            let count = disk::volumes().len();
+            console::println!("mount: rescan complete — {} volume(s) detected", count);
+            Ok(())
+        }
+
+        // ── mount help ──────────────────────────────────────────────────────
+        "help" => {
+            console::println!("mount                         List mounts and storage volumes");
+            console::println!("mount list                    Same as above");
+            console::println!("mount scan                    Rescan PCI storage devices");
+            console::println!("mount <device> <path> [ro]    Mount a storage volume");
+            console::println!("umount <path>                 Unmount a mounted path");
+            console::println!("");
+            console::println!("Devices are shown by 'mount list'. Common names: disk0, disk1, ...");
+            console::println!("Mount points must exist as directories (e.g. /mnt/disk0).");
+            Ok(())
+        }
+
+        // ── mount <device> <mountpoint> [ro] ────────────────────────────────
+        device => {
+            let mountpoint = args
+                .get(1)
+                .copied()
+                .ok_or("mount: usage: mount <device> <path> [ro]")?;
+
+            // Reject paths that could escape or corrupt critical dirs
+            if mountpoint == "/" || mountpoint == "/boot" || mountpoint == "/bin" {
+                return Err("mount: cannot mount over a system directory");
+            }
+
+            let read_only = args.get(2).is_some_and(|f| f.eq_ignore_ascii_case("ro"));
+
+            // Confirm the volume exists and get its fs type
+            let vol = disk::find_volume(device)
+                .ok_or("mount: volume not found (run 'mount scan' to refresh)")?;
+
+            let fs_name = vol.filesystem.as_str();
+
+            // Auto-create the mount-point directory if it doesn't exist
+            let _ = vfs::mkdir(mountpoint);
+
+            // Register in VFS
+            vfs::mount(mountpoint, fs_name, read_only)?;
+
+            // Update storage driver's mounted_at marker
+            disk::mount_volume(device, mountpoint, read_only)?;
+
+            console::println!(
+                "mount: {} ({}) mounted at {} [{}]",
+                device, fs_name, mountpoint,
+                if read_only { "ro" } else { "rw" }
+            );
+            Ok(())
+        }
     }
+}
+
+fn cmd_umount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let mountpoint = args
+        .first()
+        .copied()
+        .ok_or("umount: usage: umount <path>")?;
+
+    // Remove from VFS (validates path and protects root)
+    vfs::umount(mountpoint)?;
+
+    // Clear the storage driver's mounted_at marker (best-effort)
+    let _ = disk::umount_volume(mountpoint);
+
+    console::println!("umount: {} unmounted", mountpoint);
     Ok(())
 }
 
