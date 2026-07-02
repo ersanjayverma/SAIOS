@@ -278,6 +278,12 @@ impl KernelService for ConsoleService {
     }
 
     fn start(&mut self) -> Result<(), &'static str> {
+        let _ = crate::kernel::driver::start("network");
+        let _ = crate::kernel::driver::start("loopback");
+        let _ = crate::kernel::driver::start("ethernet");
+        let _ = crate::kernel::driver::start("wifi");
+        let _ = crate::kernel::driver::start("dhcp");
+        let _ = crate::kernel::driver::start("dns");
         Ok(())
     }
 

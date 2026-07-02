@@ -166,6 +166,55 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
     } else if name.eq_ignore_ascii_case("pci") {
         pci::init();
         Ok(())
+    } else if name.eq_ignore_ascii_case("network") {
+        crate::driver::loopback::init();
+        crate::driver::ethernet::init();
+        crate::driver::wifi::init();
+        crate::driver::dns::init();
+        let _ = device::ensure_device("lo", "loopback", "network/loopback", device::DeviceStatus::Online);
+        Ok(())
+    } else if name.eq_ignore_ascii_case("loopback") {
+        crate::driver::loopback::init();
+        let _ = device::ensure_device("lo", "loopback", "network/loopback", device::DeviceStatus::Online);
+        Ok(())
+    } else if name.eq_ignore_ascii_case("ethernet") {
+        crate::driver::ethernet::rescan();
+        let interfaces = crate::driver::ethernet::interfaces();
+        for iface in interfaces {
+            let _ = device::ensure_device(
+                iface.name.as_str(),
+                "ethernet",
+                "network/ethernet",
+                if iface.link_up {
+                    device::DeviceStatus::Online
+                } else {
+                    device::DeviceStatus::Offline
+                },
+            );
+        }
+        Ok(())
+    } else if name.eq_ignore_ascii_case("wifi") {
+        crate::driver::wifi::rescan();
+        let interfaces = crate::driver::wifi::interfaces();
+        for iface in interfaces {
+            let _ = device::ensure_device(
+                iface.name.as_str(),
+                "wifi",
+                "network/wifi",
+                if iface.connected {
+                    device::DeviceStatus::Online
+                } else {
+                    device::DeviceStatus::Offline
+                },
+            );
+        }
+        Ok(())
+    } else if name.eq_ignore_ascii_case("dhcp") {
+        crate::driver::dhcp::renew_all();
+        Ok(())
+    } else if name.eq_ignore_ascii_case("dns") {
+        crate::driver::dns::init();
+        Ok(())
     } else if name.eq_ignore_ascii_case("storage")
         || name.eq_ignore_ascii_case("ext4")
         || name.eq_ignore_ascii_case("ntfs")
@@ -182,6 +231,9 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
 }
 
 fn run_stop_hook(_name: &str) -> Result<(), &'static str> {
+    if _name.eq_ignore_ascii_case("dhcp") {
+        crate::driver::dhcp::clear();
+    }
     Ok(())
 }
 
@@ -192,6 +244,14 @@ fn run_reload_hook(name: &str) -> Result<(), &'static str> {
     } else if name.eq_ignore_ascii_case("pci") {
         pci::init();
         Ok(())
+    } else if name.eq_ignore_ascii_case("network")
+        || name.eq_ignore_ascii_case("loopback")
+        || name.eq_ignore_ascii_case("ethernet")
+        || name.eq_ignore_ascii_case("wifi")
+        || name.eq_ignore_ascii_case("dhcp")
+        || name.eq_ignore_ascii_case("dns")
+    {
+        run_start_hook(name)
     } else if name.eq_ignore_ascii_case("storage")
         || name.eq_ignore_ascii_case("ext4")
         || name.eq_ignore_ascii_case("ntfs")
@@ -215,7 +275,12 @@ pub fn init() {
 
         // Drivers that have no early runtime registration site yet.
         let _ = r.ensure_driver("pci", "0.1.0", "SAIOS", &[], DriverStatus::Loaded);
-        let _ = r.ensure_driver("network", "0.1.0", "SAIOS", &["pci"], DriverStatus::Stopped);
+        let _ = r.ensure_driver("network", "0.1.0", "SAIOS", &["pci"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("loopback", "0.1.0", "SAIOS", &["network"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("ethernet", "0.1.0", "SAIOS", &["network", "pci"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("wifi", "0.1.0", "SAIOS", &["network", "pci"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("dhcp", "0.1.0", "SAIOS", &["network"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("dns", "0.1.0", "SAIOS", &["network", "dhcp"], DriverStatus::Loaded);
         let _ = r.ensure_driver("storage", "0.1.0", "SAIOS", &["pci"], DriverStatus::Loaded);
         let _ = r.ensure_driver("ext4", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
         let _ = r.ensure_driver("ntfs", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);

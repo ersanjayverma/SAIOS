@@ -3,6 +3,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::driver::{dhcp, ethernet, loopback, wifi};
 use crate::object_manager::{Health, ObjectStatus, ObjectType, Property, PropertyMap};
 use crate::som::{ObjectId, ProviderId};
 use crate::{pci, scheduler};
@@ -250,6 +251,189 @@ impl Provider for ProcessProvider {
                 }],
             });
         }
+        out
+    }
+}
+
+pub struct NetworkProvider {
+    id: ProviderId,
+}
+
+impl NetworkProvider {
+    pub const fn new(id: ProviderId) -> Self {
+        Self { id }
+    }
+}
+
+impl Provider for NetworkProvider {
+    fn id(&self) -> ProviderId {
+        self.id
+    }
+
+    fn name(&self) -> &str {
+        "network"
+    }
+
+    fn provider_type(&self) -> ProviderType {
+        ProviderType::Network
+    }
+
+    fn namespace(&self) -> &str {
+        "/network"
+    }
+
+    fn enumerate(&self) -> Vec<ProviderObject> {
+        let mut out = Vec::new();
+
+        for iface in loopback::interfaces() {
+            out.push(ProviderObject {
+                path: format!("network/{}", iface.name),
+                name: iface.name,
+                object_type: ObjectType::NetworkInterface,
+                status: ObjectStatus::Online,
+                health: Health::Healthy,
+                parent_path: Some("network".to_string()),
+                properties: vec![
+                    Property {
+                        key: "Driver".to_string(),
+                        value: "loopback".to_string(),
+                    },
+                    Property {
+                        key: "Type".to_string(),
+                        value: "loopback".to_string(),
+                    },
+                    Property {
+                        key: "IPv4".to_string(),
+                        value: iface.ipv4,
+                    },
+                    Property {
+                        key: "Netmask".to_string(),
+                        value: iface.netmask,
+                    },
+                ],
+            });
+        }
+
+        for iface in ethernet::interfaces() {
+            let lease = dhcp::lease_for(iface.name.as_str());
+            out.push(ProviderObject {
+                path: format!("network/{}", iface.name),
+                name: iface.name,
+                object_type: ObjectType::NetworkInterface,
+                status: if iface.link_up {
+                    ObjectStatus::Online
+                } else {
+                    ObjectStatus::Offline
+                },
+                health: if iface.link_up {
+                    Health::Healthy
+                } else {
+                    Health::Warning
+                },
+                parent_path: Some("network".to_string()),
+                properties: vec![
+                    Property {
+                        key: "Driver".to_string(),
+                        value: "ethernet".to_string(),
+                    },
+                    Property {
+                        key: "Type".to_string(),
+                        value: "ethernet".to_string(),
+                    },
+                    Property {
+                        key: "Backing".to_string(),
+                        value: iface.backing,
+                    },
+                    Property {
+                        key: "MAC".to_string(),
+                        value: format!(
+                            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                            iface.mac[0], iface.mac[1], iface.mac[2], iface.mac[3], iface.mac[4], iface.mac[5]
+                        ),
+                    },
+                    Property {
+                        key: "Link".to_string(),
+                        value: if iface.link_up { "up" } else { "down" }.to_string(),
+                    },
+                    Property {
+                        key: "SpeedMbps".to_string(),
+                        value: iface.speed_mbps.to_string(),
+                    },
+                    Property {
+                        key: "IPv4".to_string(),
+                        value: iface.ipv4.unwrap_or_else(|| "-".to_string()),
+                    },
+                    Property {
+                        key: "Gateway".to_string(),
+                        value: lease
+                            .as_ref()
+                            .map(|l| l.gateway.clone())
+                            .unwrap_or_else(|| "-".to_string()),
+                    },
+                ],
+            });
+        }
+
+        for iface in wifi::interfaces() {
+            let lease = dhcp::lease_for(iface.name.as_str());
+            out.push(ProviderObject {
+                path: format!("network/{}", iface.name),
+                name: iface.name,
+                object_type: ObjectType::NetworkInterface,
+                status: if iface.connected {
+                    ObjectStatus::Online
+                } else {
+                    ObjectStatus::Offline
+                },
+                health: if iface.connected {
+                    Health::Healthy
+                } else {
+                    Health::Warning
+                },
+                parent_path: Some("network".to_string()),
+                properties: vec![
+                    Property {
+                        key: "Driver".to_string(),
+                        value: "wifi".to_string(),
+                    },
+                    Property {
+                        key: "Type".to_string(),
+                        value: "wifi".to_string(),
+                    },
+                    Property {
+                        key: "Backing".to_string(),
+                        value: iface.backing,
+                    },
+                    Property {
+                        key: "SSID".to_string(),
+                        value: iface.ssid.unwrap_or_else(|| "-".to_string()),
+                    },
+                    Property {
+                        key: "SignalDbm".to_string(),
+                        value: iface.signal_dbm.to_string(),
+                    },
+                    Property {
+                        key: "MAC".to_string(),
+                        value: format!(
+                            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                            iface.mac[0], iface.mac[1], iface.mac[2], iface.mac[3], iface.mac[4], iface.mac[5]
+                        ),
+                    },
+                    Property {
+                        key: "IPv4".to_string(),
+                        value: iface.ipv4.unwrap_or_else(|| "-".to_string()),
+                    },
+                    Property {
+                        key: "Gateway".to_string(),
+                        value: lease
+                            .as_ref()
+                            .map(|l| l.gateway.clone())
+                            .unwrap_or_else(|| "-".to_string()),
+                    },
+                ],
+            });
+        }
+
         out
     }
 }

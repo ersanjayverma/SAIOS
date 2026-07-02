@@ -1,3 +1,8 @@
 pub mod console;
+pub mod dhcp;
+pub mod dns;
+pub mod ethernet;
+pub mod loopback;
 pub mod memory;
 pub mod storage;
+pub mod wifi;

@@ -9,7 +9,8 @@ use hal::arch::x86_64::sync::StaticCell;
 
 pub use crate::som::ObjectId;
 use crate::som::{HealthState, ObjectClass, ObjectFlags, ObjectHeader, ObjectState as SomObjectState, ProviderId};
-use crate::provider::{DeviceProvider, ProcessProvider, Provider, ProviderObject, ProviderType, StorageProvider};
+use crate::provider::{DeviceProvider, NetworkProvider, ProcessProvider, Provider, ProviderObject, ProviderType, StorageProvider};
+use crate::driver::{dhcp, dns, ethernet, loopback, wifi};
 use crate::{heap, pmm, scheduler, timer};
 
 #[path = "object_manager/tests.rs"]
@@ -488,6 +489,7 @@ impl ObjectManager {
         self.register_provider_instance(Box::new(StorageProvider::new(ProviderId(10))));
         self.register_provider_instance(Box::new(DeviceProvider::new(ProviderId(11))));
         self.register_provider_instance(Box::new(ProcessProvider::new(ProviderId(12))));
+        self.register_provider_instance(Box::new(NetworkProvider::new(ProviderId(13))));
 
         self.push_event("Object manager initialized");
     }
@@ -710,6 +712,44 @@ fn thread_state_name(state: scheduler::ThreadState) -> String {
         scheduler::ThreadState::Blocked => "Blocked".to_string(),
         scheduler::ThreadState::Dead => "Dead".to_string(),
     }
+}
+
+fn network_status_lines() -> Vec<String> {
+    let loopbacks = loopback::interfaces();
+    let eths = ethernet::interfaces();
+    let wlans = wifi::interfaces();
+    let leases = dhcp::leases();
+    let dns_cfg = dns::config();
+
+    let eth_up = eths.iter().filter(|i| i.link_up).count();
+    let wlan_up = wlans.iter().filter(|i| i.connected).count();
+    let online = eth_up + wlan_up > 0;
+
+    let mut out = Vec::new();
+    out.push("Network".to_string());
+    out.push(format!(
+        "Status{}",
+        if online { "Online" } else { "Offline" }
+    ));
+    out.push(format!("Loopback{}", loopbacks.len()));
+    out.push(format!("Ethernet{} up / {} total", eth_up, eths.len()));
+    out.push(format!("WiFi{} up / {} total", wlan_up, wlans.len()));
+    out.push(format!("DhcpLeases{}", leases.len()));
+
+    if let Some(first_dns) = dns_cfg.servers.first() {
+        out.push(format!("DnsPrimary{}", first_dns));
+    } else {
+        out.push("DnsPrimary-".to_string());
+    }
+
+    for lease in leases.into_iter().take(4) {
+        out.push(format!(
+            "Lease{} {} gw {}",
+            lease.interface, lease.address, lease.gateway
+        ));
+    }
+
+    out
 }
 
 pub fn init() {
@@ -1009,7 +1049,14 @@ pub fn health_summary() -> Vec<String> {
 
     let memory = memory_health();
     let storage = Health::Healthy;
-    let network = Health::Offline;
+    let network = if ethernet::interfaces().iter().any(|i| i.link_up)
+        || wifi::interfaces().iter().any(|i| i.connected)
+        || !loopback::interfaces().is_empty()
+    {
+        Health::Healthy
+    } else {
+        Health::Offline
+    };
     let drivers = Health::Healthy;
 
     vec![
@@ -1085,11 +1132,7 @@ pub fn sys_read(path: &str) -> Option<Vec<String>> {
     match path.as_str() {
         "sys/health" => Some(health_summary()),
         "sys/memory/stats" => inspect("memory").ok(),
-        "sys/network/status" => Some(vec![
-            "Network".to_string(),
-            "StatusOffline".to_string(),
-            "ReasonNo network driver active".to_string(),
-        ]),
+        "sys/network/status" => Some(network_status_lines()),
         "sys/scheduler/threads" => Some(
             scheduler::threads()
                 .into_iter()
