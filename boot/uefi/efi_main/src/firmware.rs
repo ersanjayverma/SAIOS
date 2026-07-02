@@ -1,6 +1,5 @@
 extern crate alloc;
 use alloc::string::String;
-use uefi::println;
 use uefi::system;
 use uefi::table::Revision;
 
@@ -29,11 +28,6 @@ pub fn initialize() -> uefi::Result<FirmwareInfo> {
 
     let firmware_revision = system::firmware_revision();
     let uefi_revision = system::uefi_revision();
-
-    // Print using the Display impl — proper UTF-8 conversion.
-    println!("Vendor   : {}", vendor_cstr16);
-    println!("Firmware : {}", firmware_revision);
-    println!("UEFI     : {}", uefi_revision);
 
     Ok(FirmwareInfo {
         vendor,

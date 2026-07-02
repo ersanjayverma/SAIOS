@@ -2,7 +2,6 @@ extern crate alloc;
 use core::cell::UnsafeCell;
 use uefi::boot::MemoryType as UefiMemoryType;
 use uefi::mem::memory_map::MemoryMap;
-use uefi::println;
 
 /// Maximum number of UEFI memory descriptors supported during boot.
 const MEMORY_REGION_CAPACITY: usize = 1024;
@@ -59,17 +58,12 @@ pub fn initialize() -> uefi::Result<MemoryMapInfo> {
     // storage) so those regions appear in the map.
     let memorymap = uefi::boot::memory_map(UefiMemoryType::LOADER_DATA)?;
 
-    // Debug: how many entries did the firmware give us?
-    let entry_count = memorymap.entries().len();
-    println!("Memory map: {} entries", entry_count);
-
     // SAFETY: single-threaded boot context.
     let regions = unsafe { &mut *MEMORY_REGIONS.0.get() };
     let mut count = 0;
 
     for entry in memorymap.entries() {
         if count >= MEMORY_REGION_CAPACITY {
-            println!("Memory map exceeds {} entries", MEMORY_REGION_CAPACITY);
             return Err(uefi::Error::from(uefi::Status::BUFFER_TOO_SMALL));
         }
 
@@ -81,8 +75,6 @@ pub fn initialize() -> uefi::Result<MemoryMapInfo> {
         };
         count += 1;
     }
-
-    println!("Memory map: {} entries copied", count);
 
     Ok(MemoryMapInfo {
         entries: regions.as_ptr(),

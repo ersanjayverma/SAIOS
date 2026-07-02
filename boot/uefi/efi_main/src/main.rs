@@ -20,14 +20,6 @@ fn main() -> Status {
     }
     let boot_info = efi_main::initialize_boot_info();
 
-    println!(
-        "FB: {}x{} stride={} bpp={} size={}",
-        boot_info.framebuffer.width,
-        boot_info.framebuffer.height,
-        boot_info.framebuffer.stride,
-        boot_info.framebuffer.bpp,
-        boot_info.framebuffer.size,
-    );
     let seed_path = "\\SAIOS\\seed.elf";
     let mut loader = match load_seed(seed_path) {
         Ok(loader) => loader,

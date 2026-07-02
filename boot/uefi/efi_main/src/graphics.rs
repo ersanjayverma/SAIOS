@@ -1,6 +1,5 @@
 use uefi::Identify;
 use uefi::boot::{self, SearchType};
-use uefi::println;
 use uefi::proto::console::gop::GraphicsOutput;
 use uefi::proto::console::gop::PixelFormat as UefiPixelFormat;
 #[repr(C)]
@@ -23,15 +22,6 @@ pub fn initialize() -> uefi::Result<FramebufferInfo> {
 
     let mode = gop.current_mode_info();
     let mut fb = gop.frame_buffer();
-
-    println!("Framebuffer base address: {:#x}", fb.as_mut_ptr() as u64);
-    println!("Framebuffer size: {} bytes", fb.size());
-    println!("Framebuffer stride: {} pixels", mode.stride());
-    println!(
-        "Framebuffer pixel format: {:?}",
-        convert_pixel_format(mode.pixel_format())
-    );
-    println!("{}x{}", mode.resolution().0, mode.resolution().1);
 
     let fb_info = FramebufferInfo {
         base: fb.as_mut_ptr() as u64,
