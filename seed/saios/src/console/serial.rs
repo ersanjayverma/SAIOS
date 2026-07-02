@@ -299,7 +299,14 @@ impl SerialConsole {
 
     #[inline(always)]
     pub fn emergency_put_char(c: char) {
-        hal::arch::x86_64::console::_print(format_args!("{}", c));
+        match c {
+            '\n' => {
+                hal::arch::x86_64::console::_print(format_args!("\r\n"));
+            }
+            _ => {
+                hal::arch::x86_64::console::_print(format_args!("{}", c));
+            }
+        }
     }
 
     pub fn emergency_write_str(s: &str) {
@@ -315,7 +322,15 @@ impl SerialConsole {
 
 impl ConsoleBackend for SerialConsole {
     fn put_char(&mut self, c: char) {
-        hal::arch::x86_64::console::_print(format_args!("{}", c));
+        match c {
+            '\n' => {
+                // Keep serial terminals aligned by using CRLF line endings.
+                hal::arch::x86_64::console::_print(format_args!("\r\n"));
+            }
+            _ => {
+                hal::arch::x86_64::console::_print(format_args!("{}", c));
+            }
+        }
     }
 
     fn clear(&mut self) {

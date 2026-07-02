@@ -66,6 +66,10 @@ impl Ps2Driver {
         if (status & 0x01) == 0 {
             return None;
         }
+        // Skip AUX (mouse) bytes so keyboard and mouse do not consume each other.
+        if (status & 0x20) != 0 {
+            return None;
+        }
         Some(inb(Self::DATA_PORT))
     }
 }

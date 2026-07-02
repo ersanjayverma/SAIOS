@@ -3,6 +3,7 @@ mod cursor;
 mod framebuffer;
 mod input;
 mod keyboard;
+mod mouse;
 mod serial;
 pub mod tests;
 
@@ -18,6 +19,7 @@ use input::InputBuffer;
 use crate::kernel::device;
 use crate::kernel::driver;
 use keyboard::{KeyEvent, KeyboardDriver};
+use mouse::{MouseDriver, MouseEvent};
 use serial::{poll_input_event as poll_serial_input_event, SerialConsole};
 use core::sync::atomic::{AtomicBool, Ordering};
 use efi_main::graphics::FramebufferInfo;
@@ -221,6 +223,7 @@ static CONSOLE_LOCKED: AtomicBool = AtomicBool::new(false);
 static CAPTURE_LOCKED: AtomicBool = AtomicBool::new(false);
 static INPUT_BUFFER: StaticCell<InputBuffer> = StaticCell::new(InputBuffer::new());
 static KEYBOARD: StaticCell<KeyboardDriver> = StaticCell::new(KeyboardDriver::new());
+static MOUSE: StaticCell<MouseDriver> = StaticCell::new(MouseDriver::new());
 static INPUT_PROMPT: StaticCell<String<64>> = StaticCell::new(String::new());
 static OUTPUT_CAPTURE: StaticCell<OutputCapture> = StaticCell::new(OutputCapture::new());
 
@@ -284,15 +287,46 @@ fn emergency_write_str(s: &str) {
 
 pub fn init() {
     SerialConsole::init();
+    unsafe {
+        (*MOUSE.get()).init();
+    }
     let _ = driver::ensure_driver("serial", "0.1.0", "SAIOS", &[], driver::DriverStatus::Running);
     let _ = driver::ensure_driver("input", "0.1.0", "SAIOS", &["serial"], driver::DriverStatus::Running);
+    let _ = driver::ensure_driver("mouse", "0.1.0", "SAIOS", &["input"], driver::DriverStatus::Running);
     let _ = device::ensure_device("COM1", "serial", "uart", device::DeviceStatus::Online);
     let _ = device::ensure_device("keyboard0", "input", "keyboard", device::DeviceStatus::Online);
+    let _ = device::ensure_device("mouse0", "mouse", "pointer", device::DeviceStatus::Online);
     with_console(|console| console.init());
     unsafe {
         (*INPUT_BUFFER.get()).clear();
     }
     CONSOLE_INITIALIZED.store(true, Ordering::Release);
+}
+
+fn framebuffer_scrollback_up(lines: usize) {
+    if lines == 0 {
+        return;
+    }
+    let _ = try_with_console(|console| {
+        let delta = core::cmp::min(lines, isize::MAX as usize) as isize;
+        let _ = console.backend.right_mut().scroll_view_lines(delta);
+    });
+}
+
+fn framebuffer_scrollback_down(lines: usize) {
+    if lines == 0 {
+        return;
+    }
+    let _ = try_with_console(|console| {
+        let delta = core::cmp::min(lines, isize::MAX as usize) as isize;
+        let _ = console.backend.right_mut().scroll_view_lines(-delta);
+    });
+}
+
+fn framebuffer_scrollback_to_bottom() {
+    let _ = try_with_console(|console| {
+        let _ = console.backend.right_mut().scroll_to_bottom();
+    });
 }
 
 pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
@@ -479,7 +513,31 @@ pub fn poll_input() -> Option<String<256>> {
     }
 
     // SAFETY: single-core early kernel context.
+    if let Some(mouse_event) = unsafe { (*MOUSE.get()).poll_event() } {
+        match mouse_event {
+            MouseEvent::Wheel { delta, .. } => {
+                if delta > 0 {
+                    framebuffer_scrollback_up((delta as usize).saturating_mul(3));
+                } else if delta < 0 {
+                    framebuffer_scrollback_down(((-delta) as usize).saturating_mul(3));
+                }
+            }
+            MouseEvent::Move { dy, buttons, .. } => {
+                // Fallback gesture when wheel is unavailable: hold middle button and move.
+                if buttons.middle {
+                    if dy > 0 {
+                        framebuffer_scrollback_up((dy as usize).saturating_div(2).max(1));
+                    } else if dy < 0 {
+                        framebuffer_scrollback_down(((-dy) as usize).saturating_div(2).max(1));
+                    }
+                }
+            }
+        }
+    }
+
+    // SAFETY: single-core early kernel context.
     let key_event = unsafe { (*KEYBOARD.get()).poll_event() }.or_else(poll_serial_input_event)?;
+    framebuffer_scrollback_to_bottom();
 
     // SAFETY: single-core early kernel context.
     let (prev_len_cells, prev_cursor_cells, prev_cursor_char_width, prev_right_char_width) = unsafe {
