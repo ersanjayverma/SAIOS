@@ -1,5 +1,6 @@
 pub mod device;
 pub mod crt;
+pub mod dynamic_linker;
 pub mod driver;
 pub mod event;
 pub mod object;

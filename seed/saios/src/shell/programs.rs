@@ -7,6 +7,7 @@ use crate::timer;
 use crate::vfs;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 type ProgramResult = Result<i32, &'static str>;
 
@@ -15,6 +16,10 @@ pub struct BinaryMetadata {
     pub entry: String,
     pub pie: bool,
     pub preferred_base: u64,
+    pub dynamic: bool,
+    pub interpreter: Option<String>,
+    pub needed_libraries: Vec<String>,
+    pub required_symbols: Vec<String>,
 }
 
 fn hello_program(args: &[&str], env: &[(String, String)]) -> i32 {
@@ -340,12 +345,27 @@ fn parse_u64_value(raw: &str) -> Option<u64> {
     trimmed.parse::<u64>().ok()
 }
 
+fn parse_csv_values(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in raw.split(',') {
+        let value = item.trim();
+        if !value.is_empty() {
+            out.push(value.to_string());
+        }
+    }
+    out
+}
+
 pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
     let text = saifs::read_text(path).ok()?;
     if text.starts_with("SAIOS_BIN_V1") {
         let mut entry: Option<String> = None;
         let mut pie = false;
         let mut preferred_base = 0x0040_0000u64;
+        let mut dynamic = false;
+        let mut interpreter: Option<String> = None;
+        let mut needed_libraries: Vec<String> = Vec::new();
+        let mut required_symbols: Vec<String> = Vec::new();
 
         for line in text.lines() {
             if let Some(raw_entry) = line.strip_prefix("entry=") {
@@ -363,6 +383,29 @@ pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
                 continue;
             }
 
+            if let Some(raw) = line.strip_prefix("dynamic=") {
+                dynamic = raw.trim().eq_ignore_ascii_case("true");
+                continue;
+            }
+
+            if let Some(raw) = line.strip_prefix("interp=") {
+                let value = raw.trim();
+                if !value.is_empty() {
+                    interpreter = Some(value.to_string());
+                }
+                continue;
+            }
+
+            if let Some(raw) = line.strip_prefix("needed=") {
+                needed_libraries = parse_csv_values(raw);
+                continue;
+            }
+
+            if let Some(raw) = line.strip_prefix("required=") {
+                required_symbols = parse_csv_values(raw);
+                continue;
+            }
+
             if let Some(raw) = line.strip_prefix("preferred_base=") {
                 if let Some(base) = parse_u64_value(raw) {
                     preferred_base = base;
@@ -375,6 +418,10 @@ pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
             entry,
             pie,
             preferred_base,
+            dynamic,
+            interpreter,
+            needed_libraries,
+            required_symbols,
         });
     }
     None

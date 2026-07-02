@@ -27,6 +27,9 @@ pub struct ProcessRecord {
     pub image_base: u64,
     pub load_bias: u64,
     pub pie_enabled: bool,
+    pub linked_interpreter: Option<String>,
+    pub linked_libraries: Vec<String>,
+    pub resolved_symbols: Vec<String>,
 }
 
 struct ProcessManager {
@@ -60,6 +63,9 @@ impl ProcessManager {
             image_base: 0,
             load_bias: 0,
             pie_enabled: false,
+            linked_interpreter: None,
+            linked_libraries: Vec::new(),
+            resolved_symbols: Vec::new(),
         });
         pid
     }
@@ -166,6 +172,9 @@ pub fn start_pid1(path: &str) -> u64 {
             image_base: 0,
             load_bias: 0,
             pie_enabled: false,
+            linked_interpreter: None,
+            linked_libraries: Vec::new(),
+            resolved_symbols: Vec::new(),
         });
         m.init_pid = Some(pid);
         event::publish(
@@ -259,7 +268,7 @@ pub fn spawn(name: &str, args: &[&str], env: &[(String, String)]) -> Result<u64,
     let metadata = programs::binary_metadata(resolved.as_str());
 
     let pid = with_manager_mut(|m| m.spawn(resolved.as_str()));
-    let (image_base, load_bias, pie_enabled) = if let Some(meta) = metadata {
+    let (image_base, load_bias, pie_enabled) = if let Some(meta) = metadata.as_ref() {
         if meta.pie {
             let (base, bias) = compute_pie_layout(pid, meta.preferred_base);
             (base, bias, true)
@@ -278,18 +287,55 @@ pub fn spawn(name: &str, args: &[&str], env: &[(String, String)]) -> Result<u64,
         }
     });
 
+    let link_report = if let Some(meta) = metadata.as_ref() {
+        match crate::kernel::dynamic_linker::link_image(resolved.as_str(), meta) {
+            Ok(report) => report,
+            Err(e) => {
+                with_manager_mut(|m| {
+                    if let Some(rec) = m.records.iter_mut().find(|r| r.pid == pid) {
+                        rec.state = ProcessState::Exited;
+                        rec.exit_code = Some(127);
+                    }
+                });
+                event::publish(
+                    EventKind::ProcessStopped,
+                    "process",
+                    alloc::format!("pid={} dynamic-link-failed {}", pid, e).as_str(),
+                );
+                return Err(e);
+            }
+        }
+    } else {
+        crate::kernel::dynamic_linker::LinkReport {
+            interpreter: "-".to_string(),
+            libraries: Vec::new(),
+            resolved_symbols: Vec::new(),
+        }
+    };
+
+    with_manager_mut(|m| {
+        if let Some(rec) = m.records.iter_mut().find(|r| r.pid == pid) {
+            if link_report.interpreter != "-" {
+                rec.linked_interpreter = Some(link_report.interpreter.clone());
+            }
+            rec.linked_libraries = link_report.libraries.clone();
+            rec.resolved_symbols = link_report.resolved_symbols.clone();
+        }
+    });
+
     event::publish(
         EventKind::ProcessStarted,
         "process",
         alloc::format!(
-            "pid={} {} argc={} envc={} pie={} base=0x{:x} bias=0x{:x}",
+            "pid={} {} argc={} envc={} pie={} base=0x{:x} bias=0x{:x} libs={}",
             pid,
             resolved,
             startup.argc,
             startup.envp.len(),
             pie_enabled,
             image_base,
-            load_bias
+            load_bias,
+            link_report.libraries.len()
         )
         .as_str(),
     );
