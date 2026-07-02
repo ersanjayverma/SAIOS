@@ -187,15 +187,15 @@ pub fn relocation_type(info: u64) -> u32 {
 pub fn relocation_symbol(info: u64) -> u32 {
     (info >> 32) as u32
 }
-pub fn apply_relocations(load_base: u64, relocations: &[Elf64Rela]) -> Result<(), &'static str> {
+pub fn apply_relocations(load_bias: u64, relocations: &[Elf64Rela]) -> Result<(), &'static str> {
     for rela in relocations {
         let relocation_type = relocation_type(rela.r_info);
        
         match relocation_type {
             R_X86_64_RELATIVE => {
-                let new_value = load_base.wrapping_add(rela.r_addend as u64);
+                let new_value = load_bias.wrapping_add(rela.r_addend as u64);
                 unsafe {
-                    let ptr = (load_base + rela.r_offset) as *mut u64;
+                    let ptr = (load_bias + rela.r_offset) as *mut u64;
                     *ptr = new_value;
                 }
             }
