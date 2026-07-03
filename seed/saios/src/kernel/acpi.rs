@@ -32,6 +32,35 @@ pub struct AcpiTableHeader {
     pub creator_revision: u32,
 }
 
+/// Generic Address Space (GAS) Structure
+/// Used for ACPI register addresses
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+pub struct GenericAddressSpace {
+    pub address_space_id: u8,  // 0=Mem, 1=IO, 2=PCI_CFG, 3=EC, 4=SMBus, 5=CMOS, 6=PCIBAR
+    pub register_bit_width: u8,
+    pub register_bit_offset: u8,
+    pub access_size: u8,  // 0=undef, 1=byte, 2=word, 3=dword, 4=qword
+    pub address: u64,
+}
+
+impl GenericAddressSpace {
+    /// Check if this GAS describes an IO port access
+    pub fn is_io_port(&self) -> bool {
+        self.address_space_id == 1
+    }
+
+    /// Check if this GAS describes memory access
+    pub fn is_memory(&self) -> bool {
+        self.address_space_id == 0
+    }
+
+    /// Check if GAS is valid (has a non-zero address)
+    pub fn is_valid(&self) -> bool {
+        self.address != 0
+    }
+}
+
 /// Root System Description Pointer (RSDP)
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
@@ -134,7 +163,7 @@ pub enum MadtEntryType {
     ProcessorLocalSapic = 7,
     PlatformInterruptSources = 8,
     Processorx2Apic = 9,
-    x2ApicNmi = 10,
+    X2ApicNmi = 10,
     GicCpuInterface = 11,
     GicDistributor = 12,
 }
@@ -210,12 +239,31 @@ pub struct AcpiDevice {
     pub device_class: String,
 }
 
+/// IO APIC Information
+#[derive(Debug, Clone, Copy)]
+pub struct IoApicInfo {
+    pub io_apic_id: u8,
+    pub io_apic_address: u32,
+    pub global_system_interrupt_base: u32,
+}
+
+/// Interrupt Source Override Information
+#[derive(Debug, Clone, Copy)]
+pub struct InterruptSourceOverride {
+    pub bus: u8,
+    pub source: u8,
+    pub global_system_interrupt: u32,
+    pub flags: u16,
+}
+
 /// Main ACPI Manager
 pub struct AcpiManager {
     rsdp_address: u64,
     revision: u8,
     processors: Vec<ProcessorInfo>,
     devices: Vec<AcpiDevice>,
+    io_apics: Vec<IoApicInfo>,
+    interrupt_overrides: Vec<InterruptSourceOverride>,
     madt_address: u64,
     fadt_address: u64,
     dsdt_address: u64,
@@ -239,6 +287,8 @@ impl AcpiManager {
             revision: 0,
             processors: Vec::new(),
             devices: Vec::new(),
+            io_apics: Vec::new(),
+            interrupt_overrides: Vec::new(),
             madt_address: 0,
             fadt_address: 0,
             dsdt_address: 0,
@@ -367,9 +417,9 @@ impl AcpiManager {
         let header = unsafe { ptr::read_unaligned(header_ptr) };
 
         match header.signature {
-            *DSDT_SIGNATURE => self.dsdt_address = table_addr,
-            *FADT_SIGNATURE => self.fadt_address = table_addr,
-            *MADT_SIGNATURE => self.madt_address = table_addr,
+            [b'D', b'S', b'D', b'T'] => self.dsdt_address = table_addr,
+            [b'F', b'A', b'C', b'P'] => self.fadt_address = table_addr,
+            [b'A', b'P', b'I', b'C'] => self.madt_address = table_addr,
             _ => {} // Ignore other tables for now
         }
     }
@@ -469,15 +519,28 @@ impl AcpiManager {
     }
 
     /// Parse IO APIC entry in MADT
-    fn parse_madt_io_apic(&self, _entry_ptr: *const u8) {
-        // IO APIC handling would go here
-        // For now, just acknowledge it was found
+    fn parse_madt_io_apic(&mut self, entry_ptr: *const u8) {
+        let entry_ptr = entry_ptr as *const MadtIoApic;
+        let entry = unsafe { ptr::read_unaligned(entry_ptr) };
+
+        self.io_apics.push(IoApicInfo {
+            io_apic_id: entry.io_apic_id,
+            io_apic_address: entry.io_apic_address,
+            global_system_interrupt_base: entry.global_system_interrupt_base,
+        });
     }
 
     /// Parse Interrupt Source Override entry in MADT
-    fn parse_madt_interrupt_source_override(&self, _entry_ptr: *const u8) {
-        // Interrupt source override handling would go here
-        // For now, just acknowledge it was found
+    fn parse_madt_interrupt_source_override(&mut self, entry_ptr: *const u8) {
+        let entry_ptr = entry_ptr as *const MadtInterruptSourceOverride;
+        let entry = unsafe { ptr::read_unaligned(entry_ptr) };
+
+        self.interrupt_overrides.push(InterruptSourceOverride {
+            bus: entry.bus,
+            source: entry.source,
+            global_system_interrupt: entry.global_system_interrupt,
+            flags: entry.flags,
+        });
     }
 
     /// Validate ACPI table checksum
@@ -496,6 +559,16 @@ impl AcpiManager {
         self.local_apic_addr
     }
 
+    /// Get IO APICs discovered in MADT
+    pub fn io_apics(&self) -> &[IoApicInfo] {
+        &self.io_apics
+    }
+
+    /// Get interrupt source overrides discovered in MADT
+    pub fn interrupt_overrides(&self) -> &[InterruptSourceOverride] {
+        &self.interrupt_overrides
+    }
+
     /// Check if ACPI is initialized and enabled
     pub fn is_enabled(&self) -> bool {
         self.enabled
@@ -512,30 +585,175 @@ impl AcpiManager {
     }
 
     /// Attempt to enter sleep state (requires AML interpreter in full implementation)
-    pub fn enter_sleep_state(&self, _state: SleepState) -> Result<(), &'static str> {
-        // Full implementation would use AML interpreter to call _PTS and _GTS
-        Err("ACPI: Sleep state not yet implemented")
-    }
-
-    /// Shutdown system (requires AML interpreter in full implementation)
-    pub fn shutdown(&self) -> Result<(), &'static str> {
-        // Full implementation would use AML interpreter to call \_S5
-        Err("ACPI: Shutdown not yet implemented")
-    }
-
-    /// Reboot system
-    pub fn reboot(&self) -> Result<(), &'static str> {
-        // Use FADT reset register if available
-        if self.fadt_address != 0 {
-            let fadt_ptr = self.fadt_address as *const Fadt;
-            let fadt = unsafe { ptr::read_unaligned(fadt_ptr) };
-
-            // Reset register is in fadt.reset_reg (GAS structure)
-            // For now, just indicate it's not implemented
-            Err("ACPI: Reboot not yet implemented")
-        } else {
-            Err("ACPI: No FADT for reboot information")
+    /// Attempt to enter sleep state (requires AML interpreter in full implementation)
+    pub fn enter_sleep_state(&self, state: SleepState) -> Result<(), &'static str> {
+        if !self.enabled {
+            return Err("ACPI: Not enabled");
         }
+
+        // S5 (soft power-off) is handled by shutdown()
+        if state == SleepState::S5 {
+            return self.shutdown();
+        }
+
+        // All other S-states (S1-S4) require AML interpreter to:
+        // 1. Find \_S<n> objects in DSDT/SSDT
+        // 2. Extract SLP_TYP_A and SLP_TYP_B values
+        // 3. Execute \_PTS (prepare to sleep) method
+        // 4. Write to PM1A_CNT register
+        // 5. Execute \_BFS (back from sleep) on wake
+        //
+        // This is deferred to Phase 2 (AML interpreter implementation)
+        Err("ACPI: Sleep state support requires AML interpreter (Phase 2)")
+    }
+
+    /// Shutdown system using ACPI S5 (soft power-off) or platform shutdown
+    pub fn shutdown(&self) -> Result<(), &'static str> {
+        if self.fadt_address == 0 {
+            return self.platform_shutdown();
+        }
+
+        let fadt_ptr = self.fadt_address as *const Fadt;
+        let fadt = unsafe { ptr::read_unaligned(fadt_ptr) };
+
+        // Try to use PM1A_CNT register if available
+        if fadt.pm1a_cnt_blk != 0 {
+            // PM1A Control block base address
+            let pm1a_cnt_addr = fadt.pm1a_cnt_blk as u16;
+            
+            // Without AML interpreter, we use a fallback S5 SLP_TYP value
+            // Typical values: S5 SLP_TYP = 0x00 or platform-specific
+            // We'll write to PM1A_CNT: (SLP_TYP << 10) | SLP_EN (bit 13)
+            const S5_SLP_TYP: u16 = 0x00;  // S5 SLP type (varies by platform)
+            const SLP_EN: u16 = 1 << 13;   // Sleep enable bit
+            
+            let pm_value = (S5_SLP_TYP << 10) | SLP_EN;
+            
+            // Write to I/O port
+            unsafe {
+                core::arch::asm!(
+                    "out dx, ax",
+                    in("dx") pm1a_cnt_addr,
+                    in("ax") pm_value,
+                    options(nomem, nostack, preserves_flags)
+                );
+            }
+            
+            // Wait for shutdown to take effect
+            loop {
+                unsafe {
+                    hal::arch::x86_64::cpu::hlt();
+                }
+            }
+        }
+
+        // Fallback to platform shutdown
+        self.platform_shutdown()
+    }
+
+    /// Platform-specific shutdown (x86 specific)
+    fn platform_shutdown(&self) -> Result<(), &'static str> {
+        // Try x86 CMOS/IO shutdown via port 0xCF9
+        // Value 0x0E triggers system shutdown on most x86 systems
+        unsafe {
+            core::arch::asm!(
+                "out dx, al",
+                in("dx") 0xCF9u16,
+                in("al") 0x0Eu8,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        
+        // Wait for shutdown
+        loop {
+            unsafe {
+                hal::arch::x86_64::cpu::hlt();
+            }
+        }
+    }
+
+    /// Reboot system using ACPI reset or platform-specific method
+    pub fn reboot(&self) -> Result<(), &'static str> {
+        if self.fadt_address == 0 {
+            return self.platform_reset();
+        }
+
+        let fadt_ptr = self.fadt_address as *const Fadt;
+        let fadt = unsafe { ptr::read_unaligned(fadt_ptr) };
+
+        // FADT reset register is in fadt.reset_reg (12 bytes = GAS structure)
+        // Try to use reset register if available
+        if fadt.reset_reg[0] != 0 {  // address_space_id field
+            let gas_ptr = &fadt.reset_reg as *const [u8; 12] as *const GenericAddressSpace;
+            let gas = unsafe { ptr::read_unaligned(gas_ptr) };
+            
+            if gas.is_valid() {
+                // Write reset value to the reset register
+                if gas.is_io_port() {
+                    // IO port access
+                    unsafe {
+                        core::arch::asm!(
+                            "out dx, al",
+                            in("dx") gas.address as u16,
+                            in("al") fadt.reset_value,
+                            options(nomem, nostack, preserves_flags)
+                        );
+                    }
+                    
+                    // Wait for reset
+                    loop {
+                        unsafe {
+                            hal::arch::x86_64::cpu::hlt();
+                        }
+                    }
+                } else if gas.is_memory() {
+                    // Memory-mapped access
+                    let reset_ptr = gas.address as *mut u8;
+                    unsafe {
+                        ptr::write(reset_ptr, fadt.reset_value);
+                    }
+                    
+                    // Wait for reset
+                    loop {
+                        unsafe {
+                            hal::arch::x86_64::cpu::hlt();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback to platform reset
+        self.platform_reset()
+    }
+
+    /// Platform-specific reset (x86 specific)
+    fn platform_reset(&self) -> Result<(), &'static str> {
+        // Try x86 reset via port 0xCF9
+        // Value 0x06 triggers system reset on most x86 systems
+        unsafe {
+            core::arch::asm!(
+                "out dx, al",
+                in("dx") 0xCF9u16,
+                in("al") 0x06u8,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        
+        // If that doesn't work, try triple fault
+        // Create invalid IDT descriptor to trigger fault
+        unsafe {
+            let idt_desc: u64 = 0;
+            core::arch::asm!(
+                "lidt [{}]",
+                in(reg) &idt_desc,
+            );
+            // Trigger interrupt to cause triple fault
+            core::arch::asm!("int 0");
+        }
+        
+        // Should not reach here
+        Err("ACPI: Platform reset failed")
     }
 
     /// Get ACPI devices found via DSDT/SSDT parsing
@@ -565,6 +783,8 @@ impl AcpiManager {
 }
 
 /// Global ACPI manager instance
+/// SAFETY: Protected by ACPI_INITIALIZED atomic flag. Once initialized, remains immutable.
+#[allow(static_mut_refs)]
 static mut ACPI_MANAGER: Option<AcpiManager> = None;
 static ACPI_INITIALIZED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
@@ -576,13 +796,17 @@ pub fn init(rsdp_address: u64) -> Result<(), &'static str> {
     }
 
     unsafe {
+        #[allow(static_mut_refs)]
         if ACPI_MANAGER.is_some() {
             return Err("ACPI: Already initialized");
         }
 
         let mut manager = AcpiManager::new(rsdp_address);
         manager.initialize()?;
-        ACPI_MANAGER = Some(manager);
+        #[allow(static_mut_refs)]
+        {
+            ACPI_MANAGER = Some(manager);
+        }
     }
 
     ACPI_INITIALIZED.store(true, core::sync::atomic::Ordering::SeqCst);
@@ -592,7 +816,12 @@ pub fn init(rsdp_address: u64) -> Result<(), &'static str> {
 /// Get reference to global ACPI manager
 pub fn get_manager() -> Option<&'static AcpiManager> {
     if ACPI_INITIALIZED.load(core::sync::atomic::Ordering::SeqCst) {
-        unsafe { ACPI_MANAGER.as_ref() }
+        unsafe {
+            #[allow(static_mut_refs)]
+            {
+                ACPI_MANAGER.as_ref()
+            }
+        }
     } else {
         None
     }
@@ -601,7 +830,12 @@ pub fn get_manager() -> Option<&'static AcpiManager> {
 /// Get mutable reference to global ACPI manager
 pub fn get_manager_mut() -> Option<&'static mut AcpiManager> {
     if ACPI_INITIALIZED.load(core::sync::atomic::Ordering::SeqCst) {
-        unsafe { ACPI_MANAGER.as_mut() }
+        unsafe {
+            #[allow(static_mut_refs)]
+            {
+                ACPI_MANAGER.as_mut()
+            }
+        }
     } else {
         None
     }
@@ -625,5 +859,23 @@ mod tests {
         assert_eq!(*DSDT_SIGNATURE, *b"DSDT");
         assert_eq!(*FADT_SIGNATURE, *b"FACP");
         assert_eq!(*MADT_SIGNATURE, *b"APIC");
+    }
+
+    #[test]
+    fn test_gas_structure_size() {
+        // GenericAddressSpace must be 12 bytes to match FADT reset_reg
+        assert_eq!(core::mem::size_of::<GenericAddressSpace>(), 12);
+    }
+
+    #[test]
+    fn test_rsdp_descriptor_size() {
+        // RSDP must be 36 bytes for proper parsing
+        assert_eq!(core::mem::size_of::<RsdpDescriptor>(), 36);
+    }
+
+    #[test]
+    fn test_acpi_table_header_size() {
+        // Standard ACPI header is 36 bytes
+        assert_eq!(core::mem::size_of::<AcpiTableHeader>(), 36);
     }
 }

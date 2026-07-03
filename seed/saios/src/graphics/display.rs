@@ -205,6 +205,7 @@ impl FramebufferDisplay {
     pub fn clear_color(&mut self, color: u32) {
         if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Rgb | PixelFormat::Bgr) {
             let packed = self.rgb_to_native_u32(color);
+            // OPTIMIZATION: Fill rows with packed u32 values instead of per-pixel writes
             for y in 0..self.height {
                 let row_base = y * self.stride * self.bytes_per_pixel;
                 for x in 0..self.width {
@@ -213,7 +214,9 @@ impl FramebufferDisplay {
                         break;
                     }
                     unsafe {
-                        ptr::write_volatile(self.base.add(offset).cast::<u32>(), packed);
+                        // OPTIMIZATION: Use ptr::write instead of write_volatile
+                        // Framebuffer memory is normal RAM, not MMIO
+                        ptr::write(self.base.add(offset).cast::<u32>(), packed);
                     }
                 }
             }
@@ -232,7 +235,8 @@ impl FramebufferDisplay {
                 unsafe {
                     let mut i = 0;
                     while i < self.bytes_per_pixel {
-                        ptr::write_volatile(dst.add(i), packed[i]);
+                        // OPTIMIZATION: Use ptr::write instead of write_volatile
+                        ptr::write(dst.add(i), packed[i]);
                         i += 1;
                     }
                 }
@@ -262,7 +266,8 @@ impl FramebufferDisplay {
                     }
                     let packed = self.rgb_to_native_u32(pixels[row_start + x]);
                     unsafe {
-                        ptr::write_volatile(self.base.add(offset).cast::<u32>(), packed);
+                        // OPTIMIZATION: Use ptr::write instead of write_volatile
+                        ptr::write(self.base.add(offset).cast::<u32>(), packed);
                     }
                 }
             }
@@ -302,7 +307,8 @@ impl FramebufferDisplay {
         let mut i = 0;
         while i < count {
             unsafe {
-                ptr::write_volatile(dst.add(i), bytes[i]);
+                // OPTIMIZATION: Use ptr::write instead of write_volatile
+                ptr::write(dst.add(i), bytes[i]);
             }
             i += 1;
         }
@@ -312,20 +318,21 @@ impl FramebufferDisplay {
     unsafe fn write_rgb_like(dst: *mut u8, r: u8, g: u8, b: u8, bytes_per_pixel: usize, bgr: bool) {
         if bgr {
             unsafe {
-                ptr::write_volatile(dst, b);
-                ptr::write_volatile(dst.add(1), g);
-                ptr::write_volatile(dst.add(2), r);
+                // OPTIMIZATION: Use ptr::write instead of write_volatile
+                ptr::write(dst, b);
+                ptr::write(dst.add(1), g);
+                ptr::write(dst.add(2), r);
             }
         } else {
             unsafe {
-                ptr::write_volatile(dst, r);
-                ptr::write_volatile(dst.add(1), g);
-                ptr::write_volatile(dst.add(2), b);
+                ptr::write(dst, r);
+                ptr::write(dst.add(1), g);
+                ptr::write(dst.add(2), b);
             }
         }
         if bytes_per_pixel >= 4 {
             unsafe {
-                ptr::write_volatile(dst.add(3), 0);
+                ptr::write(dst.add(3), 0);
             }
         }
     }

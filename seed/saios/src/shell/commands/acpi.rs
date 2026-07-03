@@ -2,8 +2,6 @@
 /// Displays ACPI system information, processor details, and power management options
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 
 use crate::console;
 use crate::kernel;
@@ -29,10 +27,30 @@ fn cmd_acpi(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             "tables" => display_acpi_tables(),
             "status" => display_acpi_status(),
             "shutdown" => {
+                console::println!("ACPI: Initiating system shutdown via S5");
+                console::println!("This will power off the system.");
+                
                 if let Some(acpi_mgr) = kernel::acpi::get_manager() {
                     match acpi_mgr.shutdown() {
-                        Ok(()) => console::println!("System shutdown initiated"),
+                        Ok(()) => {
+                            console::println!("System shutdown initiated");
+                        }
                         Err(e) => console::println!("Shutdown failed: {}", e),
+                    }
+                } else {
+                    console::println!("ACPI not initialized");
+                }
+            }
+            "reboot" => {
+                console::println!("ACPI: Initiating system reboot");
+                console::println!("This will restart the system.");
+                
+                if let Some(acpi_mgr) = kernel::acpi::get_manager() {
+                    match acpi_mgr.reboot() {
+                        Ok(()) => {
+                            console::println!("System reboot initiated");
+                        }
+                        Err(e) => console::println!("Reboot failed: {}", e),
                     }
                 } else {
                     console::println!("ACPI not initialized");
@@ -55,7 +73,8 @@ fn print_acpi_help() {
     console::println!("  acpi proc       - Show ACPI processors");
     console::println!("  acpi tables     - Show discovered ACPI tables");
     console::println!("  acpi status     - Show ACPI subsystem status");
-    console::println!("  acpi shutdown   - Shutdown system");
+    console::println!("  acpi shutdown   - Shutdown system (S5)");
+    console::println!("  acpi reboot     - Reboot system");
     console::println!("  acpi help       - Show this help");
 }
 
@@ -138,6 +157,31 @@ fn display_acpi_tables() {
         console::println!("MADT (Multiple APIC Description Table)");
         console::println!("  - APIC/x2APIC and interrupt source configuration");
         console::println!("  - Processors: {}", acpi_mgr.processor_count());
+        
+        let io_apics = acpi_mgr.io_apics();
+        if !io_apics.is_empty() {
+            console::println!("  - IO APICs: {}", io_apics.len());
+            for apic in io_apics {
+                console::println!("    ID: {}, Address: {:#x}, GSI Base: {}",
+                    apic.io_apic_id,
+                    apic.io_apic_address,
+                    apic.global_system_interrupt_base
+                );
+            }
+        }
+
+        let overrides = acpi_mgr.interrupt_overrides();
+        if !overrides.is_empty() {
+            console::println!("  - Interrupt Overrides: {}", overrides.len());
+            for ovr in overrides {
+                console::println!("    Bus: {}, Source: {} -> GSI: {}, Flags: {:#x}",
+                    ovr.bus,
+                    ovr.source,
+                    ovr.global_system_interrupt,
+                    ovr.flags
+                );
+            }
+        }
         console::println!();
 
         console::println!("Note: Full AML interpreter not yet implemented");
@@ -152,7 +196,7 @@ fn display_acpi_status() {
     console::println!("====================");
 
     if let Some(acpi_mgr) = kernel::acpi::get_manager() {
-        console::println!("State:              {}", if acpi_mgr.is_enabled() { "Enabled" } else { "Disabled");
+        console::println!("State:              {}", if acpi_mgr.is_enabled() { "Enabled" } else { "Disabled" });
         console::println!("Version:            {}", acpi_mgr.revision());
         console::println!("Processors:         {}", acpi_mgr.processor_count());
         console::println!();

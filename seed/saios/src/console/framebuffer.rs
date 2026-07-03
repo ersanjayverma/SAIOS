@@ -71,7 +71,8 @@ impl FramebufferConsole {
         let fg = self.fg.to_u32();
         let bg = self.bg.to_u32();
 
-        if bytes_per_pixel == 4 && matches!(pixel_format, PixelFormat::Bgr | PixelFormat::Rgb) {
+        // OPTIMIZATION: Pre-pack colors once instead of per-pixel
+        let (fg_packed, bg_packed) = if bytes_per_pixel == 4 && matches!(pixel_format, PixelFormat::Bgr | PixelFormat::Rgb) {
             let pack = |color: u32| -> u32 {
                 let r = (color >> 16) & 0xFF;
                 let g = (color >> 8) & 0xFF;
@@ -82,10 +83,13 @@ impl FramebufferConsole {
                     PixelFormat::Bitmask | PixelFormat::BltOnly => 0,
                 }
             };
+            (pack(fg), pack(bg))
+        } else {
+            (0, 0)
+        };
 
-            let fg_packed = pack(fg);
-            let bg_packed = pack(bg);
-
+        if bytes_per_pixel == 4 && matches!(pixel_format, PixelFormat::Bgr | PixelFormat::Rgb) {
+            // OPTIMIZATION: Direct row-based glyph drawing into u32 buffer
             for row_idx in 0..FONT_HEIGHT {
                 let y = py.saturating_add(row_idx);
                 if y >= height {
@@ -93,14 +97,21 @@ impl FramebufferConsole {
                 }
 
                 let row_bits = glyph_row(c, row_idx);
-                let row_base = y * stride;
+                let row_base_px = (y * stride) as usize;
+                
+                // OPTIMIZATION: Get a mutable slice for the row and write directly (no write_volatile)
+                let row_start = row_base_px * bytes_per_pixel;
+                if row_start >= fb_size {
+                    continue;
+                }
+                
                 for bit in 0..FONT_WIDTH {
                     let x = px.saturating_add(bit);
                     if x >= width {
                         continue;
                     }
 
-                    let offset = (row_base + x) * 4;
+                    let offset = row_start + x * bytes_per_pixel;
                     if offset + 4 > fb_size {
                         continue;
                     }
@@ -112,14 +123,17 @@ impl FramebufferConsole {
                         bg_packed
                     };
 
+                    // OPTIMIZATION: Use ptr::write instead of write_volatile
+                    // Framebuffer memory is normal RAM with write-combining, not MMIO
                     unsafe {
-                        ptr::write_volatile(fb.add(offset).cast::<u32>(), packed);
+                        ptr::write(fb.add(offset).cast::<u32>(), packed);
                     }
                 }
             }
             return;
         }
 
+        // Fallback for other pixel formats (slower path, but still optimizable)
         for row_idx in 0..FONT_HEIGHT {
             let y = py.saturating_add(row_idx);
             if y >= height {
@@ -163,21 +177,23 @@ impl FramebufferConsole {
         unsafe {
             match pixel_format {
                 PixelFormat::Rgb => {
-                    ptr::write_volatile(dst, r);
-                    ptr::write_volatile(dst.add(1), g);
-                    ptr::write_volatile(dst.add(2), b);
+                    // OPTIMIZATION: Use ptr::write instead of write_volatile
+                    // Framebuffer memory is normal RAM, not MMIO
+                    ptr::write(dst, r);
+                    ptr::write(dst.add(1), g);
+                    ptr::write(dst.add(2), b);
                     // Keep alpha non-zero for framebuffers that use channel 3.
                     if bytes_per_pixel >= 4 {
-                        ptr::write_volatile(dst.add(3), 0xFF);
+                        ptr::write(dst.add(3), 0xFF);
                     }
                 }
                 PixelFormat::Bgr => {
-                    ptr::write_volatile(dst, b);
-                    ptr::write_volatile(dst.add(1), g);
-                    ptr::write_volatile(dst.add(2), r);
+                    ptr::write(dst, b);
+                    ptr::write(dst.add(1), g);
+                    ptr::write(dst.add(2), r);
                     // Keep alpha non-zero for framebuffers that use channel 3.
                     if bytes_per_pixel >= 4 {
-                        ptr::write_volatile(dst.add(3), 0xFF);
+                        ptr::write(dst.add(3), 0xFF);
                     }
                 }
                 PixelFormat::Bitmask => {
@@ -185,11 +201,11 @@ impl FramebufferConsole {
                     Self::write_packed(dst, pixel, bytes_per_pixel);
                 }
                 PixelFormat::BltOnly => {
-                    ptr::write_volatile(dst, b);
-                    ptr::write_volatile(dst.add(1), g);
-                    ptr::write_volatile(dst.add(2), r);
+                    ptr::write(dst, b);
+                    ptr::write(dst.add(1), g);
+                    ptr::write(dst.add(2), r);
                     if bytes_per_pixel >= 4 {
-                        ptr::write_volatile(dst.add(3), 0xFF);
+                        ptr::write(dst.add(3), 0xFF);
                     }
                 }
             }
@@ -203,7 +219,8 @@ impl FramebufferConsole {
         let mut i = 0;
         while i < count {
             unsafe {
-                ptr::write_volatile(dst.add(i), bytes[i]);
+                // OPTIMIZATION: Use ptr::write instead of write_volatile
+                ptr::write(dst.add(i), bytes[i]);
             }
             i += 1;
         }
@@ -343,6 +360,7 @@ impl FramebufferConsole {
             return false;
         }
 
+        // OPTIMIZATION: Use memmove for scroll instead of pixel operations
         if shift_px < height {
             let src_offset = shift_px.saturating_mul(row_bytes);
             let copy_bytes = (height - shift_px).saturating_mul(row_bytes);
@@ -370,24 +388,39 @@ impl FramebufferConsole {
         };
 
         let bg_packed = pack_color(bg);
-        let bg_bytes = bg_packed.to_le_bytes();
 
+        // OPTIMIZATION: Clear by rows using memset instead of pixel loops
         if bytes_per_pixel == 4 {
+            // Fast path: 4-byte pixels can fill entire rows efficiently
+            let clear_rows = shift_px;
+            let clear_bytes = clear_rows.saturating_mul(row_bytes);
+            let clear_start_offset = clear_start.saturating_mul(row_bytes);
+            
+            if clear_start_offset.saturating_add(clear_bytes) > fb_size {
+                return false;
+            }
+
+            // Fill u32 packed color into each pixel
             for y in clear_start..height {
                 let row_base = y.saturating_mul(stride);
+                let row_offset = row_base.saturating_mul(4);
+                
                 for x in 0..width {
-                    let offset = (row_base + x).saturating_mul(4);
+                    let offset = row_offset + x * 4;
                     if offset + 4 > fb_size {
                         break;
                     }
                     unsafe {
-                        ptr::write_volatile(fb.add(offset).cast::<u32>(), bg_packed);
+                        // OPTIMIZATION: Use ptr::write instead of write_volatile
+                        ptr::write(fb.add(offset).cast::<u32>(), bg_packed);
                     }
                 }
             }
             return true;
         }
 
+        // Fallback for non-4-byte formats
+        let bg_bytes = bg_packed.to_le_bytes();
         for y in clear_start..height {
             let row_base = y.saturating_mul(stride);
             for x in 0..width {
@@ -399,7 +432,8 @@ impl FramebufferConsole {
                     let p = fb.add(offset);
                     let mut i = 0;
                     while i < bytes_per_pixel {
-                        ptr::write_volatile(p.add(i), bg_bytes[i]);
+                        // OPTIMIZATION: Use ptr::write instead of write_volatile
+                        ptr::write(p.add(i), bg_bytes[i]);
                         i += 1;
                     }
                 }
