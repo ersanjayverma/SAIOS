@@ -354,6 +354,11 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_umount,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "df",
+        description: "Show mounted filesystem usage",
+        handler: cmd_df,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "graph",
         description: "Show dependency graph (e.g. graph services)",
         handler: cmd_graph,
@@ -1922,6 +1927,37 @@ fn cmd_umount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let _ = disk::umount_volume(mountpoint);
 
     console::println!("umount: {} unmounted", mountpoint);
+    Ok(())
+}
+
+fn cmd_df(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let target = args.first().copied().unwrap_or("/");
+    let path = if target.starts_with('/') {
+        target.to_string()
+    } else {
+        let cwd = saifs::pwd();
+        if cwd == "/" {
+            format!("/{}", target)
+        } else {
+            format!("{}/{}", cwd, target)
+        }
+    };
+
+    let volume = disk::mounted_volume_for_path(path.as_str())
+        .ok_or("df: path is not on a mounted volume")?;
+    let total = disk::total_bytes(path.as_str()).unwrap_or(0);
+    let used = disk::used_bytes(path.as_str()).unwrap_or(0);
+    let free = total.saturating_sub(used);
+
+    console::println!("Filesystem  Mounted on  Total(MB)  Used(MB)  Free(MB)");
+    console::println!(
+        "{:<10}  {:<10}  {:>9}  {:>8}  {:>8}",
+        volume.name,
+        volume.mounted_at.unwrap_or_else(|| "-".to_string()),
+        total / (1024 * 1024),
+        used / (1024 * 1024),
+        free / (1024 * 1024)
+    );
     Ok(())
 }
 

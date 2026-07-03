@@ -334,6 +334,9 @@ impl KernelService for ConsoleService {
     }
 
     fn start(&mut self) -> Result<(), &'static str> {
+        let _ = crate::kernel::driver::start("pci");
+        let _ = crate::kernel::driver::start("storage");
+        let _ = crate::kernel::driver::start("fat32");
         let _ = crate::kernel::driver::start("network");
         let _ = crate::kernel::driver::start("loopback");
         let _ = crate::kernel::driver::start("ethernet");

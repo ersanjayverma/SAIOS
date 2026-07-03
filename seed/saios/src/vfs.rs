@@ -12,6 +12,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
+use crate::driver::storage;
+use crate::kernel::device as kernel_device;
 use crate::object_manager;
 
 /// Type of a VFS node.
@@ -647,6 +649,27 @@ fn is_sys_path(path: &str) -> bool {
     path == "/sys" || path.starts_with("/sys/")
 }
 
+fn is_storage_backed(path: &str) -> bool {
+    storage::mounted_volume_for_path(path)
+        .is_some_and(|v| v.filesystem == storage::FilesystemKind::Fat32 && v.name != "tmpfs")
+}
+
+fn storage_node_name(path: &str) -> String {
+    if path == "/" {
+        return "/".to_string();
+    }
+    path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("/").to_string()
+}
+
+fn storage_inode(path: &str) -> u64 {
+    let mut h = 1469598103934665603u64;
+    for b in path.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h
+}
+
 static VFS: StaticCell<Option<VfsState>> = StaticCell::new(None);
 static LOCK: AtomicBool = AtomicBool::new(false);
 
@@ -692,6 +715,10 @@ pub fn mkdir(path: &str) -> Result<(), &'static str> {
             return Err("read-only virtual path");
         }
 
+        if is_storage_backed(&abs) {
+            return storage::fs_mkdir(&abs);
+        }
+
         vfs.fs.mkdir(path)?;
         object_manager::log_event(&format!("Directory created: {}", abs));
         Ok(())
@@ -704,6 +731,10 @@ pub fn touch(path: &str) -> Result<(), &'static str> {
         let abs = vfs.fs.normalized_path(path);
         if is_sys_path(&abs) {
             return Err("read-only virtual path");
+        }
+
+        if is_storage_backed(&abs) {
+            return storage::fs_create(&abs);
         }
 
         vfs.fs.create(path)?;
@@ -890,6 +921,22 @@ pub fn ls(path: Option<&str>) -> Result<Vec<String>, &'static str> {
             return object_manager::sys_readdir(&abs).ok_or("not a directory");
         }
 
+        if is_storage_backed(&abs) {
+            return storage::fs_readdir(&abs);
+        }
+
+        if abs == "/dev" {
+            let mut merged = vfs.fs.readdir(req)?;
+            for dev in kernel_device::devices() {
+                if let Some(name) = dev.name.strip_prefix("/dev/") {
+                    merged.push(name.to_string());
+                }
+            }
+            merged.sort();
+            merged.dedup();
+            return Ok(merged);
+        }
+
         vfs.fs.readdir(req)
     })
 }
@@ -906,6 +953,10 @@ pub fn read_path(path: &str) -> Result<Vec<u8>, &'static str> {
     if is_sys_path(&abs) {
         let lines = object_manager::sys_read(&abs).ok_or("not a file")?;
         return Ok(lines.join("\n").into_bytes());
+    }
+
+    if is_storage_backed(&abs) {
+        return storage::fs_read(&abs);
     }
 
     let fd = open(path, OpenOptions::read_only())?;
@@ -929,6 +980,10 @@ pub fn unlink(path: &str) -> Result<(), &'static str> {
             return Err("read-only virtual path");
         }
 
+        if is_storage_backed(&abs) {
+            return storage::fs_delete(&abs);
+        }
+
         let inode = vfs.fs.resolve(path)?;
         vfs.invalidate_inode_descriptors(inode);
         vfs.fs.remove(path)?;
@@ -944,6 +999,10 @@ pub fn rename(from: &str, to: &str) -> Result<(), &'static str> {
         let abs_to = vfs.fs.normalized_path(to);
         if is_sys_path(&abs_from) || is_sys_path(&abs_to) {
             return Err("read-only virtual path");
+        }
+
+        if is_storage_backed(&abs_from) || is_storage_backed(&abs_to) {
+            return storage::fs_rename(&abs_from, &abs_to);
         }
 
         vfs.fs.rename_path(from, to)?;
@@ -972,6 +1031,11 @@ pub fn pwd() -> String {
 
 /// Writes `data` to the file at `path`, creating it if necessary.
 pub fn write_path(path: &str, data: &[u8]) -> Result<(), &'static str> {
+    let abs = with_vfs(|vfs| vfs.fs.normalized_path(path));
+    if is_storage_backed(&abs) {
+        return storage::fs_write(&abs, data);
+    }
+
     let fd = open(path, OpenOptions::write_only_create())?;
     let write_result = write(fd, data);
     let close_result = close(fd);
@@ -981,5 +1045,18 @@ pub fn write_path(path: &str, data: &[u8]) -> Result<(), &'static str> {
 
 /// Returns the VFS node for `path` without opening it.
 pub fn open_node(path: &str) -> Result<VNode, &'static str> {
+    let abs = with_vfs(|vfs| vfs.fs.normalized_path(path));
+    if is_storage_backed(&abs) {
+        let stat = storage::fs_stat(&abs)?;
+        return Ok(VNode {
+            inode: storage_inode(&abs),
+            name: storage_node_name(&abs),
+            kind: match stat.kind {
+                storage::FsNodeKind::File => FileType::File,
+                storage::FsNodeKind::Directory => FileType::Directory,
+            },
+        });
+    }
+
     with_vfs(|vfs| vfs.fs.open_node(path))
 }
