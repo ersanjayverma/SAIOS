@@ -37,7 +37,7 @@ pub mod vmm;
 use efi_main::SaiosBootInfo;
 use graphics::display::FramebufferDisplay;
 use hal::arch::paging;
-use hal::arch::x86_64::{gdt, idt, interrupt};
+use hal::arch::x86_64::{cpuid, gdt, idt, interrupt, msr};
 use seed::Seed;
 
 const KERNEL_SERIAL_LOGGING_ENABLED: bool = false;
@@ -62,6 +62,26 @@ fn mark_boot_stage(framebuffer_info: efi_main::graphics::FramebufferInfo, color:
     }
 }
 
+fn detect_microcode_revision() -> Result<u32, &'static str> {
+    const CPUID_FEATURES_LEAF: u32 = 0x0000_0001;
+    const IA32_BIOS_SIGN_ID: u32 = 0x0000_008B;
+
+    let features = cpuid::features();
+    if !features.msr {
+        return Err("MSR unsupported");
+    }
+
+    let (_, _, ecx, _) = cpuid::cpuid(CPUID_FEATURES_LEAF);
+    if (ecx & (1 << 31)) != 0 {
+        return Err("running under hypervisor");
+    }
+
+    // Latch current microcode revision into IA32_BIOS_SIGN_ID.
+    msr::wrmsr(IA32_BIOS_SIGN_ID, 0);
+    let _ = cpuid::cpuid(CPUID_FEATURES_LEAF);
+    Ok((msr::rdmsr(IA32_BIOS_SIGN_ID) >> 32) as u32)
+}
+
 /// # Safety
 ///
 /// This is the kernel entry point invoked by the bootloader. `boot_info` must
@@ -83,6 +103,16 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     gdt::init();
     idt::init();
     hal::arch::x86_64::console::_print(format_args!("kernel: gdt+idt ok\n"));
+    match detect_microcode_revision() {
+        Ok(revision) => hal::arch::x86_64::console::_print(format_args!(
+            "kernel: cpu microcode revision={:#x}\n",
+            revision
+        )),
+        Err(reason) => hal::arch::x86_64::console::_print(format_args!(
+            "kernel: cpu microcode revision unavailable ({})\n",
+            reason
+        )),
+    }
 
     // Convert the raw pointer and count into a temporary Rust slice
     let _entries_slice = unsafe {

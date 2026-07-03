@@ -1,16 +1,23 @@
 use crate::arch::x86_64::cpuid;
 pub fn init() {
     let features = cpuid::features();
-    // Verify required features
+    // Some devices and VMs expose a reduced feature set. Keep booting and let
+    // downstream subsystems choose fallbacks when possible.
     if !features.apic {
-        panic!("CPU does not support APIC");
+        crate::arch::x86_64::console::_print(format_args!(
+            "cpu: warning: APIC not reported; interrupt controller features may be limited\n"
+        ));
     }
 
     if !features.msr {
-        panic!("CPU does not support MSRs");
+        crate::arch::x86_64::console::_print(format_args!(
+            "cpu: warning: MSR not reported; advanced CPU controls disabled\n"
+        ));
     }
 
     if !features.tsc {
-        panic!("CPU does not support TSC");
+        crate::arch::x86_64::console::_print(format_args!(
+            "cpu: warning: TSC not reported; timer precision may be reduced\n"
+        ));
     }
 }

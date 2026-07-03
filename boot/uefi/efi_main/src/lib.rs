@@ -17,6 +17,7 @@ pub mod graphics;
 pub mod memorymap;
 pub mod smbios;
 pub mod ui;
+use uefi::println;
 pub const R_X86_64_RELATIVE: u32 = 8;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,8 +128,11 @@ pub struct Elf64Rela {
 }
 /// Collects boot information from UEFI firmware and hardware probes.
 pub fn initialize_boot_info() -> SaiosBootInfo {
+    println!("Initializing boot information");
     let framebuffer = graphics::initialize().unwrap_or_else(|_| graphics::FramebufferInfo::empty());
+    println!("Framebuffer initialized: {:?}", framebuffer);  
     let acpi = acpi::initialize().unwrap_or_else(|_| acpi::AcpiInfo::empty());
+    println!("ACPI initialized: {:?}", acpi);
     let smbios = smbios::initialize().unwrap_or(smbios::SmbiosInfo {
         entry_point: 0,
         version_major: 0,
@@ -138,6 +142,7 @@ pub fn initialize_boot_info() -> SaiosBootInfo {
         table_length: 0,
         is_64bit: false,
     });
+    println!("SMBIOS initialized: {:?}", smbios);
     let cpu = cpu::initialize().unwrap_or(cpu::CpuInfo {
         vendor: [0; 13],
         brand: [0; 49],
@@ -162,12 +167,13 @@ pub fn initialize_boot_info() -> SaiosBootInfo {
             features: 0,
         },
     });
+    println!("CPU initialized: {:?}", cpu);
     let firmware = firmware::initialize().unwrap_or(firmware::FirmwareInfo {
         vendor: [0; 32],
         firmware_revision: 0,
         uefi_revision: uefi::table::Revision::new(0, 0),
     });
-
+    println!("Firmware initialized: {:?}", firmware);
     SaiosBootInfo {
         magic: SAIOS_BOOT_MAGIC,
         version: SAIOS_BOOT_VERSION,

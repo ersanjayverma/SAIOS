@@ -269,60 +269,11 @@ pub fn cache_size() -> u32 {
 }
 
 pub fn microcode_version() -> u32 {
-    // The microcode revision lives in IA32_BIOS_SIGN_ID (MSR 0x8B). The
-    // architectural procedure is: clear the MSR, execute CPUID leaf 1, then
-    // read the MSR back; the revision is in the high 32 bits (EDX).
-    //
-    // MSR access requires ring 0. During UEFI boot services we are in ring 0,
-    // but rdmsr/wrmsr are not guaranteed on every emulated CPU, so guard on the
-    // presence of the standard leaf. Returns 0 when unavailable.
-    const IA32_BIOS_SIGN_ID: u32 = 0x8B;
-
-    if self::max_basic_cpuid() < CPUID_BASIC_FEATURES {
-        return 0;
-    }
-
-    unsafe {
-        // Clear the MSR so a stale value cannot be mistaken for the revision.
-        wrmsr(IA32_BIOS_SIGN_ID, 0);
-        // CPUID leaf 1 latches the current microcode revision into the MSR.
-        let _ = self::cpuid(CPUID_BASIC_FEATURES, 0);
-        (rdmsr(IA32_BIOS_SIGN_ID) >> 32) as u32
-    }
-}
-
-/// Read a 64-bit Model Specific Register. Caller must ensure ring 0 and that
-/// the MSR is supported by the CPU.
-#[inline]
-unsafe fn rdmsr(msr: u32) -> u64 {
-    let (high, low): (u32, u32);
-    unsafe {
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") msr,
-            out("eax") low,
-            out("edx") high,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    ((high as u64) << 32) | (low as u64)
-}
-
-/// Write a 64-bit Model Specific Register. Caller must ensure ring 0 and that
-/// the MSR is supported and writable on the CPU.
-#[inline]
-unsafe fn wrmsr(msr: u32, value: u64) {
-    let low = value as u32;
-    let high = (value >> 32) as u32;
-    unsafe {
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") msr,
-            in("eax") low,
-            in("edx") high,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
+    // Reading the microcode revision uses privileged MSR accesses
+    // (IA32_BIOS_SIGN_ID). On some UEFI/VM combinations these can still trap
+    // despite CPUID feature bits, which would halt boot before handoff.
+    // Keep boot probing robust: report unknown revision during early boot.
+    0
 }
 /// Initial local APIC ID of the boot CPU (CPUID.1:EBX[31:24]).
 pub fn apic_id() -> u32 {
