@@ -359,10 +359,10 @@ impl SerialConsole {
     pub fn emergency_put_char(c: char) {
         match c {
             '\n' => {
-                hal::arch::x86_64::console::_print(format_args!("\r\n"));
+                hal::arch::x86_64::console::_print_force(format_args!("\r\n"));
             }
             _ => {
-                hal::arch::x86_64::console::_print(format_args!("{}", c));
+                hal::arch::x86_64::console::_print_force(format_args!("{}", c));
             }
         }
     }

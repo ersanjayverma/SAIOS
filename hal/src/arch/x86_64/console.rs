@@ -4,6 +4,7 @@
 //! for use in the HAL.
 
 use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::serial::{SerialConfig, SerialHal, SerialResult};
 
@@ -144,6 +145,17 @@ use crate::arch::x86_64::sync::StaticCell;
 
 /// The global serial port singleton.
 static SERIAL: StaticCell<Serial> = StaticCell::new(Serial::new(COM1));
+static SERIAL_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Enables or disables serial output produced by [`_print`].
+pub fn set_output_enabled(enabled: bool) {
+    SERIAL_OUTPUT_ENABLED.store(enabled, Ordering::Release);
+}
+
+/// Returns whether serial output is currently enabled.
+pub fn output_enabled() -> bool {
+    SERIAL_OUTPUT_ENABLED.load(Ordering::Acquire)
+}
 
 /// One-time initialization of the serial singleton.
 ///
@@ -159,6 +171,22 @@ pub fn init_serial() {
 
 /// Kernel print backend. Uses the static serial singleton.
 pub fn _print(args: fmt::Arguments) {
+    if !output_enabled() {
+        return;
+    }
+
+    // SAFETY: the serial singleton is initialised before first use
+    // and we are in a single-threaded kernel context.
+    unsafe {
+        let serial = &mut *SERIAL.get();
+        let _ = serial.write_fmt(args);
+    }
+}
+
+/// Print to serial regardless of [`output_enabled`].
+///
+/// Intended for panic/emergency diagnostics.
+pub fn _print_force(args: fmt::Arguments) {
     // SAFETY: the serial singleton is initialised before first use
     // and we are in a single-threaded kernel context.
     unsafe {

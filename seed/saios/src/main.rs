@@ -66,6 +66,7 @@ fn mark_boot_stage(framebuffer_info: efi_main::graphics::FramebufferInfo, color:
 /// with interrupts in a defined state.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
+    hal::arch::x86_64::console::set_output_enabled(KERNEL_SERIAL_LOGGING_ENABLED);
     hal::arch::x86_64::console::_print(format_args!("kernel: _start enter\n"));
     interrupt::disable();
     let boot_info = unsafe { &*boot_info };
@@ -195,7 +196,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     interrupt::disable();
     console::panic_println("PANIC");
     // Print panic info directly to emergency serial path.
-    hal::arch::x86_64::console::_print(format_args!("{}\n", info));
+    hal::arch::x86_64::console::_print_force(format_args!("{}\n", info));
     loop {
         hal::arch::x86_64::cpu::hlt();
     }

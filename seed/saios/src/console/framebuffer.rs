@@ -2,8 +2,8 @@ use super::backend::ConsoleBackend;
 use crate::graphics::display::{Display, FramebufferDisplay};
 use crate::graphics::font::{FONT_HEIGHT, FONT_WIDTH, glyph_row};
 use crate::graphics::framebuffer::Color;
+use alloc::collections::VecDeque;
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::ptr;
 use efi_main::graphics::FramebufferInfo;
 use efi_main::graphics::PixelFormat;
@@ -29,7 +29,7 @@ pub struct FramebufferConsole {
     bg: Color,
     screen: [[char; MAX_TEXT_COLS]; MAX_TEXT_ROWS],
     view_offset_lines: usize,
-    scrollback: Vec<String>,
+    scrollback: VecDeque<String>,
     /// Whether the cursor cell is currently inverted (drawn) or normal.
     cursor_inverted: bool,
 }
@@ -46,7 +46,7 @@ impl FramebufferConsole {
             bg: Color::BLACK,
             screen: [[' '; MAX_TEXT_COLS]; MAX_TEXT_ROWS],
             view_offset_lines: 0,
-            scrollback: Vec::new(),
+            scrollback: VecDeque::new(),
             cursor_inverted: false,
         }
     }
@@ -266,26 +266,28 @@ impl FramebufferConsole {
     /// Snapshot a screen-model row into an owned `String`, trimming trailing
     /// blanks, for storage in the scrollback history.
     fn row_to_scrollback(&self, row: usize, cols: usize) -> String {
-        let mut out = String::new();
         let cols = cols.min(MAX_TEXT_COLS);
-        for x in 0..cols {
+        let mut end = 0;
+        for x in (0..cols).rev() {
+            if self.screen[row][x] != ' ' {
+                end = x + 1;
+                break;
+            }
+        }
+
+        let mut out = String::with_capacity(end);
+        for x in 0..end {
             out.push(self.screen[row][x]);
         }
-
-        while out.ends_with(' ') {
-            out.pop();
-        }
-
         out
     }
 
     /// Append a line to scrollback, evicting the oldest lines once the history
     /// cap ([`MAX_SCROLLBACK_LINES`]) is exceeded.
     fn push_scrollback_line(&mut self, line: String) {
-        self.scrollback.push(line);
-        if self.scrollback.len() > MAX_SCROLLBACK_LINES {
-            let overflow = self.scrollback.len() - MAX_SCROLLBACK_LINES;
-            self.scrollback.drain(0..overflow);
+        self.scrollback.push_back(line);
+        while self.scrollback.len() > MAX_SCROLLBACK_LINES {
+            let _ = self.scrollback.pop_front();
         }
     }
 
@@ -340,6 +342,28 @@ impl FramebufferConsole {
         if self.view_offset_lines == 0 {
             self.cursor_x = self.cursor_x.min(cols.saturating_sub(1));
             self.cursor_y = self.cursor_y.min(rows.saturating_sub(1));
+        }
+    }
+
+    /// Draw one viewport row from the unified line index space
+    /// (`scrollback` + current `screen` model).
+    fn draw_view_line(&mut self, row: usize, line_idx: usize, cols: usize, rows: usize) {
+        if line_idx < self.scrollback.len() {
+            let mut row_chars = [' '; MAX_TEXT_COLS];
+            for (x, ch) in self.scrollback[line_idx].chars().take(cols).enumerate() {
+                row_chars[x] = ch;
+            }
+            for (x, ch) in row_chars.iter().take(cols).enumerate() {
+                self.draw_cell(x, row, *ch);
+            }
+            return;
+        }
+
+        let screen_row = line_idx - self.scrollback.len();
+        if screen_row < rows {
+            for x in 0..cols {
+                self.draw_cell(x, row, self.screen[screen_row][x]);
+            }
         }
     }
 
@@ -460,6 +484,150 @@ impl FramebufferConsole {
         true
     }
 
+    /// Scroll the visible framebuffer down by `text_rows` character rows using
+    /// a single `memmove`, then clear the newly exposed rows at the top.
+    fn scroll_pixels_down(&mut self, text_rows: usize) -> bool {
+        let Some(display) = self.display.as_mut() else {
+            return false;
+        };
+
+        let shift_px = text_rows.saturating_mul(FONT_HEIGHT);
+        if shift_px == 0 {
+            return true;
+        }
+
+        let width = display.width();
+        let height = display.height();
+        let stride = display.stride();
+        let bytes_per_pixel = display.bytes_per_pixel();
+        let fb_size = display.framebuffer_size();
+        let pixel_format = display.pixel_format();
+        let pixel_masks = display.pixel_masks();
+        let fb = display.framebuffer();
+        let bg = self.bg.to_u32();
+
+        if width == 0 || height == 0 || bytes_per_pixel == 0 || stride == 0 {
+            return false;
+        }
+
+        let shift_px = shift_px.min(height);
+        let row_bytes = stride.saturating_mul(bytes_per_pixel);
+        if row_bytes == 0 {
+            return false;
+        }
+
+        if shift_px < height {
+            let dst_offset = shift_px.saturating_mul(row_bytes);
+            let copy_bytes = (height - shift_px).saturating_mul(row_bytes);
+            if dst_offset.saturating_add(copy_bytes) > fb_size {
+                return false;
+            }
+
+            unsafe {
+                ptr::copy(fb, fb.add(dst_offset), copy_bytes);
+            }
+        }
+
+        let clear_end = shift_px;
+
+        let pack_color = |color: u32| -> u32 {
+            let r = ((color >> 16) & 0xFF) as u8;
+            let g = ((color >> 8) & 0xFF) as u8;
+            let b = (color & 0xFF) as u8;
+            match pixel_format {
+                PixelFormat::Bgr => {
+                    (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | (0xFF << 24)
+                }
+                PixelFormat::Rgb => {
+                    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | (0xFF << 24)
+                }
+                PixelFormat::Bitmask => Self::pack_bitmask(r, g, b, pixel_masks),
+                PixelFormat::BltOnly => {
+                    (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | (0xFF << 24)
+                }
+            }
+        };
+
+        let bg_packed = pack_color(bg);
+
+        if bytes_per_pixel == 4 {
+            let total_pixels = fb_size / 4;
+            let fb32 = unsafe { core::slice::from_raw_parts_mut(fb.cast::<u32>(), total_pixels) };
+            for y in 0..clear_end {
+                let row_base = y.saturating_mul(stride);
+                if row_base >= total_pixels {
+                    break;
+                }
+                let end = core::cmp::min(row_base + width, total_pixels);
+                fb32[row_base..end].fill(bg_packed);
+            }
+            return true;
+        }
+
+        let bg_bytes = bg_packed.to_le_bytes();
+        for y in 0..clear_end {
+            let row_base = y.saturating_mul(stride);
+            for x in 0..width {
+                let offset = (row_base + x).saturating_mul(bytes_per_pixel);
+                if offset + bytes_per_pixel > fb_size {
+                    break;
+                }
+                unsafe {
+                    let p = fb.add(offset);
+                    let mut i = 0;
+                    while i < bytes_per_pixel {
+                        ptr::write(p.add(i), bg_bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Try to update the viewport incrementally by pixel-scrolling the current
+    /// image and redrawing only the newly exposed text rows.
+    fn scroll_viewport_incremental(&mut self, delta_lines: isize) -> bool {
+        let Some((cols, rows)) = self.text_bounds() else {
+            return false;
+        };
+
+        let delta = delta_lines.unsigned_abs();
+        if delta == 0 {
+            return true;
+        }
+        if delta >= rows {
+            return false;
+        }
+
+        let shifted = if delta_lines > 0 {
+            self.scroll_pixels_up(delta)
+        } else {
+            self.scroll_pixels_down(delta)
+        };
+        if !shifted {
+            return false;
+        }
+
+        let total_lines = self.scrollback.len() + rows;
+        let start = total_lines.saturating_sub(rows + self.view_offset_lines);
+
+        if delta_lines > 0 {
+            for row in rows - delta..rows {
+                let line_idx = start + row;
+                self.draw_view_line(row, line_idx, cols, rows);
+            }
+        } else {
+            for row in 0..delta {
+                let line_idx = start + row;
+                self.draw_view_line(row, line_idx, cols, rows);
+            }
+        }
+
+        true
+    }
+
     /// Move the scroll-back view by `lines` (positive scrolls into history,
     /// negative back toward the live output) and repaint if it changed.
     pub fn scroll_view_lines(&mut self, lines: isize) -> bool {
@@ -470,6 +638,7 @@ impl FramebufferConsole {
         let total_lines = self.scrollback.len() + rows;
         let max_offset = total_lines.saturating_sub(rows);
         let before = self.view_offset_lines;
+        let old_start = total_lines.saturating_sub(rows + before);
 
         if lines > 0 {
             self.view_offset_lines = self
@@ -482,7 +651,11 @@ impl FramebufferConsole {
 
         let changed = before != self.view_offset_lines;
         if changed {
-            self.render_viewport();
+            let new_start = total_lines.saturating_sub(rows + self.view_offset_lines);
+            let delta_lines = new_start as isize - old_start as isize;
+            if !self.scroll_viewport_incremental(delta_lines) {
+                self.render_viewport();
+            }
         }
         changed
     }
