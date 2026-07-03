@@ -41,6 +41,7 @@ use hal::arch::x86_64::{gdt, idt, interrupt};
 use seed::Seed;
 
 const KERNEL_SERIAL_LOGGING_ENABLED: bool = false;
+const BOOT_STAGE_COLOR_DIAGNOSTICS: bool = false;
 
 const STAGE_KERNEL_ENTRY: u32 = 0x0030_0000;
 const STAGE_MEMORY_READY: u32 = 0x0030_1800;
@@ -53,6 +54,9 @@ const STAGE_BOOT_READY: u32 = 0x0000_0030;
 static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
 
 fn mark_boot_stage(framebuffer_info: efi_main::graphics::FramebufferInfo, color: u32) {
+    if !BOOT_STAGE_COLOR_DIAGNOSTICS {
+        return;
+    }
     if let Some(mut display) = FramebufferDisplay::from_info(framebuffer_info) {
         display.clear_color(color);
     }
