@@ -71,6 +71,55 @@ impl FramebufferConsole {
         let fg = self.fg.to_u32();
         let bg = self.bg.to_u32();
 
+        if bytes_per_pixel == 4 && matches!(pixel_format, PixelFormat::Bgr | PixelFormat::Rgb) {
+            let pack = |color: u32| -> u32 {
+                let r = (color >> 16) & 0xFF;
+                let g = (color >> 8) & 0xFF;
+                let b = color & 0xFF;
+                match pixel_format {
+                    PixelFormat::Bgr => b | (g << 8) | (r << 16) | (0xFF << 24),
+                    PixelFormat::Rgb => r | (g << 8) | (b << 16) | (0xFF << 24),
+                    PixelFormat::Bitmask | PixelFormat::BltOnly => 0,
+                }
+            };
+
+            let fg_packed = pack(fg);
+            let bg_packed = pack(bg);
+
+            for row_idx in 0..FONT_HEIGHT {
+                let y = py.saturating_add(row_idx);
+                if y >= height {
+                    continue;
+                }
+
+                let row_bits = glyph_row(c, row_idx);
+                let row_base = y * stride;
+                for bit in 0..FONT_WIDTH {
+                    let x = px.saturating_add(bit);
+                    if x >= width {
+                        continue;
+                    }
+
+                    let offset = (row_base + x) * 4;
+                    if offset + 4 > fb_size {
+                        continue;
+                    }
+
+                    let mask = 1u8 << bit;
+                    let packed = if (row_bits & mask) != 0 {
+                        fg_packed
+                    } else {
+                        bg_packed
+                    };
+
+                    unsafe {
+                        ptr::write_volatile(fb.add(offset).cast::<u32>(), packed);
+                    }
+                }
+            }
+            return;
+        }
+
         for row_idx in 0..FONT_HEIGHT {
             let y = py.saturating_add(row_idx);
             if y >= height {
@@ -111,35 +160,37 @@ impl FramebufferConsole {
         let g = ((color >> 8) & 0xFF) as u8;
         let b = (color & 0xFF) as u8;
 
-        match pixel_format {
-            PixelFormat::Rgb => {
-                ptr::write_volatile(dst, r);
-                ptr::write_volatile(dst.add(1), g);
-                ptr::write_volatile(dst.add(2), b);
-                // Keep alpha non-zero for framebuffers that use channel 3.
-                if bytes_per_pixel >= 4 {
-                    ptr::write_volatile(dst.add(3), 0xFF);
+        unsafe {
+            match pixel_format {
+                PixelFormat::Rgb => {
+                    ptr::write_volatile(dst, r);
+                    ptr::write_volatile(dst.add(1), g);
+                    ptr::write_volatile(dst.add(2), b);
+                    // Keep alpha non-zero for framebuffers that use channel 3.
+                    if bytes_per_pixel >= 4 {
+                        ptr::write_volatile(dst.add(3), 0xFF);
+                    }
                 }
-            }
-            PixelFormat::Bgr => {
-                ptr::write_volatile(dst, b);
-                ptr::write_volatile(dst.add(1), g);
-                ptr::write_volatile(dst.add(2), r);
-                // Keep alpha non-zero for framebuffers that use channel 3.
-                if bytes_per_pixel >= 4 {
-                    ptr::write_volatile(dst.add(3), 0xFF);
+                PixelFormat::Bgr => {
+                    ptr::write_volatile(dst, b);
+                    ptr::write_volatile(dst.add(1), g);
+                    ptr::write_volatile(dst.add(2), r);
+                    // Keep alpha non-zero for framebuffers that use channel 3.
+                    if bytes_per_pixel >= 4 {
+                        ptr::write_volatile(dst.add(3), 0xFF);
+                    }
                 }
-            }
-            PixelFormat::Bitmask => {
-                let pixel = Self::pack_bitmask(r, g, b, masks);
-                Self::write_packed(dst, pixel, bytes_per_pixel);
-            }
-            PixelFormat::BltOnly => {
-                ptr::write_volatile(dst, b);
-                ptr::write_volatile(dst.add(1), g);
-                ptr::write_volatile(dst.add(2), r);
-                if bytes_per_pixel >= 4 {
-                    ptr::write_volatile(dst.add(3), 0xFF);
+                PixelFormat::Bitmask => {
+                    let pixel = Self::pack_bitmask(r, g, b, masks);
+                    Self::write_packed(dst, pixel, bytes_per_pixel);
+                }
+                PixelFormat::BltOnly => {
+                    ptr::write_volatile(dst, b);
+                    ptr::write_volatile(dst.add(1), g);
+                    ptr::write_volatile(dst.add(2), r);
+                    if bytes_per_pixel >= 4 {
+                        ptr::write_volatile(dst.add(3), 0xFF);
+                    }
                 }
             }
         }
@@ -151,7 +202,9 @@ impl FramebufferConsole {
         let count = core::cmp::min(bytes_per_pixel, 4);
         let mut i = 0;
         while i < count {
-            ptr::write_volatile(dst.add(i), bytes[i]);
+            unsafe {
+                ptr::write_volatile(dst.add(i), bytes[i]);
+            }
             i += 1;
         }
     }
@@ -231,9 +284,12 @@ impl FramebufferConsole {
         for row in 0..rows {
             let line_idx = start + row;
             if line_idx < self.scrollback.len() {
-                let line = self.scrollback[line_idx].clone();
-                for (x, ch) in line.chars().take(cols).enumerate() {
-                    self.draw_cell(x, row, ch);
+                let mut row_chars = [' '; MAX_TEXT_COLS];
+                for (x, ch) in self.scrollback[line_idx].chars().take(cols).enumerate() {
+                    row_chars[x] = ch;
+                }
+                for (x, ch) in row_chars.iter().take(cols).enumerate() {
+                    self.draw_cell(x, row, *ch);
                 }
             } else {
                 let screen_row = line_idx - self.scrollback.len();
@@ -253,28 +309,7 @@ impl FramebufferConsole {
 
     fn clear_direct(&mut self) {
         if let Some(display) = self.display.as_mut() {
-            let width = display.width();
-            let height = display.height();
-            let stride = display.stride();
-            let pixel_format = display.pixel_format();
-            let pixel_masks = display.pixel_masks();
-            let bytes_per_pixel = display.bytes_per_pixel();
-            let fb_size = display.framebuffer_size();
-            let fb = display.framebuffer();
-            let color = self.bg.to_u32();
-
-            for y in 0..height {
-                for x in 0..width {
-                    let offset = (y * stride + x) * bytes_per_pixel;
-                    if offset + bytes_per_pixel > fb_size {
-                        continue;
-                    }
-                    unsafe {
-                        let p = fb.add(offset);
-                        Self::write_pixel(p, color, pixel_format, pixel_masks, bytes_per_pixel);
-                    }
-                }
-            }
+            display.clear_color(self.bg.to_u32());
         }
     }
 

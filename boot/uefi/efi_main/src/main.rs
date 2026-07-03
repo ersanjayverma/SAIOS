@@ -4,6 +4,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::cell::UnsafeCell;
+use core::time::Duration;
 use uefi::boot::{AllocateType, MemoryType};
 use uefi::println;
 use uefi::proto::loaded_image::LoadedImage;

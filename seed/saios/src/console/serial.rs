@@ -1,4 +1,5 @@
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 use smallvec::SmallVec;
 use utf8parse::{Parser, Receiver};
 
@@ -82,6 +83,7 @@ impl Utf8Decoder {
 
 static UTF8_DECODER: StaticCell<Utf8Decoder> = StaticCell::new(Utf8Decoder::new());
 static ESC_STATE: StaticCell<EscState> = StaticCell::new(EscState::None);
+static SERIAL_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 fn poll_byte() -> Option<u8> {
     if !SERIAL_INPUT_ENABLED {
@@ -311,6 +313,14 @@ impl SerialConsole {
         hal::arch::x86_64::console::init_serial();
     }
 
+    pub fn set_output_enabled(enabled: bool) {
+        SERIAL_OUTPUT_ENABLED.store(enabled, Ordering::Release);
+    }
+
+    pub fn output_enabled() -> bool {
+        SERIAL_OUTPUT_ENABLED.load(Ordering::Acquire)
+    }
+
     #[inline(always)]
     pub fn emergency_put_char(c: char) {
         match c {
@@ -336,6 +346,10 @@ impl SerialConsole {
 
 impl ConsoleBackend for SerialConsole {
     fn put_char(&mut self, c: char) {
+        if !Self::output_enabled() {
+            return;
+        }
+
         match c {
             '\n' => {
                 // Keep serial terminals aligned by using CRLF line endings.
@@ -348,6 +362,10 @@ impl ConsoleBackend for SerialConsole {
     }
 
     fn clear(&mut self) {
+        if !Self::output_enabled() {
+            return;
+        }
+
         // Keep serial logs line-oriented: do not emit terminal control sequences.
         Self::write_escape(format_args!("\r\n"));
     }
@@ -358,6 +376,10 @@ impl ConsoleBackend for SerialConsole {
     }
 
     fn scroll_up(&mut self, rows: usize) -> bool {
+        if !Self::output_enabled() {
+            return true;
+        }
+
         let rows = core::cmp::max(1, rows);
         for _ in 0..rows {
             Self::write_escape(format_args!("\r\n"));

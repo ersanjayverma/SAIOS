@@ -33,6 +33,8 @@ use hal::arch::paging;
 use hal::arch::x86_64::{gdt, idt, interrupt};
 use seed::Seed;
 
+const KERNEL_SERIAL_LOGGING_ENABLED: bool = false;
+
 #[global_allocator]
 static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
 
@@ -90,6 +92,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     console::attach_framebuffer(framebuffer_info);
     hal::arch::x86_64::console::_print(format_args!("kernel: fb attach done\n"));
     driver::console::init();
+    console::set_serial_logging(KERNEL_SERIAL_LOGGING_ENABLED);
     kernel::timeline::mark("Heap");
     let fb_ready = console::promote_framebuffer_renderer();
     hal::arch::x86_64::console::_print(format_args!(
