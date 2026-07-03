@@ -19,6 +19,7 @@ use core::fmt::{self, Write};
 
 use crate::kernel::device;
 use crate::kernel::driver;
+use crate::driver::usb;
 use backend::{ConsoleBackend, MirrorConsole};
 use core::sync::atomic::{AtomicBool, Ordering};
 use cursor::Cursor;
@@ -27,11 +28,14 @@ use framebuffer::FramebufferConsole;
 use hal::arch::x86_64::sync::StaticCell;
 use heapless::String;
 use input::InputBuffer;
-use keyboard::{KeyEvent, KeyboardDriver};
-use mouse::{MouseDriver, MouseEvent};
+use keyboard::KeyboardDriver;
+use mouse::MouseDriver;
 use serial::{SerialConsole, poll_input_event as poll_serial_input_event};
 use static_assertions::const_assert;
 use unicode_width::UnicodeWidthChar;
+
+pub use keyboard::KeyEvent;
+pub use mouse::{MouseButtons, MouseEvent};
 
 const DEFAULT_WIDTH: usize = 80;
 const DEFAULT_HEIGHT: usize = 25;
@@ -330,8 +334,28 @@ pub fn on_timer_tick() {
 /// Initializes the serial port, input devices and console state.
 pub fn init() {
     SerialConsole::init();
+    let keyboard_ready = unsafe { (*KEYBOARD.get()).init() };
     unsafe {
         (*MOUSE.get()).init();
+    }
+    if !keyboard_ready {
+        let usb_hosts = usb::controller_count();
+        if usb_hosts != 0 {
+            if usb::hid_input_ready() {
+                hal::arch::x86_64::console::_print(format_args!(
+                    "console: PS/2 keyboard unavailable; xHCI host(s) initialized with connected USB port(s), but HID enumeration/input events are not implemented yet\n"
+                ));
+            } else {
+                hal::arch::x86_64::console::_print(format_args!(
+                    "console: PS/2 keyboard unavailable; detected {} USB controller(s), but USB HID input is not implemented yet\n",
+                    usb_hosts
+                ));
+            }
+        } else {
+            hal::arch::x86_64::console::_print(format_args!(
+                "console: PS/2 keyboard unavailable; legacy 8042 path not present or not responding\n"
+            ));
+        }
     }
     let _ = driver::ensure_driver(
         "serial",
@@ -359,7 +383,11 @@ pub fn init() {
         "0.1.0",
         "SAIOS",
         &["hid"],
-        driver::DriverStatus::Running,
+        if keyboard_ready {
+            driver::DriverStatus::Running
+        } else {
+            driver::DriverStatus::Stopped
+        },
     );
     let _ = driver::ensure_driver(
         "hid-mouse",
@@ -381,7 +409,11 @@ pub fn init() {
         "keyboard0",
         "hid-keyboard",
         "hid-keyboard",
-        device::DeviceStatus::Online,
+        if keyboard_ready {
+            device::DeviceStatus::Online
+        } else {
+            device::DeviceStatus::Offline
+        },
     );
     let _ = device::ensure_device(
         "mouse0",
@@ -683,7 +715,7 @@ pub fn poll_input() -> Option<String<256>> {
     }
 
     // SAFETY: single-core early kernel context.
-    if let Some(mouse_event) = unsafe { (*MOUSE.get()).poll_event() } {
+    if let Some(mouse_event) = unsafe { (*MOUSE.get()).poll_event() }.or_else(usb::poll_mouse_event) {
         match mouse_event {
             MouseEvent::Wheel { delta, .. } => {
                 if delta > 0 {
@@ -706,7 +738,9 @@ pub fn poll_input() -> Option<String<256>> {
     }
 
     // SAFETY: single-core early kernel context.
-    let key_event = unsafe { (*KEYBOARD.get()).poll_event() }.or_else(poll_serial_input_event)?;
+    let key_event = unsafe { (*KEYBOARD.get()).poll_event() }
+        .or_else(usb::poll_key_event)
+        .or_else(poll_serial_input_event)?;
     framebuffer_scrollback_to_bottom();
 
     // SAFETY: single-core early kernel context.

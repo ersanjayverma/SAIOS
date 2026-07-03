@@ -7,6 +7,7 @@ use crate::console;
 use crate::driver::dhcp;
 use crate::driver::network;
 use crate::driver::storage as disk;
+use crate::driver::usb;
 use crate::heap;
 use crate::kernel::crt;
 use crate::kernel::device;
@@ -412,6 +413,11 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "pci",
         description: "List PCI devices",
         handler: cmd_pci,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "usb",
+        description: "List or rescan USB host controllers",
+        handler: cmd_usb,
     }));
     registry.register(Box::new(StaticCommand {
         name: "net",
@@ -2076,6 +2082,64 @@ fn cmd_pci(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         );
     }
     Ok(())
+}
+
+fn cmd_usb(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let action = args.first().copied().unwrap_or("status");
+
+    match action {
+        "scan" | "rescan" | "up" => {
+            driver::start("usb")?;
+            console::println!("usb: {} controller(s) detected", usb::controller_count());
+            cmd_usb(_ctx, &["status"])
+        }
+        "status" | "ls" => {
+            let controllers = usb::controllers();
+            if controllers.is_empty() {
+                console::println!("usb: no host controllers detected");
+                console::println!("usb: no USB HID keyboard/mouse path is available yet");
+                return Ok(());
+            }
+
+            console::println!("Name  Type  State  Ver  Ports  Vendor Device  Resource");
+            for controller in controllers {
+                let resource = if let Some(mmio) = controller.mmio_base {
+                    format!("mmio@0x{:x}", mmio)
+                } else if let Some(io) = controller.io_base {
+                    format!("io@0x{:x}", io)
+                } else {
+                    "unmapped".to_string()
+                };
+                let state = match controller.state {
+                    usb::UsbControllerState::Discovered => "disc",
+                    usb::UsbControllerState::Initialized => "init",
+                    usb::UsbControllerState::Faulted => "fail",
+                };
+                let version = controller
+                    .version
+                    .map(|v| format!("{:x}.{:02x}", v >> 8, v & 0xFF))
+                    .unwrap_or_else(|| "--".to_string());
+                console::println!(
+                    "{}  {}  {}  {}  {}/{}  {:04x} {:04x}  {}",
+                    controller.name,
+                    controller.kind,
+                    state,
+                    version,
+                    controller.connected_ports,
+                    controller.port_count,
+                    controller.vendor_id,
+                    controller.device_id,
+                    resource,
+                );
+                if let Some(err) = controller.last_error.as_ref() {
+                    console::println!("  note: {}", err);
+                }
+            }
+            console::println!("usb: xHCI init/probe is present; HID keyboard/mouse still needs device enumeration, transfer rings, and report parsing");
+            Ok(())
+        }
+        _ => Err("usb: usage: usb [status|scan|rescan|up]"),
+    }
 }
 
 fn cmd_net(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {

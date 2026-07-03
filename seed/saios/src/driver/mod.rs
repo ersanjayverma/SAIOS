@@ -6,4 +6,5 @@ pub mod loopback;
 pub mod memory;
 pub mod network;
 pub mod storage;
+pub mod usb;
 pub mod wifi;

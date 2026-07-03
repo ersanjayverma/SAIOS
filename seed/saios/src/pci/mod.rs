@@ -24,6 +24,14 @@ pub struct PciDevice {
     pub revision: u8,
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct PciBar {
+    pub index: u8,
+    pub base: u64,
+    pub is_io: bool,
+    pub is_64bit: bool,
+}
+
 struct PciDatabase {
     initialized: bool,
     devices: Vec<PciDevice>,
@@ -68,10 +76,80 @@ pub fn read_u32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     inl(CONFIG_DATA_PORT)
 }
 
+pub fn read_u16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
+    let value = read_u32(bus, device, function, offset & !0x02);
+    let shift = ((offset & 0x02) * 8) as u32;
+    ((value >> shift) & 0xFFFF) as u16
+}
+
+pub fn read_u8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
+    let value = read_u32(bus, device, function, offset & !0x03);
+    let shift = ((offset & 0x03) * 8) as u32;
+    ((value >> shift) & 0xFF) as u8
+}
+
 pub fn write_u32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
     let address = config_address(bus, device, function, offset);
     outl(CONFIG_ADDRESS_PORT, address);
     outl(CONFIG_DATA_PORT, value);
+}
+
+pub fn write_u16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
+    let aligned = offset & !0x02;
+    let shift = ((offset & 0x02) * 8) as u32;
+    let mask = !(0xFFFFu32 << shift);
+    let current = read_u32(bus, device, function, aligned);
+    let next = (current & mask) | ((value as u32) << shift);
+    write_u32(bus, device, function, aligned, next);
+}
+
+pub fn read_bar(dev: &PciDevice, index: u8) -> Option<PciBar> {
+    if index >= 6 {
+        return None;
+    }
+
+    let offset = 0x10u8.saturating_add(index.saturating_mul(4));
+    let low = read_u32(dev.bus, dev.device, dev.function, offset);
+    if low == 0 || low == 0xFFFF_FFFF {
+        return None;
+    }
+
+    if (low & 0x1) != 0 {
+        let base = (low & 0xFFFF_FFFC) as u64;
+        if base == 0 {
+            return None;
+        }
+
+        return Some(PciBar {
+            index,
+            base,
+            is_io: true,
+            is_64bit: false,
+        });
+    }
+
+    let bar_type = (low >> 1) & 0x3;
+    let is_64bit = bar_type == 0x2;
+    let base = if is_64bit {
+        if index >= 5 {
+            return None;
+        }
+        let high = read_u32(dev.bus, dev.device, dev.function, offset.saturating_add(4));
+        ((high as u64) << 32) | ((low & 0xFFFF_FFF0) as u64)
+    } else {
+        (low & 0xFFFF_FFF0) as u64
+    };
+
+    if base == 0 {
+        return None;
+    }
+
+    Some(PciBar {
+        index,
+        base,
+        is_io: false,
+        is_64bit,
+    })
 }
 
 fn enumerate_into(devices: &mut Vec<PciDevice>) {

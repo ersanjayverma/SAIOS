@@ -229,6 +229,22 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
     } else if name.eq_ignore_ascii_case("dns") {
         crate::driver::dns::init();
         Ok(())
+    } else if name.eq_ignore_ascii_case("usb") {
+        crate::driver::usb::rescan();
+        let controllers = crate::driver::usb::controllers();
+        for controller in controllers {
+            let _ = device::ensure_device(
+                controller.name.as_str(),
+                "usb",
+                "bus/usb-host",
+                if matches!(controller.state, crate::driver::usb::UsbControllerState::Faulted) {
+                    device::DeviceStatus::Faulted
+                } else {
+                    device::DeviceStatus::Online
+                },
+            );
+        }
+        Ok(())
     } else if name.eq_ignore_ascii_case("storage")
         || name.eq_ignore_ascii_case("ext4")
         || name.eq_ignore_ascii_case("ntfs")
@@ -264,6 +280,7 @@ fn run_reload_hook(name: &str) -> Result<(), &'static str> {
         || name.eq_ignore_ascii_case("wifi")
         || name.eq_ignore_ascii_case("dhcp")
         || name.eq_ignore_ascii_case("dns")
+        || name.eq_ignore_ascii_case("usb")
     {
         run_start_hook(name)
     } else if name.eq_ignore_ascii_case("storage")
@@ -290,6 +307,7 @@ pub fn init() {
         // Drivers that have no early runtime registration site yet.
         let _ = r.ensure_driver("pci", "0.1.0", "SAIOS", &[], DriverStatus::Loaded);
         let _ = r.ensure_driver("network", "0.1.0", "SAIOS", &["pci"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("usb", "0.1.0", "SAIOS", &["pci"], DriverStatus::Loaded);
         let _ = r.ensure_driver(
             "loopback",
             "0.1.0",
