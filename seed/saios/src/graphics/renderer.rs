@@ -88,12 +88,24 @@ impl<'a> Renderer<'a> {
     }
 
     pub fn draw_char(&mut self, x: usize, y: usize, ch: char, fg: u32, bg: u32) {
-        for row_idx in 0..FONT_HEIGHT {
+        let surface_width = self.surface.width();
+        let surface_height = self.surface.height();
+
+        if x >= surface_width || y >= surface_height {
+            return;
+        }
+
+        let draw_width = core::cmp::min(FONT_WIDTH, surface_width - x);
+        let draw_height = core::cmp::min(FONT_HEIGHT, surface_height - y);
+        let pixels = self.surface.pixels_mut();
+
+        for row_idx in 0..draw_height {
             let row_bits = glyph_row(ch, row_idx);
-            for bit in 0..FONT_WIDTH {
+            let row_start = (y + row_idx) * surface_width + x;
+            let row = &mut pixels[row_start..row_start + draw_width];
+            for (bit, px) in row.iter_mut().enumerate() {
                 let mask = 1u8 << bit;
-                let color = if (row_bits & mask) != 0 { fg } else { bg };
-                self.surface.put_pixel(x + bit, y + row_idx, color);
+                *px = if (row_bits & mask) != 0 { fg } else { bg };
             }
         }
     }
@@ -122,13 +134,27 @@ impl<'a> Renderer<'a> {
         height: usize,
         pixels: &[u32],
     ) {
-        for py in 0..height {
-            for px in 0..width {
-                let idx = py.saturating_mul(width).saturating_add(px);
-                if idx < pixels.len() {
-                    self.surface.put_pixel(x + px, y + py, pixels[idx]);
-                }
+        let surface_width = self.surface.width();
+        let surface_height = self.surface.height();
+
+        if width == 0 || height == 0 || x >= surface_width || y >= surface_height {
+            return;
+        }
+
+        let draw_width = core::cmp::min(width, surface_width - x);
+        let draw_height = core::cmp::min(height, surface_height - y);
+        let dst = self.surface.pixels_mut();
+
+        for py in 0..draw_height {
+            let src_row_start = py * width;
+            if src_row_start >= pixels.len() {
+                break;
             }
+
+            let copy_width = core::cmp::min(draw_width, pixels.len() - src_row_start);
+            let dst_row_start = (y + py) * surface_width + x;
+            dst[dst_row_start..dst_row_start + copy_width]
+                .copy_from_slice(&pixels[src_row_start..src_row_start + copy_width]);
         }
     }
 }

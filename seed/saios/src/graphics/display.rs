@@ -256,7 +256,46 @@ impl FramebufferDisplay {
         let x_end = core::cmp::min(src_x.saturating_add(width), self.width);
         let y_end = core::cmp::min(src_y.saturating_add(height), self.height);
 
-        if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Rgb | PixelFormat::Bgr) {
+        if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Bgr) {
+            let copy_width = x_end.saturating_sub(src_x);
+            if copy_width == 0 {
+                return;
+            }
+
+            for y in src_y..y_end {
+                let src_row_start = y * src_width + src_x;
+                if src_row_start >= pixels.len() {
+                    break;
+                }
+
+                let src_row_len = core::cmp::min(copy_width, pixels.len() - src_row_start);
+                if src_row_len == 0 {
+                    continue;
+                }
+
+                let dst_offset = (y * self.stride + src_x) * 4;
+                if dst_offset >= self.size_bytes {
+                    continue;
+                }
+
+                let max_pixels = (self.size_bytes - dst_offset) / 4;
+                let copy_pixels = core::cmp::min(src_row_len, max_pixels);
+                if copy_pixels == 0 {
+                    continue;
+                }
+
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        pixels.as_ptr().add(src_row_start).cast::<u8>(),
+                        self.base.add(dst_offset),
+                        copy_pixels * 4,
+                    );
+                }
+            }
+            return;
+        }
+
+        if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Rgb) {
             for y in src_y..y_end {
                 let row_start = y * src_width;
                 for x in src_x..x_end {
@@ -375,7 +414,41 @@ impl Display for FramebufferDisplay {
         let width = core::cmp::min(self.width, src_width);
         let height = core::cmp::min(self.height, src_height);
 
-        if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Rgb | PixelFormat::Bgr) {
+        if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Bgr) {
+            for y in 0..height {
+                let src_row_start = y * src_width;
+                if src_row_start >= pixels.len() {
+                    break;
+                }
+
+                let src_row_len = core::cmp::min(width, pixels.len() - src_row_start);
+                if src_row_len == 0 {
+                    continue;
+                }
+
+                let dst_offset = (y * self.stride) * 4;
+                if dst_offset >= self.size_bytes {
+                    continue;
+                }
+
+                let max_pixels = (self.size_bytes - dst_offset) / 4;
+                let copy_pixels = core::cmp::min(src_row_len, max_pixels);
+                if copy_pixels == 0 {
+                    continue;
+                }
+
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        pixels.as_ptr().add(src_row_start).cast::<u8>(),
+                        self.base.add(dst_offset),
+                        copy_pixels * 4,
+                    );
+                }
+            }
+            return;
+        }
+
+        if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Rgb) {
             for y in 0..height {
                 let row_start = y * src_width;
                 for x in 0..width {
@@ -385,7 +458,7 @@ impl Display for FramebufferDisplay {
                     }
                     let packed = self.rgb_to_native_u32(pixels[row_start + x]);
                     unsafe {
-                        ptr::write_volatile(self.base.add(offset).cast::<u32>(), packed);
+                        ptr::write(self.base.add(offset).cast::<u32>(), packed);
                     }
                 }
             }

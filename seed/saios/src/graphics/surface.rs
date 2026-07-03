@@ -69,6 +69,10 @@ impl Surface {
         self.pixels_slice()
     }
 
+    pub fn pixels_mut(&mut self) -> &mut [u32] {
+        self.pixels_slice_mut()
+    }
+
     pub fn clear(&mut self, color: u32) {
         self.pixels_slice_mut().fill(color);
     }
@@ -84,13 +88,23 @@ impl Surface {
     }
 
     pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
+        if w == 0 || h == 0 {
+            return;
+        }
+
         let x_end = core::cmp::min(x.saturating_add(w), self.width);
         let y_end = core::cmp::min(y.saturating_add(h), self.height);
 
+        if x >= x_end || y >= y_end {
+            return;
+        }
+
+        let width = self.width;
+        let pixels = self.pixels_slice_mut();
         for py in y..y_end {
-            for px in x..x_end {
-                self.put_pixel(px, py, color);
-            }
+            let start = py * width + x;
+            let end = py * width + x_end;
+            pixels[start..end].fill(color);
         }
     }
 
