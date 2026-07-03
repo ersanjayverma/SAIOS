@@ -83,11 +83,7 @@ impl<B: ConsoleBackend> Console<B> {
         self.clear();
     }
 
-    fn put_char(&mut self, c: char) {
-        if capture_char(c) && should_suppress_output() {
-            return;
-        }
-
+    fn put_char_inner(&mut self, c: char) {
         match c {
             '\n' => self.newline(),
             '\r' => {
@@ -98,7 +94,7 @@ impl<B: ConsoleBackend> Console<B> {
             '\t' => {
                 let spaces = TAB_WIDTH - (self.cursor.x % TAB_WIDTH);
                 for _ in 0..spaces {
-                    self.put_char(' ');
+                    self.put_char_inner(' ');
                 }
             }
             '\x08' => {
@@ -123,9 +119,21 @@ impl<B: ConsoleBackend> Console<B> {
         }
     }
 
+    fn put_char(&mut self, c: char) {
+        if capture_char(c) && should_suppress_output() {
+            return;
+        }
+
+        self.put_char_inner(c);
+    }
+
     fn write_str(&mut self, s: &str) {
+        if capture_str(s) && should_suppress_output() {
+            return;
+        }
+
         for c in s.chars() {
-            self.put_char(c);
+            self.put_char_inner(c);
         }
     }
 
@@ -255,6 +263,18 @@ fn capture_char(c: char) -> bool {
     let active = capture.active;
     if active {
         capture.buffer.push(c);
+    }
+    capture_unlock();
+    active
+}
+
+fn capture_str(s: &str) -> bool {
+    capture_lock();
+    // SAFETY: guarded by capture lock.
+    let capture = unsafe { &mut *OUTPUT_CAPTURE.get() };
+    let active = capture.active;
+    if active {
+        capture.buffer.push_str(s);
     }
     capture_unlock();
     active
