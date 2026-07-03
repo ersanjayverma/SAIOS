@@ -1,6 +1,5 @@
 /// ACPI System Command
 /// Displays ACPI system information, processor details, and power management options
-
 use alloc::boxed::Box;
 
 use crate::console;
@@ -29,7 +28,7 @@ fn cmd_acpi(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             "shutdown" => {
                 console::println!("ACPI: Initiating system shutdown via S5");
                 console::println!("This will power off the system.");
-                
+
                 if let Some(acpi_mgr) = kernel::acpi::get_manager() {
                     match acpi_mgr.shutdown() {
                         Ok(()) => {
@@ -44,7 +43,7 @@ fn cmd_acpi(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             "reboot" => {
                 console::println!("ACPI: Initiating system reboot");
                 console::println!("This will restart the system.");
-                
+
                 if let Some(acpi_mgr) = kernel::acpi::get_manager() {
                     match acpi_mgr.reboot() {
                         Ok(()) => {
@@ -93,7 +92,14 @@ fn display_acpi_info() {
             }
         }
 
-        console::println!("Status:           {}", if acpi_mgr.is_enabled() { "Enabled" } else { "Disabled" });
+        console::println!(
+            "Status:           {}",
+            if acpi_mgr.is_enabled() {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        );
         console::println!("Processors:       {}", acpi_mgr.processor_count());
         console::println!("Local APIC Addr:  {:#x}", acpi_mgr.local_apic_address());
         console::println!();
@@ -117,11 +123,18 @@ fn display_acpi_processors() {
             return;
         }
 
-        console::println!("{:<4} {:<8} {:<8} {:<8}", "Idx", "ACPI ID", "APIC ID", "Flags");
+        console::println!(
+            "{:<4} {:<8} {:<8} {:<8}",
+            "Idx",
+            "ACPI ID",
+            "APIC ID",
+            "Flags"
+        );
         console::println!("{}", "----".repeat(8));
 
         for (i, proc) in processors.iter().enumerate() {
-            console::println!("{:<4} {:<8} {:<8} {:<#08x}",
+            console::println!(
+                "{:<4} {:<8} {:<8} {:<#08x}",
                 i,
                 proc.acpi_processor_id,
                 proc.apic_id,
@@ -151,18 +164,22 @@ fn display_acpi_tables() {
 
         console::println!("FADT (Fixed ACPI Description Table)");
         console::println!("  - Power management and system fixed features");
-        console::println!("  - Local APIC address: {:#x}", acpi_mgr.local_apic_address());
+        console::println!(
+            "  - Local APIC address: {:#x}",
+            acpi_mgr.local_apic_address()
+        );
         console::println!();
 
         console::println!("MADT (Multiple APIC Description Table)");
         console::println!("  - APIC/x2APIC and interrupt source configuration");
         console::println!("  - Processors: {}", acpi_mgr.processor_count());
-        
+
         let io_apics = acpi_mgr.io_apics();
         if !io_apics.is_empty() {
             console::println!("  - IO APICs: {}", io_apics.len());
             for apic in io_apics {
-                console::println!("    ID: {}, Address: {:#x}, GSI Base: {}",
+                console::println!(
+                    "    ID: {}, Address: {:#x}, GSI Base: {}",
                     apic.io_apic_id,
                     apic.io_apic_address,
                     apic.global_system_interrupt_base
@@ -174,7 +191,8 @@ fn display_acpi_tables() {
         if !overrides.is_empty() {
             console::println!("  - Interrupt Overrides: {}", overrides.len());
             for ovr in overrides {
-                console::println!("    Bus: {}, Source: {} -> GSI: {}, Flags: {:#x}",
+                console::println!(
+                    "    Bus: {}, Source: {} -> GSI: {}, Flags: {:#x}",
                     ovr.bus,
                     ovr.source,
                     ovr.global_system_interrupt,
@@ -196,7 +214,14 @@ fn display_acpi_status() {
     console::println!("====================");
 
     if let Some(acpi_mgr) = kernel::acpi::get_manager() {
-        console::println!("State:              {}", if acpi_mgr.is_enabled() { "Enabled" } else { "Disabled" });
+        console::println!(
+            "State:              {}",
+            if acpi_mgr.is_enabled() {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        );
         console::println!("Version:            {}", acpi_mgr.revision());
         console::println!("Processors:         {}", acpi_mgr.processor_count());
         console::println!();
@@ -215,7 +240,8 @@ fn display_acpi_status() {
         if proc_count > 0 {
             console::println!("System Processors:");
             for proc in acpi_mgr.processors() {
-                console::println!("  APIC {}: ACPI ID {} (flags={:#x})",
+                console::println!(
+                    "  APIC {}: ACPI ID {} (flags={:#x})",
                     proc.apic_id,
                     proc.acpi_processor_id,
                     proc.flags

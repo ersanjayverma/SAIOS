@@ -231,7 +231,7 @@ pub fn relocation_symbol(info: u64) -> u32 {
 pub fn apply_relocations(load_bias: u64, relocations: &[Elf64Rela]) -> Result<(), &'static str> {
     for rela in relocations {
         let relocation_type = relocation_type(rela.r_info);
-       
+
         match relocation_type {
             R_X86_64_RELATIVE => {
                 let new_value = load_bias.wrapping_add(rela.r_addend as u64);

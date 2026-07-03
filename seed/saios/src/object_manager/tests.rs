@@ -1,6 +1,6 @@
 use crate::kernel::testing::framework::{TestCase, TestSuite};
-use crate::object_manager;
 use crate::kt_assert;
+use crate::object_manager;
 
 fn test_object_manager_initialized() -> Result<(), &'static str> {
     object_manager::init();
@@ -15,8 +15,14 @@ fn test_object_manager_has_system_object() -> Result<(), &'static str> {
 }
 
 const TESTS: [TestCase; 2] = [
-    TestCase::new("object_manager_initialized", test_object_manager_initialized),
-    TestCase::new("object_manager_has_system_object", test_object_manager_has_system_object),
+    TestCase::new(
+        "object_manager_initialized",
+        test_object_manager_initialized,
+    ),
+    TestCase::new(
+        "object_manager_has_system_object",
+        test_object_manager_has_system_object,
+    ),
 ];
 
 pub fn suite() -> TestSuite {

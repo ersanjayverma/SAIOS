@@ -71,6 +71,12 @@ pub struct ServiceManager {
     states: Vec<ServiceState>,
 }
 
+impl Default for ServiceManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ServiceManager {
     pub fn new() -> Self {
         Self {
@@ -950,9 +956,15 @@ pub fn verify() -> crate::kernel::testing::report::VerifyReport {
     let mut checks = Vec::new();
 
     checks.push(if snapshots.is_empty() {
-        crate::kernel::testing::report::VerifyCheck::fail("Service registry", "no services registered")
+        crate::kernel::testing::report::VerifyCheck::fail(
+            "Service registry",
+            "no services registered",
+        )
     } else {
-        crate::kernel::testing::report::VerifyCheck::pass("Service registry", "services are registered")
+        crate::kernel::testing::report::VerifyCheck::pass(
+            "Service registry",
+            "services are registered",
+        )
     });
 
     let mut unique_names = true;
@@ -971,13 +983,19 @@ pub fn verify() -> crate::kernel::testing::report::VerifyReport {
     checks.push(if unique_ids {
         crate::kernel::testing::report::VerifyCheck::pass("Service ids", "all ids are unique")
     } else {
-        crate::kernel::testing::report::VerifyCheck::fail("Service ids", "duplicate service id found")
+        crate::kernel::testing::report::VerifyCheck::fail(
+            "Service ids",
+            "duplicate service id found",
+        )
     });
 
     checks.push(if unique_names {
         crate::kernel::testing::report::VerifyCheck::pass("Service names", "all names are unique")
     } else {
-        crate::kernel::testing::report::VerifyCheck::fail("Service names", "duplicate service name found")
+        crate::kernel::testing::report::VerifyCheck::fail(
+            "Service names",
+            "duplicate service name found",
+        )
     });
 
     let mut deps_resolve = true;
@@ -990,9 +1008,15 @@ pub fn verify() -> crate::kernel::testing::report::VerifyReport {
     }
 
     checks.push(if deps_resolve {
-        crate::kernel::testing::report::VerifyCheck::pass("Dependencies", "all dependencies resolve")
+        crate::kernel::testing::report::VerifyCheck::pass(
+            "Dependencies",
+            "all dependencies resolve",
+        )
     } else {
-        crate::kernel::testing::report::VerifyCheck::fail("Dependencies", "unresolved service dependency")
+        crate::kernel::testing::report::VerifyCheck::fail(
+            "Dependencies",
+            "unresolved service dependency",
+        )
     });
 
     crate::kernel::testing::report::VerifyReport {

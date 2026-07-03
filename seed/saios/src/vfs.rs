@@ -177,10 +177,10 @@ impl TmpFs {
         }
 
         for &child_inode in &dir.children {
-            if let Ok(child) = self.node(child_inode) {
-                if child.name == name {
-                    return Some(child_inode);
-                }
+            if let Ok(child) = self.node(child_inode)
+                && child.name == name
+            {
+                return Some(child_inode);
             }
         }
         None
@@ -191,7 +191,11 @@ impl TmpFs {
             return Ok(self.root);
         }
 
-        let mut current = if path.starts_with('/') { self.root } else { start };
+        let mut current = if path.starts_with('/') {
+            self.root
+        } else {
+            start
+        };
 
         for part in Self::path_parts(path) {
             match part {
@@ -311,12 +315,7 @@ impl TmpFs {
         let mut parts: Vec<String> = Vec::new();
         let mut current = inode;
 
-        loop {
-            let node = match self.node(current) {
-                Ok(n) => n,
-                Err(_) => break,
-            };
-
+        while let Ok(node) = self.node(current) {
             if current == self.root {
                 break;
             }
@@ -404,7 +403,12 @@ impl TmpFs {
         Ok(node.data[offset..end].to_vec())
     }
 
-    fn write_inode_at(&mut self, inode: u64, offset: usize, data: &[u8]) -> Result<usize, &'static str> {
+    fn write_inode_at(
+        &mut self,
+        inode: u64,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<usize, &'static str> {
         let node = self.node_mut(inode)?;
         if node.kind != FileType::File {
             return Err("not a file");
@@ -486,7 +490,11 @@ impl FileSystem for TmpFs {
     }
 
     fn readdir(&self, path: &str) -> Result<Vec<String>, &'static str> {
-        let inode = if path.is_empty() { self.cwd } else { self.resolve(path)? };
+        let inode = if path.is_empty() {
+            self.cwd
+        } else {
+            self.resolve(path)?
+        };
         let node = self.node(inode)?;
         if node.kind != FileType::Directory {
             return Err("not a directory");
@@ -566,10 +574,10 @@ impl VfsState {
 
     fn invalidate_inode_descriptors(&mut self, inode: u64) {
         for slot in &mut self.open_files {
-            if let Some(open) = slot {
-                if open.inode == inode {
-                    *slot = None;
-                }
+            if let Some(open) = slot
+                && open.inode == inode
+            {
+                *slot = None;
             }
         }
     }
@@ -577,18 +585,8 @@ impl VfsState {
 
 fn seed_standard_tree(fs: &mut TmpFs) {
     let roots = [
-        "/system",
-        "/dev",
-        "/proc",
-        "/sys",
-        "/home",
-        "/tmp",
-        "/var",
-        "/boot",
-        "/bin",
-        "/usr",
-        "/etc",
-        "/mnt",
+        "/system", "/dev", "/proc", "/sys", "/home", "/tmp", "/var", "/boot", "/bin", "/usr",
+        "/etc", "/mnt",
     ];
     for path in roots {
         let _ = fs.mkdir(path);
@@ -608,25 +606,8 @@ fn seed_standard_tree(fs: &mut TmpFs) {
     }
 
     let user_programs = [
-        "hello",
-        "true",
-        "false",
-        "argc",
-        "env",
-        "fail",
-        "ls",
-        "cat",
-        "cp",
-        "mv",
-        "rm",
-        "mkdir",
-        "ps",
-        "kill",
-        "top",
-        "uname",
-        "calc",
-        "stress",
-        "cc",
+        "hello", "true", "false", "argc", "env", "fail", "ls", "cat", "cp", "mv", "rm", "mkdir",
+        "ps", "kill", "top", "uname", "calc", "stress", "cc",
     ];
     for name in user_programs {
         let _ = fs.create(format!("/bin/{}", name).as_str());
@@ -750,7 +731,9 @@ pub fn open(path: &str, options: OpenOptions) -> Result<VfsFd, &'static str> {
             return Err("open requires read or write access");
         }
 
-        if is_sys_path(&abs) && (options.write || options.create || options.truncate || options.append) {
+        if is_sys_path(&abs)
+            && (options.write || options.create || options.truncate || options.append)
+        {
             return Err("read-only virtual path");
         }
 

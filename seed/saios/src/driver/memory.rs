@@ -85,7 +85,8 @@ pub fn init(entries: &[MemoryRegion]) {
         }
 
         let start = (align_up(entry.base, PAGE_SIZE) / PAGE_SIZE) as usize;
-        let end = (align_down(entry.base.saturating_add(entry.length), PAGE_SIZE) / PAGE_SIZE) as usize;
+        let end =
+            (align_down(entry.base.saturating_add(entry.length), PAGE_SIZE) / PAGE_SIZE) as usize;
         let limit = core::cmp::min(end, pmm.tracked_pages);
 
         for page in start..limit {

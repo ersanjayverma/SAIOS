@@ -41,7 +41,6 @@ impl IdtEntry {
     }
 
     pub fn set_handler_addr(&mut self, addr: usize) {
-
         self.offset_low = addr as u16;
         self.selector = crate::arch::x86_64::gdt::KERNEL_CODE.0;
         self.ist = 0;
@@ -68,6 +67,12 @@ impl InterruptDescriptorTable {
             limit: (size_of::<Self>() - 1) as u16,
             base: self.entries.as_ptr() as u64,
         }
+    }
+}
+
+impl Default for InterruptDescriptorTable {
+    fn default() -> Self {
+        Self::new()
     }
 }
 pub fn register(vector: u8, handler: extern "C" fn()) {

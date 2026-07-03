@@ -1,12 +1,12 @@
 use super::backend::ConsoleBackend;
+use crate::graphics::display::{Display, FramebufferDisplay};
+use crate::graphics::font::{FONT_HEIGHT, FONT_WIDTH, glyph_row};
+use crate::graphics::framebuffer::Color;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ptr;
-use efi_main::graphics::PixelFormat;
 use efi_main::graphics::FramebufferInfo;
-use crate::graphics::display::{Display, FramebufferDisplay};
-use crate::graphics::framebuffer::Color;
-use crate::graphics::font::{glyph_row, FONT_HEIGHT, FONT_WIDTH};
+use efi_main::graphics::PixelFormat;
 
 const TAB_WIDTH: usize = 4;
 const MAX_TEXT_COLS: usize = 160;
@@ -72,7 +72,9 @@ impl FramebufferConsole {
         let bg = self.bg.to_u32();
 
         // OPTIMIZATION: Pre-pack colors once instead of per-pixel
-        let (fg_packed, bg_packed) = if bytes_per_pixel == 4 && matches!(pixel_format, PixelFormat::Bgr | PixelFormat::Rgb) {
+        let (fg_packed, bg_packed) = if bytes_per_pixel == 4
+            && matches!(pixel_format, PixelFormat::Bgr | PixelFormat::Rgb)
+        {
             let pack = |color: u32| -> u32 {
                 let r = (color >> 16) & 0xFF;
                 let g = (color >> 8) & 0xFF;
@@ -97,14 +99,14 @@ impl FramebufferConsole {
                 }
 
                 let row_bits = glyph_row(c, row_idx);
-                let row_base_px = (y * stride) as usize;
-                
+                let row_base_px = y * stride;
+
                 // OPTIMIZATION: Get a mutable slice for the row and write directly (no write_volatile)
                 let row_start = row_base_px * bytes_per_pixel;
                 if row_start >= fb_size {
                     continue;
                 }
-                
+
                 for bit in 0..FONT_WIDTH {
                     let x = px.saturating_add(bit);
                     if x >= width {
@@ -380,10 +382,16 @@ impl FramebufferConsole {
             let g = ((color >> 8) & 0xFF) as u8;
             let b = (color & 0xFF) as u8;
             match pixel_format {
-                PixelFormat::Bgr => (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | (0xFF << 24),
-                PixelFormat::Rgb => (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | (0xFF << 24),
+                PixelFormat::Bgr => {
+                    (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | (0xFF << 24)
+                }
+                PixelFormat::Rgb => {
+                    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | (0xFF << 24)
+                }
                 PixelFormat::Bitmask => Self::pack_bitmask(r, g, b, pixel_masks),
-                PixelFormat::BltOnly => (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | (0xFF << 24),
+                PixelFormat::BltOnly => {
+                    (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | (0xFF << 24)
+                }
             }
         };
 
@@ -395,7 +403,7 @@ impl FramebufferConsole {
             let clear_rows = shift_px;
             let clear_bytes = clear_rows.saturating_mul(row_bytes);
             let clear_start_offset = clear_start.saturating_mul(row_bytes);
-            
+
             if clear_start_offset.saturating_add(clear_bytes) > fb_size {
                 return false;
             }
@@ -404,7 +412,7 @@ impl FramebufferConsole {
             for y in clear_start..height {
                 let row_base = y.saturating_mul(stride);
                 let row_offset = row_base.saturating_mul(4);
-                
+
                 for x in 0..width {
                     let offset = row_offset + x * 4;
                     if offset + 4 > fb_size {
@@ -486,11 +494,15 @@ impl FramebufferConsole {
     }
 
     pub fn text_columns(&self) -> Option<usize> {
-        self.display.as_ref().map(|display| display.width() / FONT_WIDTH)
+        self.display
+            .as_ref()
+            .map(|display| display.width() / FONT_WIDTH)
     }
 
     pub fn text_rows(&self) -> Option<usize> {
-        self.display.as_ref().map(|display| display.height() / FONT_HEIGHT)
+        self.display
+            .as_ref()
+            .map(|display| display.height() / FONT_HEIGHT)
     }
 }
 

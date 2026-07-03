@@ -33,7 +33,10 @@ pub fn health_score() -> (u8, Vec<String>) {
         .count() as i32;
     if warn_services > 0 {
         score -= core::cmp::min(20, warn_services * 3);
-        warnings.push(alloc::format!("{} service(s) in warning state", warn_services));
+        warnings.push(alloc::format!(
+            "{} service(s) in warning state",
+            warn_services
+        ));
     }
 
     let mut restarted = 0i32;
@@ -61,7 +64,7 @@ pub fn health_score() -> (u8, Vec<String>) {
 
     let h = crate::heap::stats();
     if h.total > 0 {
-        let pct = (h.used.saturating_mul(100)) / h.total;
+        let pct = h.used.saturating_mul(100).checked_div(h.total).unwrap_or(0);
         if pct > 85 {
             score -= 10;
             warnings.push(alloc::format!("Heap pressure high: {}%", pct));
@@ -109,7 +112,10 @@ pub fn explain(target: &str) -> Vec<String> {
     let mut out = Vec::new();
     if target.eq_ignore_ascii_case("scheduler") {
         out.push("scheduler: preemptive tick-driven round-robin".into());
-        out.push(alloc::format!("scheduler: threads={}", crate::scheduler::threads().len()));
+        out.push(alloc::format!(
+            "scheduler: threads={}",
+            crate::scheduler::threads().len()
+        ));
     } else if target.eq_ignore_ascii_case("memory") {
         let h = crate::heap::stats();
         out.push("memory: PMM + growable kernel heap".into());
@@ -126,7 +132,10 @@ pub fn service_health() -> Vec<String> {
     for svc in ksf::list() {
         out.push(alloc::format!(
             "service {} v{} state={:?} health={:?}",
-            svc.name, svc.version, svc.state, svc.health
+            svc.name,
+            svc.version,
+            svc.state,
+            svc.health
         ));
     }
     let events = event::recent(8);
@@ -149,7 +158,11 @@ pub fn recover() -> Vec<String> {
         if matches!(svc.state, crate::ksf::ServiceState::Failed) {
             match ksf::restart(svc.name.as_str()) {
                 Ok(()) => out.push(alloc::format!("recover: restarted service {}", svc.name)),
-                Err(e) => out.push(alloc::format!("recover: service {} failed ({})", svc.name, e)),
+                Err(e) => out.push(alloc::format!(
+                    "recover: service {} failed ({})",
+                    svc.name,
+                    e
+                )),
             }
         }
     }
@@ -160,7 +173,11 @@ pub fn recover() -> Vec<String> {
         {
             match driver::reload(drv.name.as_str()) {
                 Ok(()) => out.push(alloc::format!("recover: reloaded driver {}", drv.name)),
-                Err(e) => out.push(alloc::format!("recover: driver {} failed ({})", drv.name, e)),
+                Err(e) => out.push(alloc::format!(
+                    "recover: driver {} failed ({})",
+                    drv.name,
+                    e
+                )),
             }
         }
     }

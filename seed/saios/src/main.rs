@@ -6,6 +6,7 @@ extern crate alloc;
 #[macro_use]
 pub mod driver;
 pub mod console;
+pub mod diskpart;
 pub mod graphics;
 pub mod heap;
 pub mod kernel;
@@ -18,16 +19,15 @@ pub mod pmm;
 pub mod provider;
 pub mod saifs;
 pub mod scheduler;
+pub mod seed;
 pub mod shell;
 pub mod sif;
-pub mod som;
-pub mod diskpart;
-pub mod taskman;
 pub mod snom;
-pub mod seed;
+pub mod som;
+pub mod taskman;
 pub mod timer;
-pub mod vmm;
 pub mod vfs;
+pub mod vmm;
 use efi_main::SaiosBootInfo;
 use hal::arch::paging;
 use hal::arch::x86_64::{gdt, idt, interrupt};
@@ -38,6 +38,12 @@ const KERNEL_SERIAL_LOGGING_ENABLED: bool = false;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
 
+/// # Safety
+///
+/// This is the kernel entry point invoked by the bootloader. `boot_info` must
+/// be a valid, properly aligned pointer to a `SaiosBootInfo` structure that
+/// remains valid for the lifetime of the kernel. Must be called exactly once
+/// with interrupts in a defined state.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     hal::arch::x86_64::console::_print(format_args!("kernel: _start enter\n"));
@@ -46,8 +52,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     let framebuffer_info = boot_info.framebuffer;
     hal::arch::x86_64::console::_print(format_args!(
         "kernel: boot_info map_entries={} fb_base={:#x}\n",
-        boot_info.memorymap.entry_count,
-        framebuffer_info.base,
+        boot_info.memorymap.entry_count, framebuffer_info.base,
     ));
     gdt::init();
     idt::init();
@@ -95,42 +100,42 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     console::set_serial_logging(KERNEL_SERIAL_LOGGING_ENABLED);
     kernel::timeline::mark("Heap");
     let fb_ready = console::promote_framebuffer_renderer();
-    hal::arch::x86_64::console::_print(format_args!(
-        "kernel: fb renderer ready={}\n",
-        fb_ready
-    ));
+    hal::arch::x86_64::console::_print(format_args!("kernel: fb renderer ready={}\n", fb_ready));
     ksf::bootstrap().expect("KSF bootstrap failed");
     kernel::timeline::mark("Services");
-    
+
     // Initialize ACPI subsystem
     if boot_info.acpi.rsdp != 0 {
         match kernel::acpi::init(boot_info.acpi.rsdp) {
             Ok(()) => {
-                if let Some(acpi_mgr) = kernel::acpi::get_manager() {
-                    if let Ok((oem_id, revision)) = acpi_mgr.oem_info() {
-                        hal::arch::x86_64::console::_print(format_args!(
-                            "kernel: ACPI v{} initialized, OEM={}, processors={}\n",
-                            revision,
-                            oem_id,
-                            acpi_mgr.processor_count()
-                        ));
-                        kernel::timeline::mark("ACPI");
-                    }
+                if let Some(acpi_mgr) = kernel::acpi::get_manager()
+                    && let Ok((oem_id, revision)) = acpi_mgr.oem_info()
+                {
+                    hal::arch::x86_64::console::_print(format_args!(
+                        "kernel: ACPI v{} initialized, OEM={}, processors={}\n",
+                        revision,
+                        oem_id,
+                        acpi_mgr.processor_count()
+                    ));
+                    kernel::timeline::mark("ACPI");
                 }
             }
             Err(e) => {
-                hal::arch::x86_64::console::_print(format_args!("kernel: ACPI init failed: {}\n", e));
+                hal::arch::x86_64::console::_print(format_args!(
+                    "kernel: ACPI init failed: {}\n",
+                    e
+                ));
             }
         }
     } else {
         hal::arch::x86_64::console::_print(format_args!("kernel: No ACPI RSDP found\n"));
     }
-    
+
     interrupt::enable();
     if cfg!(debug_assertions) {
         kernel::testing::boot_self_test();
     }
-   
+
     let seed = Seed::init(boot_info as *const SaiosBootInfo);
     kernel::timeline::mark("Ready");
     seed.run()

@@ -44,14 +44,15 @@ impl FilesystemKind {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
-            "tmpfs"  => Some(Self::TmpFs),
-            "ext4"   => Some(Self::Ext4),
-            "ntfs"   => Some(Self::Ntfs),
-            "fat16"  => Some(Self::Fat16),
-            "fat32"  => Some(Self::Fat32),
-            "fat64"  => Some(Self::Fat64),
+            "tmpfs" => Some(Self::TmpFs),
+            "ext4" => Some(Self::Ext4),
+            "ntfs" => Some(Self::Ntfs),
+            "fat16" => Some(Self::Fat16),
+            "fat32" => Some(Self::Fat32),
+            "fat64" => Some(Self::Fat64),
             "fat128" => Some(Self::Fat128),
             _ => None,
         }
@@ -228,7 +229,11 @@ fn probe_fat(image: &[u8]) -> Option<ProbeResult> {
 
     let sectors_16 = le_u16(image, 19)? as u32;
     let sectors_32 = le_u32(image, 32)?;
-    let total_sectors = if sectors_16 != 0 { sectors_16 } else { sectors_32 };
+    let total_sectors = if sectors_16 != 0 {
+        sectors_16
+    } else {
+        sectors_32
+    };
     if total_sectors == 0 {
         return None;
     }
@@ -284,7 +289,10 @@ fn synthetic_image_for(fs: FilesystemKind) -> Vec<u8> {
             image[11..13].copy_from_slice(&512u16.to_le_bytes());
             image[40..48].copy_from_slice(&262_144u64.to_le_bytes());
         }
-        FilesystemKind::Fat16 | FilesystemKind::Fat32 | FilesystemKind::Fat64 | FilesystemKind::Fat128 => {
+        FilesystemKind::Fat16
+        | FilesystemKind::Fat32
+        | FilesystemKind::Fat64
+        | FilesystemKind::Fat128 => {
             image[11..13].copy_from_slice(&512u16.to_le_bytes());
             image[13] = 8;
             image[14..16].copy_from_slice(&32u16.to_le_bytes());
@@ -350,10 +358,7 @@ fn append_mass_storage_backends(state: &mut StorageState) {
             state.volumes.push(DetectedVolume {
                 name: format!("disk{}", disk_index),
                 filesystem: FilesystemKind::TmpFs,
-                backing: format!(
-                    "pci {:02x}:{:02x}.{}",
-                    dev.bus, dev.device, dev.function
-                ),
+                backing: format!("pci {:02x}:{:02x}.{}", dev.bus, dev.device, dev.function),
                 total_bytes: 0,
                 sector_size: 512,
                 mounted_at: None,

@@ -65,7 +65,12 @@ impl NamespaceProvider for MockNamespaceProvider {
         Ok(entries)
     }
 
-    fn create(&self, _ctx: &LookupContext, _path: &str, _kind: CreateKind) -> Result<crate::som::ObjectId, SaifsError> {
+    fn create(
+        &self,
+        _ctx: &LookupContext,
+        _path: &str,
+        _kind: CreateKind,
+    ) -> Result<crate::som::ObjectId, SaifsError> {
         Err(SaifsError::UnsupportedOperation)
     }
 
@@ -171,7 +176,8 @@ fn test_read_only_mount_blocks_mutation() -> Result<(), &'static str> {
     let mount_path = format!("/ro-{}", token);
     saifs::mount(&mount_path, provider, true).map_err(|_| "mount failed")?;
 
-    let create_res = saifs::namespace_manager().create(&format!("{}/alpha", mount_path), CreateKind::File);
+    let create_res =
+        saifs::namespace_manager().create(&format!("{}/alpha", mount_path), CreateKind::File);
     kt_assert_eq!(Err(SaifsError::AccessDenied), create_res);
 
     let remove_res = saifs::remove(&format!("{}/alpha", mount_path));
@@ -198,7 +204,10 @@ fn test_unmount_restores_fallback_provider_and_emits_event() -> Result<(), &'sta
     kt_assert!(after != provider);
 
     let recent = saifs::events(1);
-    kt_assert!(matches!(recent.last().map(|e| e.event_type), Some(saifs::EventType::Unmounted)));
+    kt_assert!(matches!(
+        recent.last().map(|e| e.event_type),
+        Some(saifs::EventType::Unmounted)
+    ));
     Ok(())
 }
 
@@ -213,13 +222,34 @@ fn test_error_mapping_reports_unsupported_read() -> Result<(), &'static str> {
 const TESTS: [TestCase; 9] = [
     TestCase::new("saifs_initialized", test_saifs_initialized),
     TestCase::new("saifs_root_mount_exists", test_saifs_root_mount_exists),
-    TestCase::new("saifs_path_resolver_canonicalize", test_path_resolver_canonicalize),
-    TestCase::new("saifs_default_handle_read_write_roundtrip", test_default_handle_read_write_roundtrip),
-    TestCase::new("saifs_mount_manager_resolves_longest_prefix", test_mount_manager_resolves_longest_prefix),
-    TestCase::new("saifs_namespace_manager_uses_mounted_provider", test_namespace_manager_uses_mounted_provider),
-    TestCase::new("saifs_read_only_mount_blocks_mutation", test_read_only_mount_blocks_mutation),
-    TestCase::new("saifs_unmount_restores_fallback_provider", test_unmount_restores_fallback_provider_and_emits_event),
-    TestCase::new("saifs_error_mapping_reports_unsupported_read", test_error_mapping_reports_unsupported_read),
+    TestCase::new(
+        "saifs_path_resolver_canonicalize",
+        test_path_resolver_canonicalize,
+    ),
+    TestCase::new(
+        "saifs_default_handle_read_write_roundtrip",
+        test_default_handle_read_write_roundtrip,
+    ),
+    TestCase::new(
+        "saifs_mount_manager_resolves_longest_prefix",
+        test_mount_manager_resolves_longest_prefix,
+    ),
+    TestCase::new(
+        "saifs_namespace_manager_uses_mounted_provider",
+        test_namespace_manager_uses_mounted_provider,
+    ),
+    TestCase::new(
+        "saifs_read_only_mount_blocks_mutation",
+        test_read_only_mount_blocks_mutation,
+    ),
+    TestCase::new(
+        "saifs_unmount_restores_fallback_provider",
+        test_unmount_restores_fallback_provider_and_emits_event,
+    ),
+    TestCase::new(
+        "saifs_error_mapping_reports_unsupported_read",
+        test_error_mapping_reports_unsupported_read,
+    ),
 ];
 
 pub fn suite() -> TestSuite {

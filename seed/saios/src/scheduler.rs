@@ -203,10 +203,10 @@ fn pick_next(scheduler: &mut Scheduler) -> usize {
         return idx;
     }
 
-    if let Some(idle_idx) = idle_candidate {
-        if scheduler.threads[idle_idx].thread.state == ThreadState::Ready {
-            return idle_idx;
-        }
+    if let Some(idle_idx) = idle_candidate
+        && scheduler.threads[idle_idx].thread.state == ThreadState::Ready
+    {
+        return idle_idx;
     }
 
     scheduler.idle
@@ -227,7 +227,8 @@ fn do_schedule() {
         return;
     }
 
-    if scheduler.threads[old_idx].thread.state == ThreadState::Running && old_idx != scheduler.idle {
+    if scheduler.threads[old_idx].thread.state == ThreadState::Running && old_idx != scheduler.idle
+    {
         scheduler.threads[old_idx].thread.state = ThreadState::Ready;
         scheduler.run_queue.push_back(old_idx);
     }
@@ -352,9 +353,15 @@ pub fn verify() -> crate::kernel::testing::report::VerifyReport {
         .filter(|t| t.state == ThreadState::Running)
         .count();
     checks.push(if running == 1 {
-        crate::kernel::testing::report::VerifyCheck::pass("Running thread", "exactly one running thread")
+        crate::kernel::testing::report::VerifyCheck::pass(
+            "Running thread",
+            "exactly one running thread",
+        )
     } else {
-        crate::kernel::testing::report::VerifyCheck::fail("Running thread", "invalid running thread count")
+        crate::kernel::testing::report::VerifyCheck::fail(
+            "Running thread",
+            "invalid running thread count",
+        )
     });
 
     let mut unique = true;

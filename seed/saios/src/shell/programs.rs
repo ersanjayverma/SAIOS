@@ -77,11 +77,7 @@ fn infer_output_from_source(src: &str) -> String {
     };
 
     let dir = if let Some((d, _)) = src.rsplit_once('/') {
-        if d.is_empty() {
-            "/"
-        } else {
-            d
-        }
+        if d.is_empty() { "/" } else { d }
     } else {
         "."
     };
@@ -125,8 +121,8 @@ fn cc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
         resolve_relative_path(infer_output_from_source(src.as_str()).as_str())
     };
 
-    let message = extract_first_string_literal(source.as_str())
-        .unwrap_or_else(|| "Hello World".to_string());
+    let message =
+        extract_first_string_literal(source.as_str()).unwrap_or_else(|| "Hello World".to_string());
 
     let payload = format!(
         "SAIOS_CC_STUB\nsource={}\nmessage={}\n",
@@ -182,7 +178,8 @@ fn ls_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
 
 fn cat_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let path = resolve_relative_path(args.first().copied().ok_or("cat: missing path")?);
-    let fd = vfs::open(path.as_str(), vfs::OpenOptions::read_only()).map_err(|_| "cat: open failed")?;
+    let fd =
+        vfs::open(path.as_str(), vfs::OpenOptions::read_only()).map_err(|_| "cat: open failed")?;
     let read_result = vfs::read(fd, usize::MAX);
     let close_result = vfs::close(fd);
     let data = read_result.map_err(|_| "cat: read failed")?;
@@ -280,7 +277,11 @@ fn uname_program(_args: &[&str], _env: &[(String, String)]) -> i32 {
 }
 
 fn calc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
-    let expr = args.first().copied().ok_or("calc: missing expression")?.trim();
+    let expr = args
+        .first()
+        .copied()
+        .ok_or("calc: missing expression")?
+        .trim();
 
     let mut op_pos = None;
     let mut op = '\0';
@@ -527,23 +528,25 @@ fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Option<BinaryMetadata> {
                 }
             }
 
-            if let (Some(strtab_addr), Some(size)) = (strtab_vaddr, strtab_size) {
-                if let Some(strtab_off) = vaddr_to_file_offset(program_headers.as_slice(), strtab_addr) {
-                    let strtab_end = strtab_off.saturating_add(size).min(bytes.len());
-                    for needed in needed_offsets {
-                        let rel = usize::try_from(needed).ok()?;
-                        let start = strtab_off.checked_add(rel)?;
-                        if start >= strtab_end {
-                            continue;
-                        }
+            if let (Some(strtab_addr), Some(size)) = (strtab_vaddr, strtab_size)
+                && let Some(strtab_off) =
+                    vaddr_to_file_offset(program_headers.as_slice(), strtab_addr)
+            {
+                let strtab_end = strtab_off.saturating_add(size).min(bytes.len());
+                for needed in needed_offsets {
+                    let rel = usize::try_from(needed).ok()?;
+                    let start = strtab_off.checked_add(rel)?;
+                    if start >= strtab_end {
+                        continue;
+                    }
 
-                        let mut end = start;
-                        while end < strtab_end && bytes[end] != 0 {
-                            end += 1;
-                        }
-                        if end > start {
-                            needed_libraries.push(String::from_utf8_lossy(&bytes[start..end]).into_owned());
-                        }
+                    let mut end = start;
+                    while end < strtab_end && bytes[end] != 0 {
+                        end += 1;
+                    }
+                    if end > start {
+                        needed_libraries
+                            .push(String::from_utf8_lossy(&bytes[start..end]).into_owned());
                     }
                 }
             }
@@ -617,10 +620,10 @@ pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
                 continue;
             }
 
-            if let Some(raw) = line.strip_prefix("preferred_base=") {
-                if let Some(base) = parse_u64_value(raw) {
-                    preferred_base = base;
-                }
+            if let Some(raw) = line.strip_prefix("preferred_base=")
+                && let Some(base) = parse_u64_value(raw)
+            {
+                preferred_base = base;
             }
         }
 
@@ -665,7 +668,12 @@ fn execute_entry(entry: &str, args: &[&str], env: &[(String, String)]) -> Progra
     }
 }
 
-pub fn execute_path(path: &str, name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
+pub fn execute_path(
+    path: &str,
+    name: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> ProgramResult {
     if compiled_stub_message(path).is_some() {
         return execute_compiled_stub(path, args);
     }
@@ -695,4 +703,3 @@ pub fn exec(name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResul
 pub fn supports_binary(path: &str) -> bool {
     binary_metadata(path).is_some() || compiled_stub_message(path).is_some()
 }
-

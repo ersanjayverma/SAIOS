@@ -94,42 +94,36 @@ impl Framebuffer {
 
         let dst = unsafe { (self.info.base as *mut u8).add(pixel_offset) };
         match self.info.pixel_format {
-            PixelFormat::Rgb => {
-                unsafe {
-                    core::ptr::write_volatile(dst, color[0]);
-                    if bytes_per_pixel >= 2 {
-                        core::ptr::write_volatile(dst.add(1), color[1]);
-                    }
-                    if bytes_per_pixel >= 3 {
-                        core::ptr::write_volatile(dst.add(2), color[2]);
-                    }
-                    if bytes_per_pixel >= 4 {
-                        core::ptr::write_volatile(dst.add(3), color[3]);
-                    }
+            PixelFormat::Rgb => unsafe {
+                core::ptr::write_volatile(dst, color[0]);
+                if bytes_per_pixel >= 2 {
+                    core::ptr::write_volatile(dst.add(1), color[1]);
                 }
-            }
-            PixelFormat::Bgr => {
-                unsafe {
-                    core::ptr::write_volatile(dst, color[2]);
-                    if bytes_per_pixel >= 2 {
-                        core::ptr::write_volatile(dst.add(1), color[1]);
-                    }
-                    if bytes_per_pixel >= 3 {
-                        core::ptr::write_volatile(dst.add(2), color[0]);
-                    }
-                    if bytes_per_pixel >= 4 {
-                        core::ptr::write_volatile(dst.add(3), color[3]);
-                    }
+                if bytes_per_pixel >= 3 {
+                    core::ptr::write_volatile(dst.add(2), color[2]);
                 }
-            }
+                if bytes_per_pixel >= 4 {
+                    core::ptr::write_volatile(dst.add(3), color[3]);
+                }
+            },
+            PixelFormat::Bgr => unsafe {
+                core::ptr::write_volatile(dst, color[2]);
+                if bytes_per_pixel >= 2 {
+                    core::ptr::write_volatile(dst.add(1), color[1]);
+                }
+                if bytes_per_pixel >= 3 {
+                    core::ptr::write_volatile(dst.add(2), color[0]);
+                }
+                if bytes_per_pixel >= 4 {
+                    core::ptr::write_volatile(dst.add(3), color[3]);
+                }
+            },
             PixelFormat::Bitmask => unsafe {
                 write_packed(dst, pack_bitmask(&self.info, color), bytes_per_pixel);
             },
-            PixelFormat::BltOnly => {
-                unsafe {
-                    write_packed(dst, pack_bitmask(&self.info, color), bytes_per_pixel);
-                }
-            }
+            PixelFormat::BltOnly => unsafe {
+                write_packed(dst, pack_bitmask(&self.info, color), bytes_per_pixel);
+            },
         }
     }
 
@@ -180,8 +174,10 @@ impl Framebuffer {
 impl<'a> Bitmap<'a> {
     fn can_fast_blit(&self, framebuffer: &Framebuffer) -> bool {
         let fb_bpp = framebuffer.bytes_per_pixel();
-        matches!(framebuffer.info.pixel_format, PixelFormat::Rgb | PixelFormat::Bgr)
-            && fb_bpp == 4
+        matches!(
+            framebuffer.info.pixel_format,
+            PixelFormat::Rgb | PixelFormat::Bgr
+        ) && fb_bpp == 4
             && (self.bpp == 24 || self.bpp == 32)
     }
 
@@ -269,7 +265,7 @@ impl<'a> Bitmap<'a> {
         Ok(Self {
             width,
             height,
-            stride: ((width * (bpp as u32 / 8) + 3) / 4) * 4 as u32, // Align to 4 bytes
+            stride: (width * (bpp as u32 / 8)).div_ceil(4) * 4, // Align to 4 bytes
             bpp,
             pixels: &data[pixel_offset..],
         })

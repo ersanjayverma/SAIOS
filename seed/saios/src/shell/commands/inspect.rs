@@ -15,7 +15,10 @@ pub fn register(registry: &mut CommandRegistry) {
 }
 
 fn cmd_inspect(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("inspect: missing object path")?;
+    let path = args
+        .first()
+        .copied()
+        .ok_or("inspect: missing object path")?;
     for line in object_manager::inspect(path)? {
         console::println!("{}", line);
     }

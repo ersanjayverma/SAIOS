@@ -77,5 +77,5 @@ pub fn features() -> CpuFeatures {
 
 pub fn logical_processors() -> u8 {
     let (_, ebx, _, _) = cpuid(1);
-    (ebx >> 16) as u8 & 0xFF
+    (ebx >> 16) as u8
 }

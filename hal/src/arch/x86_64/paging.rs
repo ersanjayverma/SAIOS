@@ -34,7 +34,10 @@ impl Entry {
     }
 
     pub fn set_address(&mut self, addr: u64) {
-        debug_assert!((addr & (PAGE_SIZE - 1)) == 0, "page address must be 4 KiB aligned");
+        debug_assert!(
+            (addr & (PAGE_SIZE - 1)) == 0,
+            "page address must be 4 KiB aligned"
+        );
         self.0 = (self.0 & !ADDR_MASK) | (addr & ADDR_MASK);
     }
 
@@ -49,6 +52,12 @@ impl Entry {
     pub fn set_page(&mut self, addr: u64, flags: u64) {
         self.set_address(addr);
         self.0 |= flags | FLAG_PRESENT;
+    }
+}
+
+impl Default for Entry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -73,6 +82,12 @@ impl Table {
     }
 }
 
+impl Default for Table {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[inline(always)]
 pub fn read_cr3() -> u64 {
     let value: u64;
@@ -83,6 +98,11 @@ pub fn read_cr3() -> u64 {
 }
 
 #[inline(always)]
+/// # Safety
+///
+/// The caller must ensure `value` is a valid physical address of a properly
+/// constructed PML4 table; loading an invalid CR3 will cause undefined
+/// behavior or a triple fault.
 pub unsafe fn write_cr3(value: u64) {
     unsafe {
         asm!("mov cr3, {}", in(reg) value, options(nomem, nostack, preserves_flags));

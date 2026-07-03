@@ -28,15 +28,11 @@ type DiskpartResult = Result<i32, &'static str>;
 const W: usize = 66;
 
 fn rule() {
-    console::println!(
-        "══════════════════════════════════════════════════════════════════"
-    );
+    console::println!("══════════════════════════════════════════════════════════════════");
 }
 
 fn thin() {
-    console::println!(
-        "──────────────────────────────────────────────────────────────────"
-    );
+    console::println!("──────────────────────────────────────────────────────────────────");
 }
 
 fn banner(title: &str) {
@@ -47,11 +43,15 @@ fn banner(title: &str) {
 
     let mut line = String::new();
     line.push_str("══");
-    for _ in 0..left  { line.push('═'); }
+    for _ in 0..left {
+        line.push('═');
+    }
     line.push(' ');
     line.push_str(title);
     line.push(' ');
-    for _ in 0..right { line.push('═'); }
+    for _ in 0..right {
+        line.push('═');
+    }
     line.push_str("══");
     console::println!("{}", line);
 }
@@ -66,9 +66,9 @@ fn mb(bytes: u64) -> u64 {
 
 fn sector_label(sz: u16) -> &'static str {
     match sz {
-        512   => "512B",
-        4096  => "4KB",
-        _     => "?",
+        512 => "512B",
+        4096 => "4KB",
+        _ => "?",
     }
 }
 
@@ -94,7 +94,12 @@ fn cmd_list() {
     banner("DISKPART — ALL VOLUMES");
     console::println!(
         "  {:<10}  {:<8}  {:>8}  {:<6}  {:<6}  {}",
-        "NAME", "FS", "MB", "SECTOR", "ACCESS", "MOUNTED AT"
+        "NAME",
+        "FS",
+        "MB",
+        "SECTOR",
+        "ACCESS",
+        "MOUNTED AT"
     );
     thin();
 
@@ -115,7 +120,8 @@ fn cmd_list() {
     }
 
     thin();
-    console::println!("  {} volume(s)  |  {} mounted",
+    console::println!(
+        "  {} volume(s)  |  {} mounted",
         vols.len(),
         vols.iter().filter(|v| v.mounted_at.is_some()).count()
     );
@@ -129,7 +135,12 @@ fn cmd_disks() {
     banner("DISKPART — PHYSICAL DISKS");
     console::println!(
         "  {:<10}  {:<8}  {:>8}  {:<6}  {:<6}  {}",
-        "NAME", "FS", "MB", "SECTOR", "ACCESS", "PCI ADDR"
+        "NAME",
+        "FS",
+        "MB",
+        "SECTOR",
+        "ACCESS",
+        "PCI ADDR"
     );
     thin();
 
@@ -160,18 +171,33 @@ fn cmd_info(name: &str) -> DiskpartResult {
     banner("VOLUME INFO");
     console::println!("  Name        : {}", v.name);
     console::println!("  Filesystem  : {}", v.filesystem.as_str());
-    console::println!("  Size        : {} MB  ({} bytes)", mb(v.total_bytes), v.total_bytes);
+    console::println!(
+        "  Size        : {} MB  ({} bytes)",
+        mb(v.total_bytes),
+        v.total_bytes
+    );
     console::println!("  Sector Size : {}", sector_label(v.sector_size));
-    console::println!("  Access      : {}", if v.writable { "Read-Write" } else { "Read-Only" });
+    console::println!(
+        "  Access      : {}",
+        if v.writable {
+            "Read-Write"
+        } else {
+            "Read-Only"
+        }
+    );
     console::println!("  Backing     : {}", v.backing);
     console::println!(
         "  Type        : {}",
-        if is_physical(&v.backing) { "Physical (PCI)" } else { "Virtual/RAM" }
+        if is_physical(&v.backing) {
+            "Physical (PCI)"
+        } else {
+            "Virtual/RAM"
+        }
     );
 
     match &v.mounted_at {
         Some(p) => console::println!("  Mounted at  : {}", p),
-        None    => console::println!("  Mounted at  : (not mounted)"),
+        None => console::println!("  Mounted at  : (not mounted)"),
     }
 
     rule();
@@ -184,11 +210,7 @@ fn cmd_format(name: &str, fs_str: &str) -> DiskpartResult {
 
     storage::format_volume(name, fs)?;
 
-    console::println!(
-        "diskpart: volume '{}' formatted as {}",
-        name,
-        fs.as_str()
-    );
+    console::println!("diskpart: volume '{}' formatted as {}", name, fs.as_str());
     Ok(0)
 }
 
@@ -237,7 +259,9 @@ fn cmd_help() {
     console::println!("  diskpart list                         All volumes");
     console::println!("  diskpart disks                        Physical (PCI) disks only");
     console::println!("  diskpart info   <vol>                 Detailed info for a volume");
-    console::println!("  diskpart format <vol> <fs>            Format: ext4 ntfs fat16 fat32 fat64 fat128");
+    console::println!(
+        "  diskpart format <vol> <fs>            Format: ext4 ntfs fat16 fat32 fat64 fat128"
+    );
     console::println!("  diskpart mount  <vol> <path> [ro]     Mount a volume");
     console::println!("  diskpart umount <path>                Unmount a path");
     console::println!("  diskpart scan                         Rescan PCI storage bus");
@@ -262,25 +286,43 @@ pub fn run(args: &[&str], _env: &[(String, String)]) -> DiskpartResult {
         }
 
         Some("info") => {
-            let name = args.get(1).copied().ok_or("diskpart info: missing volume name")?;
+            let name = args
+                .get(1)
+                .copied()
+                .ok_or("diskpart info: missing volume name")?;
             cmd_info(name)
         }
 
         Some("format") => {
-            let name  = args.get(1).copied().ok_or("diskpart format: missing volume name")?;
-            let fs    = args.get(2).copied().ok_or("diskpart format: missing filesystem type")?;
+            let name = args
+                .get(1)
+                .copied()
+                .ok_or("diskpart format: missing volume name")?;
+            let fs = args
+                .get(2)
+                .copied()
+                .ok_or("diskpart format: missing filesystem type")?;
             cmd_format(name, fs)
         }
 
         Some("mount") => {
-            let name  = args.get(1).copied().ok_or("diskpart mount: missing volume name")?;
-            let path  = args.get(2).copied().ok_or("diskpart mount: missing mount path")?;
-            let ro    = args.get(3).is_some_and(|f| f.eq_ignore_ascii_case("ro"));
+            let name = args
+                .get(1)
+                .copied()
+                .ok_or("diskpart mount: missing volume name")?;
+            let path = args
+                .get(2)
+                .copied()
+                .ok_or("diskpart mount: missing mount path")?;
+            let ro = args.get(3).is_some_and(|f| f.eq_ignore_ascii_case("ro"));
             cmd_mount(name, path, ro)
         }
 
         Some("umount") | Some("unmount") => {
-            let path = args.get(1).copied().ok_or("diskpart umount: missing path")?;
+            let path = args
+                .get(1)
+                .copied()
+                .ok_or("diskpart umount: missing path")?;
             cmd_umount(path)
         }
 

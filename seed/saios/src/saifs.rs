@@ -7,8 +7,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
+use crate::object_manager::{
+    self, Health, ObjectMetadata, ObjectStatus, ObjectType, Property, PropertyMap,
+};
 use crate::som::{EventId, HandleId, ObjectId, OperationId, ProviderId};
-use crate::object_manager::{self, Health, ObjectMetadata, ObjectStatus, ObjectType, Property, PropertyMap};
 use crate::vfs;
 
 #[path = "saifs/tests.rs"]
@@ -86,7 +88,12 @@ pub trait NamespaceProvider {
     fn name(&self) -> &str;
     fn lookup(&self, ctx: &LookupContext, path: &str) -> Result<LookupResult, SaifsError>;
     fn enumerate(&self, ctx: &LookupContext, path: &str) -> Result<Vec<DirEntry>, SaifsError>;
-    fn create(&self, ctx: &LookupContext, path: &str, kind: CreateKind) -> Result<ObjectId, SaifsError>;
+    fn create(
+        &self,
+        ctx: &LookupContext,
+        path: &str,
+        kind: CreateKind,
+    ) -> Result<ObjectId, SaifsError>;
     fn remove(&self, ctx: &LookupContext, path: &str) -> Result<(), SaifsError>;
 }
 
@@ -104,7 +111,8 @@ pub trait Handle {
 
 pub trait OperationDispatcher {
     fn supports(&self, object: ObjectId, op: OperationId) -> bool;
-    fn invoke(&self, handle: HandleId, op: OperationId, args: &[u8]) -> Result<Vec<u8>, SaifsError>;
+    fn invoke(&self, handle: HandleId, op: OperationId, args: &[u8])
+    -> Result<Vec<u8>, SaifsError>;
 }
 
 #[derive(Clone)]
@@ -365,7 +373,9 @@ impl NamespaceProvider for DefaultVfsProvider {
                 });
             }
 
-            if object_manager::sys_readdir(&path).is_some() || object_manager::sys_read(&path).is_some() {
+            if object_manager::sys_readdir(&path).is_some()
+                || object_manager::sys_read(&path).is_some()
+            {
                 return Ok(LookupResult {
                     object_id: None,
                     kind: SaifsNodeKind::Virtual,
@@ -396,7 +406,12 @@ impl NamespaceProvider for DefaultVfsProvider {
         Ok(out)
     }
 
-    fn create(&self, _ctx: &LookupContext, path: &str, kind: CreateKind) -> Result<ObjectId, SaifsError> {
+    fn create(
+        &self,
+        _ctx: &LookupContext,
+        path: &str,
+        kind: CreateKind,
+    ) -> Result<ObjectId, SaifsError> {
         let path = normalize_path(path);
         match kind {
             CreateKind::File => vfs::touch(&path).map_err(map_str_err)?,
@@ -414,7 +429,10 @@ impl NamespaceProvider for DefaultVfsProvider {
 
 static DEFAULT_VFS_PROVIDER: DefaultVfsProvider = DefaultVfsProvider;
 
-fn register_provider_internal(state: &mut SaifsState, provider: &'static dyn NamespaceProvider) -> ProviderId {
+fn register_provider_internal(
+    state: &mut SaifsState,
+    provider: &'static dyn NamespaceProvider,
+) -> ProviderId {
     if let Some(existing) = state
         .providers
         .iter()
@@ -433,7 +451,11 @@ fn resolve_mount_internal(state: &SaifsState, path: &str) -> Option<MountPoint> 
     let mut best_score = 0usize;
 
     for mount in &state.mounts {
-        let mount_path = if mount.path.is_empty() { "/" } else { mount.path.as_str() };
+        let mount_path = if mount.path.is_empty() {
+            "/"
+        } else {
+            mount.path.as_str()
+        };
         if path_in_mount(mount_path, path) {
             let score = mount_path.len();
             if best.is_none() || score >= best_score {
@@ -452,7 +474,8 @@ fn resolve_provider_internal(state: &SaifsState, path: &str) -> Option<ProviderI
 
 fn resolve_path_internal(state: &SaifsState, path: &str) -> Result<ResolvedPath, SaifsError> {
     let absolute_path = canonicalize_path(path)?;
-    let mount = resolve_mount_internal(state, &absolute_path).ok_or(SaifsError::ProviderUnavailable)?;
+    let mount =
+        resolve_mount_internal(state, &absolute_path).ok_or(SaifsError::ProviderUnavailable)?;
 
     Ok(ResolvedPath {
         input_path: path.to_string(),
@@ -464,7 +487,10 @@ fn resolve_path_internal(state: &SaifsState, path: &str) -> Result<ResolvedPath,
     })
 }
 
-fn provider_by_id_internal(state: &SaifsState, id: ProviderId) -> Option<&'static dyn NamespaceProvider> {
+fn provider_by_id_internal(
+    state: &SaifsState,
+    id: ProviderId,
+) -> Option<&'static dyn NamespaceProvider> {
     state
         .providers
         .iter()
@@ -477,7 +503,9 @@ fn map_str_err(err: &'static str) -> SaifsError {
         "path not found" | "node missing" => SaifsError::NotFound,
         "already exists" => SaifsError::AlreadyExists,
         "invalid name" | "missing name" => SaifsError::InvalidPath,
-        "not a file" | "not a directory" | "parent is not a directory" => SaifsError::UnsupportedOperation,
+        "not a file" | "not a directory" | "parent is not a directory" => {
+            SaifsError::UnsupportedOperation
+        }
         "cannot remove root" | "directory not empty" => SaifsError::Busy,
         "invalid inode" => SaifsError::Corrupt,
         "read-only virtual path" => SaifsError::AccessDenied,
@@ -623,16 +651,14 @@ impl Handle for SaifsHandle {
     fn children(&self) -> Result<Vec<String>, SaifsError> {
         match self.kind {
             SaifsNodeKind::File => Err(SaifsError::UnsupportedOperation),
-            SaifsNodeKind::Directory | SaifsNodeKind::Virtual => {
-                with_state(|state| {
-                    let provider = provider_by_id_internal(state, self.provider_id)
-                        .ok_or(SaifsError::ProviderUnavailable)?;
-                    let entries = provider.enumerate(&LookupContext, &self.provider_path)?;
-                    let mut out: Vec<String> = entries.into_iter().map(|e| e.name).collect();
-                    out.sort();
-                    Ok(out)
-                })
-            }
+            SaifsNodeKind::Directory | SaifsNodeKind::Virtual => with_state(|state| {
+                let provider = provider_by_id_internal(state, self.provider_id)
+                    .ok_or(SaifsError::ProviderUnavailable)?;
+                let entries = provider.enumerate(&LookupContext, &self.provider_path)?;
+                let mut out: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+                out.sort();
+                Ok(out)
+            }),
             SaifsNodeKind::Object => {
                 if let Some(meta) = object_manager::metadata(&self.path) {
                     let mut out = Vec::new();
@@ -732,7 +758,9 @@ impl MountManager for SaifsMountManager {
     fn resolve_provider(&self, path: &str) -> Result<ProviderId, SaifsError> {
         init();
         let path = canonicalize_path(path)?;
-        with_state(|state| resolve_provider_internal(state, &path).ok_or(SaifsError::ProviderUnavailable))
+        with_state(|state| {
+            resolve_provider_internal(state, &path).ok_or(SaifsError::ProviderUnavailable)
+        })
     }
 
     fn mounts(&self) -> Vec<MountPoint> {
@@ -887,11 +915,15 @@ pub fn list(path: &str) -> Result<Vec<String>, SaifsError> {
 }
 
 pub fn mkdir(path: &str) -> Result<(), SaifsError> {
-    namespace_manager().create(path, CreateKind::Directory).map(|_| ())
+    namespace_manager()
+        .create(path, CreateKind::Directory)
+        .map(|_| ())
 }
 
 pub fn touch(path: &str) -> Result<(), SaifsError> {
-    namespace_manager().create(path, CreateKind::File).map(|_| ())
+    namespace_manager()
+        .create(path, CreateKind::File)
+        .map(|_| ())
 }
 
 pub fn remove(path: &str) -> Result<(), SaifsError> {
@@ -951,7 +983,9 @@ pub fn publish_event(event_type: EventType, object: Option<ObjectId>, payload: &
     });
 }
 
-pub fn register_provider(provider: &'static dyn NamespaceProvider) -> Result<ProviderId, SaifsError> {
+pub fn register_provider(
+    provider: &'static dyn NamespaceProvider,
+) -> Result<ProviderId, SaifsError> {
     provider_registry().register(provider)
 }
 
@@ -1012,7 +1046,10 @@ pub fn verify() -> crate::kernel::testing::report::VerifyReport {
         checks.push(if state.initialized {
             crate::kernel::testing::report::VerifyCheck::pass("Initialization", "saifs initialized")
         } else {
-            crate::kernel::testing::report::VerifyCheck::fail("Initialization", "saifs not initialized")
+            crate::kernel::testing::report::VerifyCheck::fail(
+                "Initialization",
+                "saifs not initialized",
+            )
         });
 
         checks.push(if state.mounts.iter().any(|m| m.path == "/") {
@@ -1022,9 +1059,15 @@ pub fn verify() -> crate::kernel::testing::report::VerifyReport {
         });
 
         checks.push(if !state.providers.is_empty() {
-            crate::kernel::testing::report::VerifyCheck::pass("Provider registry", "provider(s) registered")
+            crate::kernel::testing::report::VerifyCheck::pass(
+                "Provider registry",
+                "provider(s) registered",
+            )
         } else {
-            crate::kernel::testing::report::VerifyCheck::fail("Provider registry", "no providers registered")
+            crate::kernel::testing::report::VerifyCheck::fail(
+                "Provider registry",
+                "no providers registered",
+            )
         });
 
         crate::kernel::testing::report::VerifyReport {

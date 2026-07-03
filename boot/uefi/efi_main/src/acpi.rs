@@ -31,7 +31,7 @@ pub fn initialize() -> uefi::Result<AcpiInfo> {
     let rsdp = self::find_rsdp().ok_or(uefi::Status::NOT_FOUND)?;
     let _revision = rsdp.revision;
     let _rsdt = rsdp.rsdt_address as u64;
-    let _xsdt = rsdp.xsdt_address as u64;
+    let _xsdt = rsdp.xsdt_address;
     let _oem_id = rsdp.oem_id;
 
     Ok(AcpiInfo {
@@ -59,12 +59,13 @@ pub fn find_rsdp() -> Option<&'static RsdpDescriptor> {
 
     system::with_config_table(|entries| {
         for entry in entries {
-            if entry.guid == ConfigTableEntry::ACPI2_GUID || entry.guid == ConfigTableEntry::ACPI_GUID {
-                if let Some(rsdp) = rsdp_from_config_entry(entry) {
-                    candidate = Some(rsdp);
-                    if entry.guid == ConfigTableEntry::ACPI2_GUID {
-                        break;
-                    }
+            if (entry.guid == ConfigTableEntry::ACPI2_GUID
+                || entry.guid == ConfigTableEntry::ACPI_GUID)
+                && let Some(rsdp) = rsdp_from_config_entry(entry)
+            {
+                candidate = Some(rsdp);
+                if entry.guid == ConfigTableEntry::ACPI2_GUID {
+                    break;
                 }
             }
         }

@@ -166,20 +166,14 @@ fn pdpt_table_ptr(l4: usize) -> *mut paging::Table {
 
 fn pd_table_ptr(l4: usize, l3: usize) -> *mut paging::Table {
     let va = canonicalize_48(
-        (RECURSIVE_SLOT << 39)
-            | (RECURSIVE_SLOT << 30)
-            | ((l4 as u64) << 21)
-            | ((l3 as u64) << 12),
+        (RECURSIVE_SLOT << 39) | (RECURSIVE_SLOT << 30) | ((l4 as u64) << 21) | ((l3 as u64) << 12),
     );
     va as *mut paging::Table
 }
 
 fn pt_table_ptr(l4: usize, l3: usize, l2: usize) -> *mut paging::Table {
     let va = canonicalize_48(
-        (RECURSIVE_SLOT << 39)
-            | ((l4 as u64) << 30)
-            | ((l3 as u64) << 21)
-            | ((l2 as u64) << 12),
+        (RECURSIVE_SLOT << 39) | ((l4 as u64) << 30) | ((l3 as u64) << 21) | ((l2 as u64) << 12),
     );
     va as *mut paging::Table
 }
@@ -409,10 +403,12 @@ pub fn map_owned(
 ) -> Result<(), &'static str> {
     map(virt_start, phys_start, pages, flags, owner)?;
     with_state_mut(|state| {
-        if let Some(last) = state.mappings.last_mut() {
-            if last.virt_start == virt_start && last.phys_start == phys_start && last.pages == pages {
-                last.owned_physical = true;
-            }
+        if let Some(last) = state.mappings.last_mut()
+            && last.virt_start == virt_start
+            && last.phys_start == phys_start
+            && last.pages == pages
+        {
+            last.owned_physical = true;
         }
     });
     Ok(())
@@ -469,7 +465,9 @@ pub fn map_physical_anywhere(
 
     if let Err(e) = map(virt, phys_start, pages, flags, owner) {
         with_state_mut(|state| {
-            if state.next_kernel_virt >= virt.saturating_add((pages as u64).saturating_mul(PAGE_SIZE)) {
+            if state.next_kernel_virt
+                >= virt.saturating_add((pages as u64).saturating_mul(PAGE_SIZE))
+            {
                 state.next_kernel_virt = virt;
             }
         });
@@ -513,7 +511,13 @@ pub fn unmap(virt_start: VirtAddr) -> Result<(), &'static str> {
 }
 
 pub fn translate(virt: VirtAddr) -> Option<PhysAddr> {
-    with_state(|state| if state.initialized { translate_hw(virt) } else { None })
+    with_state(|state| {
+        if state.initialized {
+            translate_hw(virt)
+        } else {
+            None
+        }
+    })
 }
 
 pub fn mappings() -> Vec<Mapping> {

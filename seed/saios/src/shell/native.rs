@@ -3,6 +3,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::console;
+use crate::driver::storage as disk;
 use crate::heap;
 use crate::kernel::crt;
 use crate::kernel::device;
@@ -13,8 +14,8 @@ use crate::kernel::package_image;
 use crate::kernel::process;
 use crate::kernel::sairu;
 use crate::kernel::syscall;
-use crate::kernel::testing;
 use crate::kernel::telemetry;
+use crate::kernel::testing;
 use crate::kernel::timeline;
 use crate::ksf;
 use crate::object_manager;
@@ -22,12 +23,11 @@ use crate::pci;
 use crate::pmm;
 use crate::saifs;
 use crate::scheduler;
-use crate::vfs;
-use crate::driver::storage as disk;
 use crate::shell::command::{ShellResult, StaticCommand};
 use crate::shell::registry::CommandRegistry;
 use crate::shell::session::CommandContext;
 use crate::timer;
+use crate::vfs;
 
 pub fn register(registry: &mut CommandRegistry) {
     registry.register(Box::new(StaticCommand {
@@ -491,7 +491,7 @@ fn cmd_wc(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     let input = ctx.env_get("SISH_STDIN").ok_or("wc: no stdin")?;
     let lines = input.lines().count();
     let words = input.split_whitespace().count();
-    let bytes = input.as_bytes().len();
+    let bytes = input.len();
     console::println!("{} {} {}", lines, words, bytes);
     Ok(())
 }
@@ -685,7 +685,9 @@ fn cmd_exec(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let mut overlays: Vec<(String, String)> = Vec::new();
 
     while idx < args.len() && is_env_assignment(args[idx]) {
-        let (key, value) = args[idx].split_once('=').ok_or("exec: invalid env assignment")?;
+        let (key, value) = args[idx]
+            .split_once('=')
+            .ok_or("exec: invalid env assignment")?;
         overlays.push((key.to_string(), value.to_string()));
         idx += 1;
     }
@@ -800,17 +802,17 @@ fn cmd_syscall(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     if args.first().copied() == Some("invoke") {
-        let sel = args.get(1).copied().ok_or("syscall invoke: missing name or id")?;
+        let sel = args
+            .get(1)
+            .copied()
+            .ok_or("syscall invoke: missing name or id")?;
         let number = if let Ok(raw) = sel.parse::<u64>() {
             syscall::SyscallNumber::from_raw(raw).ok_or("syscall invoke: unknown id")?
         } else {
             syscall::SyscallNumber::from_name(sel).ok_or("syscall invoke: unknown name")?
         };
 
-        let arg0 = args
-            .get(2)
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
+        let arg0 = args.get(2).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
 
         let req = syscall::SyscallRequest {
             number,
@@ -845,7 +847,8 @@ fn cmd_crt(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
     if args.first().copied() == Some("probe") {
         let program = args.get(1).copied().unwrap_or("hello");
-        let startup = crt::prepare_startup_block(program, &args[2..], ctx.session.environment.as_slice());
+        let startup =
+            crt::prepare_startup_block(program, &args[2..], ctx.session.environment.as_slice());
         console::println!("program={}", startup.program);
         console::println!("argc={}", startup.argc);
         for (i, a) in startup.argv.iter().enumerate() {
@@ -929,18 +932,71 @@ fn cmd_dashboard(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!("SAIOS SYSTEM DASHBOARD");
     console::println!("========================================");
     console::println!("Boot            {}", if kom_ready { "OK" } else { "FAIL" });
-    console::println!("Memory          {}", if telemetry.ram_mb > 0 { "OK" } else { "FAIL" });
-    console::println!("Scheduler       {}", if telemetry.scheduler_threads > 0 { "OK" } else { "FAIL" });
-    console::println!("Processes       {} running", jobs.iter().filter(|p| matches!(p.state, process::ProcessState::Running)).count());
-    console::println!("Drivers         {}/{} healthy", drivers.len().saturating_sub(driver_faulted), drivers.len());
-    console::println!("Devices         {} online", devices.iter().filter(|d| matches!(d.status, device::DeviceStatus::Online)).count());
-    console::println!("Filesystem      {}", if telemetry.mount_count > 0 { "Mounted" } else { "Not Mounted" });
-    console::println!("Event Bus       {}", if event_bus_ready { "Active" } else { "Inactive" });
-    console::println!("Telemetry       {}", if telemetry.event_total > 0 { "Active" } else { "Warmup" });
-    console::println!("SAIRU           {}", if sairu_ready { "Healthy" } else { "Degraded" });
+    console::println!(
+        "Memory          {}",
+        if telemetry.ram_mb > 0 { "OK" } else { "FAIL" }
+    );
+    console::println!(
+        "Scheduler       {}",
+        if telemetry.scheduler_threads > 0 {
+            "OK"
+        } else {
+            "FAIL"
+        }
+    );
+    console::println!(
+        "Processes       {} running",
+        jobs.iter()
+            .filter(|p| matches!(p.state, process::ProcessState::Running))
+            .count()
+    );
+    console::println!(
+        "Drivers         {}/{} healthy",
+        drivers.len().saturating_sub(driver_faulted),
+        drivers.len()
+    );
+    console::println!(
+        "Devices         {} online",
+        devices
+            .iter()
+            .filter(|d| matches!(d.status, device::DeviceStatus::Online))
+            .count()
+    );
+    console::println!(
+        "Filesystem      {}",
+        if telemetry.mount_count > 0 {
+            "Mounted"
+        } else {
+            "Not Mounted"
+        }
+    );
+    console::println!(
+        "Event Bus       {}",
+        if event_bus_ready {
+            "Active"
+        } else {
+            "Inactive"
+        }
+    );
+    console::println!(
+        "Telemetry       {}",
+        if telemetry.event_total > 0 {
+            "Active"
+        } else {
+            "Warmup"
+        }
+    );
+    console::println!(
+        "SAIRU           {}",
+        if sairu_ready { "Healthy" } else { "Degraded" }
+    );
     console::println!("CPU             {} logical", telemetry.cpu_logical);
     console::println!("RAM             {} MiB", telemetry.ram_mb);
-    console::println!("Heap            {:.1} MiB / {:.1} MiB", (telemetry.heap_used_kb as f64) / 1024.0, (telemetry.heap_total_kb as f64) / 1024.0);
+    console::println!(
+        "Heap            {:.1} MiB / {:.1} MiB",
+        (telemetry.heap_used_kb as f64) / 1024.0,
+        (telemetry.heap_total_kb as f64) / 1024.0
+    );
     console::println!("Events          {}", telemetry.event_total);
     console::println!("Objects         {}", kom_stats.total);
     console::println!("Services        {}", services.len());
@@ -956,7 +1012,8 @@ fn cmd_dashboard(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         }
     }
     console::println!("----------------------------------------");
-    console::println!("READY  KOM={} KSM={} DEV={} DRV={} PROC={} EVT={} SAIRU={}",
+    console::println!(
+        "READY  KOM={} KSM={} DEV={} DRV={} PROC={} EVT={} SAIRU={}",
         kom_ready,
         ksm_ready,
         device_mgr_ready,
@@ -1014,11 +1071,15 @@ fn cmd_graph(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
     console::println!("Kernel");
 
-    fn print_children(parent_id: Option<ksf::ServiceId>, all: &[ksf::ServiceSnapshot], depth: usize) {
+    fn print_children(
+        parent_id: Option<ksf::ServiceId>,
+        all: &[ksf::ServiceSnapshot],
+        depth: usize,
+    ) {
         for svc in all {
             let is_child = match parent_id {
                 None => svc.dependencies.is_empty(),
-                Some(pid) => svc.dependencies.iter().any(|d| *d == pid),
+                Some(pid) => svc.dependencies.contains(&pid),
             };
             if !is_child {
                 continue;
@@ -1093,7 +1154,12 @@ fn cmd_objects(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
     console::println!("ID   TYPE      NAME");
     for obj in records {
-        console::println!("{}    {}    {}", obj.id.0, obj.object_type.as_str(), obj.name);
+        console::println!(
+            "{}    {}    {}",
+            obj.id.0,
+            obj.object_type.as_str(),
+            obj.name
+        );
     }
     Ok(())
 }
@@ -1323,7 +1389,10 @@ fn cmd_service(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             ksf::stop(name)
         }
         "restart" => {
-            let name = args.get(1).copied().ok_or("service restart: missing name")?;
+            let name = args
+                .get(1)
+                .copied()
+                .ok_or("service restart: missing name")?;
             ksf::restart(name)
         }
         "health" => {
@@ -1373,7 +1442,10 @@ fn cmd_service(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_restart(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let name = args.first().copied().ok_or("restart: missing service name")?;
+    let name = args
+        .first()
+        .copied()
+        .ok_or("restart: missing service name")?;
     ksf::restart(name)
 }
 
@@ -1388,7 +1460,12 @@ fn cmd_test(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
     console::println!("Running {} tests...", report.total);
     for failure in &report.failures {
-        console::println!("FAIL {}::{} - {}", failure.suite, failure.test, failure.reason);
+        console::println!(
+            "FAIL {}::{} - {}",
+            failure.suite,
+            failure.test,
+            failure.reason
+        );
     }
 
     if report.failed == 0 {
@@ -1518,7 +1595,10 @@ fn cmd_query(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_inspect(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let target = args.first().copied().ok_or("inspect: missing object id or path")?;
+    let target = args
+        .first()
+        .copied()
+        .ok_or("inspect: missing object id or path")?;
 
     if let Ok(id) = target.parse::<u64>() {
         if let Some(lines) = kom::inspect(kom::ObjectId(id)) {
@@ -1553,13 +1633,13 @@ fn cmd_inspect(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     let by_name = kom::find_by_name(target);
-    if let Some(obj) = by_name.first() {
-        if let Some(lines) = kom::inspect(obj.id) {
-            for line in lines {
-                console::println!("{}", line);
-            }
-            return Ok(());
+    if let Some(obj) = by_name.first()
+        && let Some(lines) = kom::inspect(obj.id)
+    {
+        for line in lines {
+            console::println!("{}", line);
         }
+        return Ok(());
     }
 
     for line in object_manager::inspect(target)? {
@@ -1569,7 +1649,10 @@ fn cmd_inspect(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_describe(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("describe: missing object path")?;
+    let path = args
+        .first()
+        .copied()
+        .ok_or("describe: missing object path")?;
     let handle = saifs::open(path).map_err(|_| "describe: open failed")?;
 
     console::println!("Path : {}", handle.path());
@@ -1584,7 +1667,8 @@ fn cmd_describe(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
         console::println!("Provider Name : {}", meta.provider_name);
     }
 
-    let props = crate::saifs::Handle::properties(&handle).map_err(|_| "describe: properties failed")?;
+    let props =
+        crate::saifs::Handle::properties(&handle).map_err(|_| "describe: properties failed")?;
     for p in props {
         console::println!("{} : {}", p.key, p.value);
     }
@@ -1608,7 +1692,10 @@ fn cmd_health(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
 }
 
 fn cmd_diagnose(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("diagnose: missing object path")?;
+    let path = args
+        .first()
+        .copied()
+        .ok_or("diagnose: missing object path")?;
     for line in object_manager::diagnose(path)? {
         console::println!("{}", line);
     }
@@ -1616,14 +1703,13 @@ fn cmd_diagnose(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_explain(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("explain: missing object path")?;
+    let path = args
+        .first()
+        .copied()
+        .ok_or("explain: missing object path")?;
     if path.eq_ignore_ascii_case("heap") || path.eq_ignore_ascii_case("memory") {
         let h = heap::stats();
-        let used_pct = if h.total == 0 {
-            0
-        } else {
-            (h.used.saturating_mul(100) / h.total) as u64
-        };
+        let used_pct = h.used.saturating_mul(100).checked_div(h.total).unwrap_or(0) as u64;
         console::println!("Heap uses a grow-on-demand policy with guarded expansion.");
         console::println!(
             "Current Usage: {} MiB / {} MiB ({}%)",
@@ -1631,7 +1717,9 @@ fn cmd_explain(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             h.total / (1024 * 1024),
             used_pct
         );
-        console::println!("Growth: starts at 32 MiB, expands in 2 MiB/4 MiB chunks, capped at 1 GiB.");
+        console::println!(
+            "Growth: starts at 32 MiB, expands in 2 MiB/4 MiB chunks, capped at 1 GiB."
+        );
         if used_pct >= 85 {
             console::println!("Recommendation: run recover and inspect heavy services/drivers.");
         } else if used_pct >= 70 {
@@ -1673,12 +1761,18 @@ fn cmd_events(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     for e in records {
-        if let Some(source) = source_filter {
-            if !e.source.contains(source) {
-                continue;
-            }
+        if let Some(source) = source_filter
+            && !e.source.contains(source)
+        {
+            continue;
         }
-        console::println!("bus#{} {} {} {}", e.seq, e.kind.as_str(), e.source, e.detail);
+        console::println!(
+            "bus#{} {} {} {}",
+            e.seq,
+            e.kind.as_str(),
+            e.source,
+            e.detail
+        );
     }
     Ok(())
 }
@@ -1704,13 +1798,25 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             // Show all storage volumes and their mount state
             let volumes = disk::volumes();
             console::println!("── Storage Volumes ─────────────────────────────────────────────");
-            console::println!("  {:<10}  {:<8}  {:>8}  {:<10}  {}",
-                "NAME", "FS", "SIZE(MB)", "BACKING", "MOUNTED AT");
+            console::println!(
+                "  {:<10}  {:<8}  {:>8}  {:<10}  {}",
+                "NAME",
+                "FS",
+                "SIZE(MB)",
+                "BACKING",
+                "MOUNTED AT"
+            );
             for v in &volumes {
                 let size_mb = v.total_bytes / (1024 * 1024);
                 let mounted = v.mounted_at.as_deref().unwrap_or("—");
-                console::println!("  {:<10}  {:<8}  {:>8}  {:<10}  {}",
-                    v.name, v.filesystem.as_str(), size_mb, v.backing, mounted);
+                console::println!(
+                    "  {:<10}  {:<8}  {:>8}  {:<10}  {}",
+                    v.name,
+                    v.filesystem.as_str(),
+                    size_mb,
+                    v.backing,
+                    mounted
+                );
             }
             if volumes.is_empty() {
                 console::println!("  (no volumes detected)");
@@ -1770,7 +1876,9 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
             console::println!(
                 "mount: {} ({}) mounted at {} [{}]",
-                device, fs_name, mountpoint,
+                device,
+                fs_name,
+                mountpoint,
                 if read_only { "ro" } else { "rw" }
             );
             Ok(())
@@ -1913,7 +2021,10 @@ fn cmd_sairu(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             Ok(())
         }
         "explain" => {
-            let target = args.get(1).copied().ok_or("sairu explain: missing target")?;
+            let target = args
+                .get(1)
+                .copied()
+                .ok_or("sairu explain: missing target")?;
             for line in sairu::explain(target) {
                 console::println!("{}", line);
             }

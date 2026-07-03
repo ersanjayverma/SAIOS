@@ -53,8 +53,12 @@ impl FramebufferDisplay {
         match (format, bytes_per_pixel) {
             (PixelFormat::Rgb, 2) => (0x001F, 0x07E0, 0xF800, 0),
             (PixelFormat::Bgr, 2) => (0xF800, 0x07E0, 0x001F, 0),
-            (PixelFormat::Rgb, 3) | (PixelFormat::Rgb, 4) => (0x000000FF, 0x0000FF00, 0x00FF0000, 0),
-            (PixelFormat::Bgr, 3) | (PixelFormat::Bgr, 4) => (0x00FF0000, 0x0000FF00, 0x000000FF, 0),
+            (PixelFormat::Rgb, 3) | (PixelFormat::Rgb, 4) => {
+                (0x000000FF, 0x0000FF00, 0x00FF0000, 0)
+            }
+            (PixelFormat::Bgr, 3) | (PixelFormat::Bgr, 4) => {
+                (0x00FF0000, 0x0000FF00, 0x000000FF, 0)
+            }
             _ => (0, 0, 0, 0),
         }
     }
@@ -78,7 +82,13 @@ impl FramebufferDisplay {
                     } else {
                         (0x00FF0000, 0x0000FF00, 0x000000FF, 0)
                     };
-                    (PixelFormat::Bitmask, inferred.0, inferred.1, inferred.2, inferred.3)
+                    (
+                        PixelFormat::Bitmask,
+                        inferred.0,
+                        inferred.1,
+                        inferred.2,
+                        inferred.3,
+                    )
                 } else {
                     (pixel_format, red_mask, green_mask, blue_mask, reserved_mask)
                 }
@@ -86,12 +96,24 @@ impl FramebufferDisplay {
             PixelFormat::Rgb | PixelFormat::Bgr => {
                 if bytes_per_pixel == 2 {
                     let inferred = Self::infer_masks_for_format(pixel_format, bytes_per_pixel);
-                    (PixelFormat::Bitmask, inferred.0, inferred.1, inferred.2, inferred.3)
+                    (
+                        PixelFormat::Bitmask,
+                        inferred.0,
+                        inferred.1,
+                        inferred.2,
+                        inferred.3,
+                    )
                 } else {
                     (pixel_format, red_mask, green_mask, blue_mask, reserved_mask)
                 }
             }
-            PixelFormat::BltOnly => (PixelFormat::BltOnly, red_mask, green_mask, blue_mask, reserved_mask),
+            PixelFormat::BltOnly => (
+                PixelFormat::BltOnly,
+                red_mask,
+                green_mask,
+                blue_mask,
+                reserved_mask,
+            ),
         }
     }
 
@@ -115,7 +137,7 @@ impl FramebufferDisplay {
 
         if !pixels_layout_ok {
             // Some firmware appears to report stride in bytes rather than pixels.
-            if info.stride % bytes_per_pixel == 0 {
+            if info.stride.is_multiple_of(bytes_per_pixel) {
                 let stride_from_bytes = info.stride / bytes_per_pixel;
                 let bytes_layout_ok = info
                     .stride
@@ -203,7 +225,9 @@ impl FramebufferDisplay {
     }
 
     pub fn clear_color(&mut self, color: u32) {
-        if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Rgb | PixelFormat::Bgr) {
+        if self.bytes_per_pixel == 4
+            && matches!(self.pixel_format, PixelFormat::Rgb | PixelFormat::Bgr)
+        {
             let packed = self.rgb_to_native_u32(color);
             // OPTIMIZATION: Fill rows with packed u32 values instead of per-pixel writes
             for y in 0..self.height {
@@ -327,8 +351,12 @@ impl FramebufferDisplay {
                 unsafe {
                     let p = self.base.add(offset);
                     match self.pixel_format {
-                        PixelFormat::Rgb => Self::write_rgb_like(p, r, g, b, self.bytes_per_pixel, false),
-                        PixelFormat::Bgr => Self::write_rgb_like(p, r, g, b, self.bytes_per_pixel, true),
+                        PixelFormat::Rgb => {
+                            Self::write_rgb_like(p, r, g, b, self.bytes_per_pixel, false)
+                        }
+                        PixelFormat::Bgr => {
+                            Self::write_rgb_like(p, r, g, b, self.bytes_per_pixel, true)
+                        }
                         PixelFormat::Bitmask => {
                             Self::write_packed(p, self.pack_bitmask(r, g, b), self.bytes_per_pixel)
                         }
@@ -403,7 +431,12 @@ impl Display for FramebufferDisplay {
     }
 
     fn pixel_masks(&self) -> (u32, u32, u32, u32) {
-        (self.red_mask, self.green_mask, self.blue_mask, self.reserved_mask)
+        (
+            self.red_mask,
+            self.green_mask,
+            self.blue_mask,
+            self.reserved_mask,
+        )
     }
 
     fn framebuffer(&mut self) -> *mut u8 {

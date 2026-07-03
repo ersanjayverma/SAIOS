@@ -1,4 +1,4 @@
-use super::font::{glyph_row, FONT_HEIGHT, FONT_WIDTH};
+use super::font::{FONT_HEIGHT, FONT_WIDTH, glyph_row};
 use super::framebuffer::Color;
 use super::surface::Surface;
 
@@ -25,22 +25,86 @@ pub enum AnsiColor {
 impl AnsiColor {
     pub const fn to_color(self) -> Color {
         match self {
-            AnsiColor::Black => Color { r: 0x00, g: 0x00, b: 0x00 },
-            AnsiColor::Red => Color { r: 0xAA, g: 0x00, b: 0x00 },
-            AnsiColor::Green => Color { r: 0x00, g: 0xAA, b: 0x00 },
-            AnsiColor::Yellow => Color { r: 0xAA, g: 0x55, b: 0x00 },
-            AnsiColor::Blue => Color { r: 0x00, g: 0x00, b: 0xAA },
-            AnsiColor::Magenta => Color { r: 0xAA, g: 0x00, b: 0xAA },
-            AnsiColor::Cyan => Color { r: 0x00, g: 0xAA, b: 0xAA },
-            AnsiColor::White => Color { r: 0xAA, g: 0xAA, b: 0xAA },
-            AnsiColor::BrightBlack => Color { r: 0x55, g: 0x55, b: 0x55 },
-            AnsiColor::BrightRed => Color { r: 0xFF, g: 0x55, b: 0x55 },
-            AnsiColor::BrightGreen => Color { r: 0x55, g: 0xFF, b: 0x55 },
-            AnsiColor::BrightYellow => Color { r: 0xFF, g: 0xFF, b: 0x55 },
-            AnsiColor::BrightBlue => Color { r: 0x55, g: 0x55, b: 0xFF },
-            AnsiColor::BrightMagenta => Color { r: 0xFF, g: 0x55, b: 0xFF },
-            AnsiColor::BrightCyan => Color { r: 0x55, g: 0xFF, b: 0xFF },
-            AnsiColor::BrightWhite => Color { r: 0xFF, g: 0xFF, b: 0xFF },
+            AnsiColor::Black => Color {
+                r: 0x00,
+                g: 0x00,
+                b: 0x00,
+            },
+            AnsiColor::Red => Color {
+                r: 0xAA,
+                g: 0x00,
+                b: 0x00,
+            },
+            AnsiColor::Green => Color {
+                r: 0x00,
+                g: 0xAA,
+                b: 0x00,
+            },
+            AnsiColor::Yellow => Color {
+                r: 0xAA,
+                g: 0x55,
+                b: 0x00,
+            },
+            AnsiColor::Blue => Color {
+                r: 0x00,
+                g: 0x00,
+                b: 0xAA,
+            },
+            AnsiColor::Magenta => Color {
+                r: 0xAA,
+                g: 0x00,
+                b: 0xAA,
+            },
+            AnsiColor::Cyan => Color {
+                r: 0x00,
+                g: 0xAA,
+                b: 0xAA,
+            },
+            AnsiColor::White => Color {
+                r: 0xAA,
+                g: 0xAA,
+                b: 0xAA,
+            },
+            AnsiColor::BrightBlack => Color {
+                r: 0x55,
+                g: 0x55,
+                b: 0x55,
+            },
+            AnsiColor::BrightRed => Color {
+                r: 0xFF,
+                g: 0x55,
+                b: 0x55,
+            },
+            AnsiColor::BrightGreen => Color {
+                r: 0x55,
+                g: 0xFF,
+                b: 0x55,
+            },
+            AnsiColor::BrightYellow => Color {
+                r: 0xFF,
+                g: 0xFF,
+                b: 0x55,
+            },
+            AnsiColor::BrightBlue => Color {
+                r: 0x55,
+                g: 0x55,
+                b: 0xFF,
+            },
+            AnsiColor::BrightMagenta => Color {
+                r: 0xFF,
+                g: 0x55,
+                b: 0xFF,
+            },
+            AnsiColor::BrightCyan => Color {
+                r: 0x55,
+                g: 0xFF,
+                b: 0xFF,
+            },
+            AnsiColor::BrightWhite => Color {
+                r: 0xFF,
+                g: 0xFF,
+                b: 0xFF,
+            },
         }
     }
 }
@@ -77,10 +141,34 @@ impl<'a> Renderer<'a> {
             return;
         }
 
-        self.draw_line(x as isize, y as isize, (x + w - 1) as isize, y as isize, color);
-        self.draw_line(x as isize, (y + h - 1) as isize, (x + w - 1) as isize, (y + h - 1) as isize, color);
-        self.draw_line(x as isize, y as isize, x as isize, (y + h - 1) as isize, color);
-        self.draw_line((x + w - 1) as isize, y as isize, (x + w - 1) as isize, (y + h - 1) as isize, color);
+        self.draw_line(
+            x as isize,
+            y as isize,
+            (x + w - 1) as isize,
+            y as isize,
+            color,
+        );
+        self.draw_line(
+            x as isize,
+            (y + h - 1) as isize,
+            (x + w - 1) as isize,
+            (y + h - 1) as isize,
+            color,
+        );
+        self.draw_line(
+            x as isize,
+            y as isize,
+            x as isize,
+            (y + h - 1) as isize,
+            color,
+        );
+        self.draw_line(
+            (x + w - 1) as isize,
+            y as isize,
+            (x + w - 1) as isize,
+            (y + h - 1) as isize,
+            color,
+        );
     }
 
     pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
@@ -119,21 +207,33 @@ impl<'a> Renderer<'a> {
     }
 
     pub fn draw_char_ansi(&mut self, x: usize, y: usize, ch: char, fg: AnsiColor, bg: AnsiColor) {
-        self.draw_char(x, y, ch, Self::color(fg.to_color()), Self::color(bg.to_color()));
+        self.draw_char(
+            x,
+            y,
+            ch,
+            Self::color(fg.to_color()),
+            Self::color(bg.to_color()),
+        );
     }
 
-    pub fn draw_string_ansi(&mut self, x: usize, y: usize, text: &str, fg: AnsiColor, bg: AnsiColor) {
-        self.draw_string(x, y, text, Self::color(fg.to_color()), Self::color(bg.to_color()));
-    }
-
-    pub fn draw_bitmap(
+    pub fn draw_string_ansi(
         &mut self,
         x: usize,
         y: usize,
-        width: usize,
-        height: usize,
-        pixels: &[u32],
+        text: &str,
+        fg: AnsiColor,
+        bg: AnsiColor,
     ) {
+        self.draw_string(
+            x,
+            y,
+            text,
+            Self::color(fg.to_color()),
+            Self::color(bg.to_color()),
+        );
+    }
+
+    pub fn draw_bitmap(&mut self, x: usize, y: usize, width: usize, height: usize, pixels: &[u32]) {
         let surface_width = self.surface.width();
         let surface_height = self.surface.height();
 

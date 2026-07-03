@@ -36,12 +36,9 @@ fn library_path_candidates(name: &str) -> [String; 2] {
 }
 
 fn resolve_library_path(name: &str) -> Option<String> {
-    for candidate in library_path_candidates(name) {
-        if saifs::open(candidate.as_str()).is_ok() {
-            return Some(candidate);
-        }
-    }
-    None
+    library_path_candidates(name)
+        .into_iter()
+        .find(|candidate| saifs::open(candidate.as_str()).is_ok())
 }
 
 fn parse_library(path: &str) -> Result<SharedLibraryInfo, &'static str> {

@@ -190,7 +190,7 @@ pub fn cores() -> u32 {
 }
 pub fn threads() -> u32 {
     let ebx = self::cpuid(1, 0).ebx;
-    ((ebx >> 16) & 0xFF) as u32
+    (ebx >> 16) & 0xFF
 }
 pub fn cache_line_size() -> u8 {
     let ebx = self::cpuid(1, 0).ebx;
@@ -220,11 +220,11 @@ pub fn microcode_version() -> u32 {
 }
 pub fn apic_id() -> u32 {
     let ebx = self::cpuid(1, 0).ebx;
-    ((ebx >> 24) & 0xFF) as u32
+    (ebx >> 24) & 0xFF
 }
 pub fn logical_processors() -> u32 {
     let ebx = self::cpuid(1, 0).ebx;
-    ((ebx >> 16) & 0xFF) as u32
+    (ebx >> 16) & 0xFF
 }
 pub fn cpuid(eax: u32, ecx: u32) -> CpuidRegisters {
     let r = { __cpuid_count(eax, ecx) };

@@ -79,9 +79,7 @@ impl FramebufferInfo {
 }
 pub fn initialize() -> uefi::Result<FramebufferInfo> {
     let handles = boot::locate_handle_buffer(SearchType::ByProtocol(&GraphicsOutput::GUID))?;
-    let handle = *handles
-        .first()
-        .ok_or(uefi::Status::NOT_FOUND)?;
+    let handle = *handles.first().ok_or(uefi::Status::NOT_FOUND)?;
 
     let mut gop = unsafe {
         boot::open_protocol::<GraphicsOutput>(

@@ -1,8 +1,8 @@
 pub mod acpi;
-pub mod device;
 pub mod crt;
-pub mod dynamic_linker;
+pub mod device;
 pub mod driver;
+pub mod dynamic_linker;
 pub mod event;
 pub mod object;
 pub mod package_image;
@@ -10,5 +10,5 @@ pub mod process;
 pub mod sairu;
 pub mod syscall;
 pub mod telemetry;
-pub mod timeline;
 pub mod testing;
+pub mod timeline;

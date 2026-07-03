@@ -17,7 +17,12 @@ impl CommandDispatcher {
         Self
     }
 
-    pub fn dispatch(&self, registry: &CommandRegistry, ctx: &mut CommandContext, line: &str) -> ShellResult {
+    pub fn dispatch(
+        &self,
+        registry: &CommandRegistry,
+        ctx: &mut CommandContext,
+        line: &str,
+    ) -> ShellResult {
         let pipelines = parser::parse_line(line);
         for pipeline in pipelines {
             self.dispatch_pipeline(registry, ctx, pipeline.commands)?;
@@ -53,7 +58,10 @@ impl CommandDispatcher {
             for redir in &cmd.redirections {
                 match redir.kind {
                     RedirectKind::Read => {
-                        stdin_data = Some(saifs::read_text(redir.path.as_str()).map_err(|_| "redirect: input open failed")?);
+                        stdin_data = Some(
+                            saifs::read_text(redir.path.as_str())
+                                .map_err(|_| "redirect: input open failed")?,
+                        );
                     }
                     RedirectKind::Write => {
                         out_redirect = Some((redir.path.clone(), false));
@@ -65,7 +73,8 @@ impl CommandDispatcher {
             }
 
             let suppress_console = idx + 1 < len || out_redirect.is_some();
-            let (_exit, captured) = self.execute_command(registry, ctx, cmd, stdin_data.as_deref(), suppress_console)?;
+            let (_exit, captured) =
+                self.execute_command(registry, ctx, cmd, stdin_data.as_deref(), suppress_console)?;
 
             if let Some((path, append)) = out_redirect {
                 self.write_redirect(path.as_str(), captured.as_str(), append)?;
@@ -104,7 +113,11 @@ impl CommandDispatcher {
                 run
             }
             None => {
-                match process::exec(cmd.command.as_str(), argv.as_slice(), ctx.session.environment.as_slice()) {
+                match process::exec(
+                    cmd.command.as_str(),
+                    argv.as_slice(),
+                    ctx.session.environment.as_slice(),
+                ) {
                     Ok(code) => {
                         exit_code = code;
                         ctx.session.last_exit_code = code;
@@ -226,7 +239,12 @@ impl CommandDispatcher {
         out
     }
 
-    fn run_script(&self, registry: &CommandRegistry, ctx: &mut CommandContext, path: &str) -> ShellResult {
+    fn run_script(
+        &self,
+        registry: &CommandRegistry,
+        ctx: &mut CommandContext,
+        path: &str,
+    ) -> ShellResult {
         let abs = if path.starts_with('/') {
             path.to_string()
         } else {

@@ -7,23 +7,23 @@ mod mouse;
 mod serial;
 pub mod tests;
 
-use core::fmt::{self, Write};
 use alloc::string::String as AllocString;
 use alloc::vec::Vec;
+use core::fmt::{self, Write};
 
-use backend::{ConsoleBackend, MirrorConsole};
-use cursor::Cursor;
-use framebuffer::FramebufferConsole;
-use hal::arch::x86_64::sync::StaticCell;
-use input::InputBuffer;
 use crate::kernel::device;
 use crate::kernel::driver;
+use backend::{ConsoleBackend, MirrorConsole};
+use core::sync::atomic::{AtomicBool, Ordering};
+use cursor::Cursor;
+use efi_main::graphics::FramebufferInfo;
+use framebuffer::FramebufferConsole;
+use hal::arch::x86_64::sync::StaticCell;
+use heapless::String;
+use input::InputBuffer;
 use keyboard::{KeyEvent, KeyboardDriver};
 use mouse::{MouseDriver, MouseEvent};
-use serial::{poll_input_event as poll_serial_input_event, SerialConsole};
-use core::sync::atomic::{AtomicBool, Ordering};
-use efi_main::graphics::FramebufferInfo;
-use heapless::String;
+use serial::{SerialConsole, poll_input_event as poll_serial_input_event};
 use static_assertions::const_assert;
 use unicode_width::UnicodeWidthChar;
 
@@ -78,10 +78,8 @@ impl<B: ConsoleBackend> Console<B> {
     }
 
     fn put_char(&mut self, c: char) {
-        if capture_char(c) {
-            if should_suppress_output() {
-                return;
-            }
+        if capture_char(c) && should_suppress_output() {
+            return;
         }
 
         match c {
@@ -209,12 +207,11 @@ impl<B: ConsoleBackend> Write for Console<B> {
 
 type DefaultBackend = MirrorConsole<SerialConsole, FramebufferConsole>;
 
-static CONSOLE: StaticCell<Console<DefaultBackend>> =
-    StaticCell::new(Console::new(
-        MirrorConsole::new(SerialConsole::new(), FramebufferConsole::new()),
-        DEFAULT_WIDTH,
-        DEFAULT_HEIGHT,
-    ));
+static CONSOLE: StaticCell<Console<DefaultBackend>> = StaticCell::new(Console::new(
+    MirrorConsole::new(SerialConsole::new(), FramebufferConsole::new()),
+    DEFAULT_WIDTH,
+    DEFAULT_HEIGHT,
+));
 
 static CONSOLE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static CONSOLE_LOCKED: AtomicBool = AtomicBool::new(false);
@@ -288,16 +285,62 @@ pub fn init() {
     unsafe {
         (*MOUSE.get()).init();
     }
-    let _ = driver::ensure_driver("serial", "0.1.0", "SAIOS", &[], driver::DriverStatus::Running);
-    let _ = driver::ensure_driver("input", "0.1.0", "SAIOS", &["serial"], driver::DriverStatus::Running);
-    let _ = driver::ensure_driver("hid", "0.1.0", "SAIOS", &["input"], driver::DriverStatus::Running);
-    let _ = driver::ensure_driver("hid-keyboard", "0.1.0", "SAIOS", &["hid"], driver::DriverStatus::Running);
-    let _ = driver::ensure_driver("hid-mouse", "0.1.0", "SAIOS", &["hid"], driver::DriverStatus::Running);
+    let _ = driver::ensure_driver(
+        "serial",
+        "0.1.0",
+        "SAIOS",
+        &[],
+        driver::DriverStatus::Running,
+    );
+    let _ = driver::ensure_driver(
+        "input",
+        "0.1.0",
+        "SAIOS",
+        &["serial"],
+        driver::DriverStatus::Running,
+    );
+    let _ = driver::ensure_driver(
+        "hid",
+        "0.1.0",
+        "SAIOS",
+        &["input"],
+        driver::DriverStatus::Running,
+    );
+    let _ = driver::ensure_driver(
+        "hid-keyboard",
+        "0.1.0",
+        "SAIOS",
+        &["hid"],
+        driver::DriverStatus::Running,
+    );
+    let _ = driver::ensure_driver(
+        "hid-mouse",
+        "0.1.0",
+        "SAIOS",
+        &["hid"],
+        driver::DriverStatus::Running,
+    );
     // Keep legacy logical names for compatibility with existing scripts/tools.
-    let _ = driver::ensure_driver("mouse", "0.1.0", "SAIOS", &["hid-mouse"], driver::DriverStatus::Running);
+    let _ = driver::ensure_driver(
+        "mouse",
+        "0.1.0",
+        "SAIOS",
+        &["hid-mouse"],
+        driver::DriverStatus::Running,
+    );
     let _ = device::ensure_device("COM1", "serial", "uart", device::DeviceStatus::Online);
-    let _ = device::ensure_device("keyboard0", "hid-keyboard", "hid-keyboard", device::DeviceStatus::Online);
-    let _ = device::ensure_device("mouse0", "hid-mouse", "hid-pointer", device::DeviceStatus::Online);
+    let _ = device::ensure_device(
+        "keyboard0",
+        "hid-keyboard",
+        "hid-keyboard",
+        device::DeviceStatus::Online,
+    );
+    let _ = device::ensure_device(
+        "mouse0",
+        "hid-mouse",
+        "hid-pointer",
+        device::DeviceStatus::Online,
+    );
     with_console(|console| console.init());
     unsafe {
         (*INPUT_BUFFER.get()).clear();
@@ -339,8 +382,19 @@ pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
     with_console(|console| {
         console.backend.right_mut().attach(mapped_info);
         if mapped_info.base != 0 {
-            let _ = driver::ensure_driver("framebuffer", "0.1.0", "SAIOS", &["serial"], driver::DriverStatus::Running);
-            let _ = device::ensure_device("fb0", "framebuffer", "display", device::DeviceStatus::Online);
+            let _ = driver::ensure_driver(
+                "framebuffer",
+                "0.1.0",
+                "SAIOS",
+                &["serial"],
+                driver::DriverStatus::Running,
+            );
+            let _ = device::ensure_device(
+                "fb0",
+                "framebuffer",
+                "display",
+                device::DeviceStatus::Online,
+            );
             if let (Some(columns), Some(rows)) = (
                 console.backend.right_mut().text_columns(),
                 console.backend.right_mut().text_rows(),
@@ -469,7 +523,7 @@ pub fn print(s: &str) {
 
 pub fn print_fmt(args: fmt::Arguments) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
-        let _ = hal::arch::x86_64::console::_print(args);
+        hal::arch::x86_64::console::_print(args);
         return;
     }
 
@@ -478,7 +532,7 @@ pub fn print_fmt(args: fmt::Arguments) {
     })
     .is_none()
     {
-        let _ = hal::arch::x86_64::console::_print(args);
+        hal::arch::x86_64::console::_print(args);
     }
 }
 

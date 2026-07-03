@@ -43,12 +43,12 @@ static EXIT_MAP_BUFFER: ExitMapBuffer = ExitMapBuffer(UnsafeCell::new([0u8; 256 
 #[entry]
 fn main() -> Status {
     if let Err(e) = uefi::helpers::init() {
-        let _ = println!("UEFI init failed: {:?}", e);
+        println!("UEFI init failed: {:?}", e);
         return Status::LOAD_ERROR;
     }
     boot_log("uefi init ok");
     let boot_info = efi_main::initialize_boot_info();
-    let _ = println!(
+    println!(
         "[boot] fb info: base={:#x} size={} {}x{} stride={} bpp={} bytespp={} fmt={:?} masks=({:#x},{:#x},{:#x},{:#x})",
         boot_info.framebuffer.base,
         boot_info.framebuffer.size,
@@ -56,7 +56,7 @@ fn main() -> Status {
         boot_info.framebuffer.height,
         boot_info.framebuffer.stride,
         boot_info.framebuffer.bpp,
-        core::cmp::max((boot_info.framebuffer.bpp + 7) / 8, 1),
+        core::cmp::max((boot_info.framebuffer.bpp).div_ceil(8), 1),
         boot_info.framebuffer.pixel_format,
         boot_info.framebuffer.red_mask,
         boot_info.framebuffer.green_mask,
@@ -71,7 +71,7 @@ fn main() -> Status {
     let loader = match load_seed(seed_path) {
         Ok(loader) => loader,
         Err(e) => {
-            let _ = println!("load_seed failed: {:?}", e.status());
+            println!("load_seed failed: {:?}", e.status());
             return e.status();
         }
     };
@@ -99,7 +99,7 @@ fn main() -> Status {
     ) {
         Ok(base) => base,
         Err(_) => {
-            let _ = println!(
+            println!(
                 "Kernel fixed-address allocation failed at {:#x}; static kernel cannot relocate",
                 aligned_start
             );
@@ -130,33 +130,30 @@ fn main() -> Status {
     boot_log("segments copied");
     let stack_pages = 16;
 
-    let stack = match boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, stack_pages) {
-        Ok(stack) => stack,
-        Err(e) => {
-            let _ = println!("Stack allocation failed: {:?}", e.status());
-            return e.status();
-        }
-    };
+    let stack =
+        match boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, stack_pages) {
+            Ok(stack) => stack,
+            Err(e) => {
+                println!("Stack allocation failed: {:?}", e.status());
+                return e.status();
+            }
+        };
     boot_log("stack allocated");
 
     let stack_base = stack.as_ptr() as u64;
     let stack_top = stack_base + stack_pages as u64 * 4096;
     let stack_span = stack_top.wrapping_sub(stack_base);
     if stack_top <= stack_base || stack_span < 4096 {
-        let _ = println!(
+        println!(
             "[boot] invalid stack: pages={} base={:#x} top={:#x} span={:#x}",
-            stack_pages,
-            stack_base,
-            stack_top,
-            stack_span
+            stack_pages, stack_base, stack_top, stack_span
         );
         return Status::LOAD_ERROR;
     }
     // Rust entry points expect call-compatible stack alignment (rsp % 16 == 8).
     let kernel_rsp = stack_top - 8;
 
-    let boot_info_pages =
-        (core::mem::size_of::<efi_main::SaiosBootInfo>() as u64 + 4095) / 4096;
+    let boot_info_pages = (core::mem::size_of::<efi_main::SaiosBootInfo>() as u64).div_ceil(4096);
     let boot_info_storage = match boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,
@@ -164,13 +161,13 @@ fn main() -> Status {
     ) {
         Ok(storage) => storage,
         Err(e) => {
-            let _ = println!("Boot info allocation failed: {:?}", e.status());
+            println!("Boot info allocation failed: {:?}", e.status());
             return e.status();
         }
     };
     let boot_info_ptr = boot_info_storage.as_ptr() as *mut efi_main::SaiosBootInfo;
     unsafe {
-        boot_info_ptr.write(boot_info.clone());
+        boot_info_ptr.write(boot_info);
     }
     boot_log("boot info copied");
 
@@ -183,7 +180,7 @@ fn main() -> Status {
     const MAX_ENTRIES: usize = 1024;
     let entry_size = core::mem::size_of::<efi_main::memorymap::MemoryRegion>();
     let entries_bytes = MAX_ENTRIES * entry_size; // 32 KiB
-    let entries_pages = (entries_bytes as u64 + 4095) / 4096;
+    let entries_pages = (entries_bytes as u64).div_ceil(4096);
 
     let entries_storage = match boot::allocate_pages(
         AllocateType::AnyPages,
@@ -192,7 +189,7 @@ fn main() -> Status {
     ) {
         Ok(storage) => storage,
         Err(e) => {
-            let _ = println!("Memory-map storage allocation failed: {:?}", e.status());
+            println!("Memory-map storage allocation failed: {:?}", e.status());
             return e.status();
         }
     };
@@ -201,7 +198,7 @@ fn main() -> Status {
     let pre_exit_memorymap = match efi_main::memorymap::initialize() {
         Ok(memorymap) => memorymap,
         Err(e) => {
-            let _ = println!("Pre-exit memory map capture failed: {:?}", e.status());
+            println!("Pre-exit memory map capture failed: {:?}", e.status());
             return e.status();
         }
     };
@@ -211,10 +208,9 @@ fn main() -> Status {
     boot_log("pre-exit map captured");
 
     let raw_entry = loader.entry_point;
-    let entry = raw_entry
-        .wrapping_add((base.as_ptr() as u64).wrapping_sub(aligned_start));
+    let entry = raw_entry.wrapping_add((base.as_ptr() as u64).wrapping_sub(aligned_start));
     if entry < (base.as_ptr() as u64) || entry >= ((base.as_ptr() as u64) + total_size) {
-        let _ = println!(
+        println!(
             "[boot] invalid entry: raw={:#x} resolved={:#x} load_range=[{:#x}..{:#x})",
             raw_entry,
             entry,
@@ -227,9 +223,7 @@ fn main() -> Status {
     boot_log("entry resolved");
     println!(
         "[boot] handoff: entry={:#x} stack={:#x} boot_info={:#x}",
-        entry,
-        kernel_rsp,
-        boot_info_ptr as u64
+        entry, kernel_rsp, boot_info_ptr as u64
     );
     boot::stall(Duration::from_secs(5));
     boot_log("exit boot services begin");
@@ -281,7 +275,6 @@ fn main() -> Status {
         return Status::ABORTED;
     }
 
-
     let final_entry_count = final_map_size / final_desc_size;
     if final_entry_count > MAX_ENTRIES {
         loop {
@@ -320,8 +313,6 @@ fn main() -> Status {
         }
     }
 
-
-
     unsafe {
         trace_marker(b'D');
         asm!(
@@ -342,14 +333,14 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let location = info.location();
 
     if let Some(loc) = location {
-        let _ = println!(
+        println!(
             "Panic occurred at {}:{}:{}",
             loc.file(),
             loc.line(),
             message
         );
     } else {
-        let _ = println!("Panic occurred: {}", message);
+        println!("Panic occurred: {}", message);
     }
     loop {
         core::hint::spin_loop();
@@ -425,8 +416,8 @@ pub fn load_seed(path: &str) -> uefi::Result<Loader> {
     drop(fs);
     drop(loaded_image);
     drop(cstr_path);
-    let header =
-        efi_main::load_elf64_header(&buffer[..size]).map_err(|_| uefi::Error::from(uefi::Status::LOAD_ERROR))?;
+    let header = efi_main::load_elf64_header(&buffer[..size])
+        .map_err(|_| uefi::Error::from(uefi::Status::LOAD_ERROR))?;
 
     if header.ident[0..4] != [0x7F, b'E', b'L', b'F'] {
         return Err(uefi::Error::from(uefi::Status::LOAD_ERROR));
@@ -448,4 +439,3 @@ pub fn load_seed(path: &str) -> uefi::Result<Loader> {
         },
     })
 }
-

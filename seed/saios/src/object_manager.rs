@@ -1,5 +1,5 @@
-use alloc::format;
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -7,10 +7,15 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
-pub use crate::som::ObjectId;
-use crate::som::{HealthState, ObjectClass, ObjectFlags, ObjectHeader, ObjectState as SomObjectState, ProviderId};
-use crate::provider::{DeviceProvider, NetworkProvider, ProcessProvider, Provider, ProviderObject, ProviderType, StorageProvider};
 use crate::driver::{dhcp, dns, ethernet, loopback, wifi};
+use crate::provider::{
+    DeviceProvider, NetworkProvider, ProcessProvider, Provider, ProviderObject, ProviderType,
+    StorageProvider,
+};
+pub use crate::som::ObjectId;
+use crate::som::{
+    HealthState, ObjectClass, ObjectFlags, ObjectHeader, ObjectState as SomObjectState, ProviderId,
+};
 use crate::{heap, pmm, scheduler, timer};
 
 #[path = "object_manager/tests.rs"]
@@ -157,7 +162,7 @@ impl Explainable for ManagedObject {
         }
 
         Explanation {
-            title: format!("{}", self.name),
+            title: self.name.to_string(),
             lines,
         }
     }
@@ -225,6 +230,7 @@ impl ObjectManager {
         id
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn register_object(
         &mut self,
         path: &str,
@@ -241,7 +247,8 @@ impl ObjectManager {
 
         let id = self.alloc_id();
         let now = timer::ticks();
-        let parent = parent_path.and_then(|p| self.objects.iter().find(|o| o.path == p).map(|o| o.id));
+        let parent =
+            parent_path.and_then(|p| self.objects.iter().find(|o| o.path == p).map(|o| o.id));
 
         let header = ObjectHeader {
             id,
@@ -270,10 +277,10 @@ impl ObjectManager {
             children: Vec::new(),
         });
 
-        if let Some(parent_path) = parent_path {
-            if let Some(parent) = self.objects.iter_mut().find(|o| o.path == parent_path) {
-                parent.children.push(id);
-            }
+        if let Some(parent_path) = parent_path
+            && let Some(parent) = self.objects.iter_mut().find(|o| o.path == parent_path)
+        {
+            parent.children.push(id);
         }
 
         id
@@ -292,7 +299,7 @@ impl ObjectManager {
             if obj.path.starts_with(&prefixed) {
                 let suffix = &obj.path[prefixed.len()..];
                 if !suffix.is_empty() && !suffix.contains('/') {
-                    out.push(format!("{}", suffix));
+                    out.push(suffix.to_string());
                 }
             }
         }
@@ -558,14 +565,14 @@ fn canonical_path(path: &str) -> String {
 
     let raw = path.trim_matches('/');
 
-    if raw.starts_with("device/") {
-        return format!("devices/{}", &raw[7..]);
+    if let Some(rest) = raw.strip_prefix("device/") {
+        return format!("devices/{}", rest);
     }
-    if raw.starts_with("driver/") {
-        return format!("drivers/{}", &raw[7..]);
+    if let Some(rest) = raw.strip_prefix("driver/") {
+        return format!("drivers/{}", rest);
     }
-    if raw.starts_with("process/") {
-        return format!("processes/{}", &raw[8..]);
+    if let Some(rest) = raw.strip_prefix("process/") {
+        return format!("processes/{}", rest);
     }
 
     raw.to_string()
@@ -923,7 +930,11 @@ pub fn inspect(path: &str) -> Result<Vec<String>, &'static str> {
         let obj = manager.object_by_path(&target).ok_or("object not found")?;
 
         let mut out = Vec::new();
-        out.push(format!("{} : {}", object_type_name(obj.object_type), obj.name));
+        out.push(format!(
+            "{} : {}",
+            object_type_name(obj.object_type),
+            obj.name
+        ));
         out.push(format!("Path : {}", obj.path));
         out.push(format!("Class : {:?}", obj.header.class));
         out.push(format!("Provider Name : {}", obj.provider_name));
@@ -1018,15 +1029,16 @@ pub fn diagnose(path: &str) -> Result<Vec<String>, &'static str> {
 
             let mut out = Vec::new();
             out.push("Memory".to_string());
-            out.push(format!("{}", health_name(health)));
+            out.push(health_name(health).to_string());
             out.push("Fragmentation1.2 %".to_string());
             out.push(format!("Free Pages{} %", free_pct));
             out.push("Largest Block512 MB".to_string());
             out.push(match health {
                 Health::Healthy => "RecommendationNo action required.".to_string(),
                 Health::Warning => "RecommendationConsider reducing heap growth.".to_string(),
-                Health::Critical => "RecommendationImmediate memory pressure mitigation required."
-                    .to_string(),
+                Health::Critical => {
+                    "RecommendationImmediate memory pressure mitigation required.".to_string()
+                }
                 Health::Offline => "RecommendationMemory subsystem unavailable.".to_string(),
             });
             return Ok(out);
@@ -1113,10 +1125,7 @@ pub fn sys_readdir(path: &str) -> Option<Vec<String>> {
         "sys/memory" => vec!["stats".to_string()],
         "sys/network" => vec!["status".to_string()],
         "sys/scheduler" => vec!["threads".to_string(), "uptime".to_string()],
-        "sys/providers" => providers()
-            .into_iter()
-            .map(|p| p.name)
-            .collect(),
+        "sys/providers" => providers().into_iter().map(|p| p.name).collect(),
         _ => return None,
     };
 
@@ -1177,9 +1186,15 @@ pub fn verify() -> crate::kernel::testing::report::VerifyReport {
         let mut checks = Vec::new();
 
         checks.push(if manager.initialized {
-            crate::kernel::testing::report::VerifyCheck::pass("Initialization", "manager initialized")
+            crate::kernel::testing::report::VerifyCheck::pass(
+                "Initialization",
+                "manager initialized",
+            )
         } else {
-            crate::kernel::testing::report::VerifyCheck::fail("Initialization", "manager not initialized")
+            crate::kernel::testing::report::VerifyCheck::fail(
+                "Initialization",
+                "manager not initialized",
+            )
         });
 
         let mut unique_ids = true;
@@ -1193,7 +1208,10 @@ pub fn verify() -> crate::kernel::testing::report::VerifyReport {
         checks.push(if unique_ids {
             crate::kernel::testing::report::VerifyCheck::pass("Object ids", "all object ids unique")
         } else {
-            crate::kernel::testing::report::VerifyCheck::fail("Object ids", "duplicate object id found")
+            crate::kernel::testing::report::VerifyCheck::fail(
+                "Object ids",
+                "duplicate object id found",
+            )
         });
 
         let mut unique_providers = true;
@@ -1207,9 +1225,15 @@ pub fn verify() -> crate::kernel::testing::report::VerifyReport {
             }
         }
         checks.push(if unique_providers {
-            crate::kernel::testing::report::VerifyCheck::pass("Provider registry", "providers are unique")
+            crate::kernel::testing::report::VerifyCheck::pass(
+                "Provider registry",
+                "providers are unique",
+            )
         } else {
-            crate::kernel::testing::report::VerifyCheck::fail("Provider registry", "duplicate provider registration")
+            crate::kernel::testing::report::VerifyCheck::fail(
+                "Provider registry",
+                "duplicate provider registration",
+            )
         });
 
         crate::kernel::testing::report::VerifyReport {

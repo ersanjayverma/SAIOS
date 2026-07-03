@@ -1,5 +1,5 @@
-use core::cell::Cell;
 use bitflags::bitflags;
+use core::cell::Cell;
 
 use hal::arch::x86_64::io::inb;
 

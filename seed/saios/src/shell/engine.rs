@@ -1,12 +1,12 @@
 use crate::console;
 use crate::scheduler;
 
+use super::commands;
 use super::dispatcher::CommandDispatcher;
 use super::prompt::{PromptProvider, SessionPromptProvider};
 use super::registry::CommandRegistry;
 use super::session::CommandContext;
 use super::{compatibility, native};
-use super::commands;
 
 pub struct ShellEngine {
     registry: CommandRegistry,
@@ -46,7 +46,8 @@ impl ShellEngine {
     }
 
     pub fn execute_line(&mut self, line: &str) -> Result<(), &'static str> {
-        self.dispatcher.dispatch(&self.registry, &mut self.ctx, line)
+        self.dispatcher
+            .dispatch(&self.registry, &mut self.ctx, line)
     }
 
     fn render_prompt(&self) {

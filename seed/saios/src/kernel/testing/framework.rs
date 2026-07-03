@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 
 use crate::{console, ksf, memory, object_manager, saifs, scheduler};
 
-use super::report::{VerifyReport};
+use super::report::VerifyReport;
 
 pub type KtResult = Result<(), &'static str>;
 pub type KtTestFn = fn() -> KtResult;
@@ -49,6 +49,12 @@ pub struct KernelTestFramework {
     verifiers: Vec<Verifier>,
 }
 
+impl Default for KernelTestFramework {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KernelTestFramework {
     pub fn new() -> Self {
         Self {
@@ -58,7 +64,11 @@ impl KernelTestFramework {
     }
 
     pub fn register_suite(&mut self, suite: TestSuite) {
-        if self.suites.iter().any(|s| s.name.eq_ignore_ascii_case(suite.name)) {
+        if self
+            .suites
+            .iter()
+            .any(|s| s.name.eq_ignore_ascii_case(suite.name))
+        {
             return;
         }
         self.suites.push(suite);

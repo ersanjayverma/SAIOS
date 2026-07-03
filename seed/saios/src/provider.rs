@@ -3,11 +3,11 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::driver::storage;
 use crate::driver::{dhcp, ethernet, loopback, wifi};
 use crate::object_manager::{Health, ObjectStatus, ObjectType, Property, PropertyMap};
 use crate::som::{ObjectId, ProviderId};
 use crate::{pci, scheduler};
-use crate::driver::storage;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProviderType {
@@ -348,7 +348,12 @@ impl Provider for NetworkProvider {
                         key: "MAC".to_string(),
                         value: format!(
                             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                            iface.mac[0], iface.mac[1], iface.mac[2], iface.mac[3], iface.mac[4], iface.mac[5]
+                            iface.mac[0],
+                            iface.mac[1],
+                            iface.mac[2],
+                            iface.mac[3],
+                            iface.mac[4],
+                            iface.mac[5]
                         ),
                     },
                     Property {
@@ -416,7 +421,12 @@ impl Provider for NetworkProvider {
                         key: "MAC".to_string(),
                         value: format!(
                             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                            iface.mac[0], iface.mac[1], iface.mac[2], iface.mac[3], iface.mac[4], iface.mac[5]
+                            iface.mac[0],
+                            iface.mac[1],
+                            iface.mac[2],
+                            iface.mac[3],
+                            iface.mac[4],
+                            iface.mac[5]
                         ),
                     },
                     Property {

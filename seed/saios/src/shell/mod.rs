@@ -3,24 +3,24 @@ mod commands;
 mod compatibility;
 mod dispatcher;
 mod engine;
+mod native;
 mod parser;
-mod prompt;
 pub mod programs;
+mod prompt;
 mod registry;
 mod service;
 mod session;
-mod native;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::console;
-use hal::arch::x86_64::sync::StaticCell;
-use crate::kernel::package_image;
 use crate::kernel::object as kom;
+use crate::kernel::package_image;
 use crate::object_manager;
 use crate::saifs;
+use hal::arch::x86_64::sync::StaticCell;
 
 #[derive(Default)]
 struct CompletionSnapshot {

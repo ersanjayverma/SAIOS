@@ -1,9 +1,8 @@
+use alloc::string::String;
 /// ACPI (Advanced Configuration and Power Interface) Support Module
 /// Provides full ACPI table parsing, device enumeration, power management,
 /// and interrupt routing for the SAIOS kernel.
-
 use alloc::vec::Vec;
-use alloc::string::String;
 use core::mem;
 use core::ptr;
 
@@ -37,10 +36,10 @@ pub struct AcpiTableHeader {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct GenericAddressSpace {
-    pub address_space_id: u8,  // 0=Mem, 1=IO, 2=PCI_CFG, 3=EC, 4=SMBus, 5=CMOS, 6=PCIBAR
+    pub address_space_id: u8, // 0=Mem, 1=IO, 2=PCI_CFG, 3=EC, 4=SMBus, 5=CMOS, 6=PCIBAR
     pub register_bit_width: u8,
     pub register_bit_offset: u8,
-    pub access_size: u8,  // 0=undef, 1=byte, 2=word, 3=dword, 4=qword
+    pub access_size: u8, // 0=undef, 1=byte, 2=word, 3=dword, 4=qword
     pub address: u64,
 }
 
@@ -222,12 +221,12 @@ pub enum PowerEvent {
 /// System Sleep State
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepState {
-    S0,  // Working
-    S1,  // Sleeping (light)
-    S2,  // Sleeping (medium)
-    S3,  // Sleeping (deep, memory)
-    S4,  // Hibernation
-    S5,  // Soft off
+    S0, // Working
+    S1, // Sleeping (light)
+    S2, // Sleeping (medium)
+    S3, // Sleeping (deep, memory)
+    S4, // Hibernation
+    S5, // Soft off
 }
 
 /// ACPI Device Information
@@ -348,9 +347,8 @@ impl AcpiManager {
         }
 
         // Validate checksum
-        let basic_bytes = unsafe {
-            core::slice::from_raw_parts(self.rsdp_address as *const u8, 20)
-        };
+        let basic_bytes =
+            unsafe { core::slice::from_raw_parts(self.rsdp_address as *const u8, 20) };
         let sum: u8 = basic_bytes.iter().fold(0, |acc, &x| acc.wrapping_add(x));
         if sum != 0 {
             return Err("ACPI: RSDP checksum validation failed");
@@ -369,15 +367,18 @@ impl AcpiManager {
         let header = unsafe { ptr::read_unaligned(header_ptr) };
 
         // Validate signature
-        let expected_sig = if is_xsdt { XSDT_SIGNATURE } else { RSDT_SIGNATURE };
+        let expected_sig = if is_xsdt {
+            XSDT_SIGNATURE
+        } else {
+            RSDT_SIGNATURE
+        };
         if header.signature != *expected_sig {
             return Err("ACPI: Invalid root table signature");
         }
 
         // Validate checksum
-        let table_bytes = unsafe {
-            core::slice::from_raw_parts(root_addr as *const u8, header.length as usize)
-        };
+        let table_bytes =
+            unsafe { core::slice::from_raw_parts(root_addr as *const u8, header.length as usize) };
         if !Self::validate_checksum(table_bytes) {
             return Err("ACPI: Root table checksum validation failed");
         }
@@ -620,15 +621,15 @@ impl AcpiManager {
         if fadt.pm1a_cnt_blk != 0 {
             // PM1A Control block base address
             let pm1a_cnt_addr = fadt.pm1a_cnt_blk as u16;
-            
+
             // Without AML interpreter, we use a fallback S5 SLP_TYP value
             // Typical values: S5 SLP_TYP = 0x00 or platform-specific
             // We'll write to PM1A_CNT: (SLP_TYP << 10) | SLP_EN (bit 13)
-            const S5_SLP_TYP: u16 = 0x00;  // S5 SLP type (varies by platform)
-            const SLP_EN: u16 = 1 << 13;   // Sleep enable bit
-            
+            const S5_SLP_TYP: u16 = 0x00; // S5 SLP type (varies by platform)
+            const SLP_EN: u16 = 1 << 13; // Sleep enable bit
+
             let pm_value = (S5_SLP_TYP << 10) | SLP_EN;
-            
+
             // Write to I/O port
             unsafe {
                 core::arch::asm!(
@@ -638,12 +639,10 @@ impl AcpiManager {
                     options(nomem, nostack, preserves_flags)
                 );
             }
-            
+
             // Wait for shutdown to take effect
             loop {
-                unsafe {
-                    hal::arch::x86_64::cpu::hlt();
-                }
+                hal::arch::x86_64::cpu::hlt();
             }
         }
 
@@ -663,12 +662,10 @@ impl AcpiManager {
                 options(nomem, nostack, preserves_flags)
             );
         }
-        
+
         // Wait for shutdown
         loop {
-            unsafe {
-                hal::arch::x86_64::cpu::hlt();
-            }
+            hal::arch::x86_64::cpu::hlt();
         }
     }
 
@@ -683,10 +680,11 @@ impl AcpiManager {
 
         // FADT reset register is in fadt.reset_reg (12 bytes = GAS structure)
         // Try to use reset register if available
-        if fadt.reset_reg[0] != 0 {  // address_space_id field
+        if fadt.reset_reg[0] != 0 {
+            // address_space_id field
             let gas_ptr = &fadt.reset_reg as *const [u8; 12] as *const GenericAddressSpace;
             let gas = unsafe { ptr::read_unaligned(gas_ptr) };
-            
+
             if gas.is_valid() {
                 // Write reset value to the reset register
                 if gas.is_io_port() {
@@ -699,12 +697,10 @@ impl AcpiManager {
                             options(nomem, nostack, preserves_flags)
                         );
                     }
-                    
+
                     // Wait for reset
                     loop {
-                        unsafe {
-                            hal::arch::x86_64::cpu::hlt();
-                        }
+                        hal::arch::x86_64::cpu::hlt();
                     }
                 } else if gas.is_memory() {
                     // Memory-mapped access
@@ -712,12 +708,10 @@ impl AcpiManager {
                     unsafe {
                         ptr::write(reset_ptr, fadt.reset_value);
                     }
-                    
+
                     // Wait for reset
                     loop {
-                        unsafe {
-                            hal::arch::x86_64::cpu::hlt();
-                        }
+                        hal::arch::x86_64::cpu::hlt();
                     }
                 }
             }
@@ -739,7 +733,7 @@ impl AcpiManager {
                 options(nomem, nostack, preserves_flags)
             );
         }
-        
+
         // If that doesn't work, try triple fault
         // Create invalid IDT descriptor to trigger fault
         unsafe {
@@ -751,7 +745,7 @@ impl AcpiManager {
             // Trigger interrupt to cause triple fault
             core::arch::asm!("int 0");
         }
-        
+
         // Should not reach here
         Err("ACPI: Platform reset failed")
     }

@@ -242,7 +242,10 @@ pub fn init() {
     grow_heap_locked(state, initial, HEAP_GROW_STEP_LARGE_BYTES);
 
     state.initialized = state.chunk_count > 0;
-    assert!(state.initialized, "heap: failed to allocate initial heap pages");
+    assert!(
+        state.initialized,
+        "heap: failed to allocate initial heap pages"
+    );
     unlock();
 }
 

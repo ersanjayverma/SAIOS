@@ -259,16 +259,26 @@ pub fn poll_input_event() -> Option<KeyEvent> {
                     } else if csi_params_eq_dyn(&param_bytes, b"24") {
                         Some(KeyEvent::FKey(12))
                     } else if csi_params_eq_dyn(&param_bytes, b"1;2") {
-                        Some(apply_arrow_modifiers(KeyEvent::ArrowUp, KeyModifiers::SHIFT))
+                        Some(apply_arrow_modifiers(
+                            KeyEvent::ArrowUp,
+                            KeyModifiers::SHIFT,
+                        ))
                     } else if csi_params_eq_dyn(&param_bytes, b"1;5") {
                         Some(apply_arrow_modifiers(KeyEvent::ArrowUp, KeyModifiers::CTRL))
                     } else if csi_params_eq_dyn(&param_bytes, b"1;6") {
-                        Some(apply_arrow_modifiers(KeyEvent::ArrowUp, KeyModifiers::CTRL | KeyModifiers::SHIFT))
+                        Some(apply_arrow_modifiers(
+                            KeyEvent::ArrowUp,
+                            KeyModifiers::CTRL | KeyModifiers::SHIFT,
+                        ))
                     } else if csi_params_eq_dyn(&param_bytes, b"3") {
                         Some(KeyEvent::Delete)
-                    } else if csi_params_eq_dyn(&param_bytes, b"1") || csi_params_eq_dyn(&param_bytes, b"7") {
+                    } else if csi_params_eq_dyn(&param_bytes, b"1")
+                        || csi_params_eq_dyn(&param_bytes, b"7")
+                    {
                         Some(KeyEvent::Home)
-                    } else if csi_params_eq_dyn(&param_bytes, b"4") || csi_params_eq_dyn(&param_bytes, b"8") {
+                    } else if csi_params_eq_dyn(&param_bytes, b"4")
+                        || csi_params_eq_dyn(&param_bytes, b"8")
+                    {
                         Some(KeyEvent::End)
                     } else {
                         None
