@@ -1,4 +1,5 @@
 #![no_std]
+use uefi::println;
 pub const SAIOS_BOOT_MAGIC: u64 = 0x5341_494F_5342_4F4F; // Choose your preferred value
 pub const SAIOS_BOOT_VERSION: u32 = 1;
 pub mod acpi;
@@ -107,7 +108,88 @@ pub struct Elf64Rela {
     pub r_addend: i64,
 }
 pub fn initialize_boot_info() -> SaiosBootInfo {
-    let framebuffer = graphics::initialize().unwrap_or_else(|_| graphics::FramebufferInfo::empty());
+    let _ = println!("[boot] boot_info: framebuffer init...");
+    let framebuffer = match graphics::initialize() {
+        Ok(v) => {
+            let _ = println!("[boot] boot_info: framebuffer ok");
+            v
+        }
+        Err(e) => {
+            let _ = println!("[boot] boot_info: framebuffer fail {:?}", e.status());
+            graphics::FramebufferInfo::empty()
+        }
+    };
+
+    let _ = println!("[boot] boot_info: acpi init...");
+    let acpi = match acpi::initialize() {
+        Ok(v) => {
+            let _ = println!("[boot] boot_info: acpi ok");
+            v
+        }
+        Err(e) => {
+            let _ = println!("[boot] boot_info: acpi fail {:?}", e.status());
+            acpi::AcpiInfo::empty()
+        }
+    };
+
+    let _ = println!("[boot] boot_info: smbios init...");
+    let smbios = smbios::initialize().unwrap_or_else(|e| {
+        let _ = println!("[boot] boot_info: smbios fail {:?}", e.status());
+        let _ = println!("[boot] boot_info: smbios fallback");
+        smbios::SmbiosInfo {
+        entry_point: 0,
+        version_major: 0,
+        version_minor: 0,
+        version_revision: 0,
+        table_address: 0,
+        table_length: 0,
+        is_64bit: false,
+    }
+    });
+    let _ = println!("[boot] boot_info: smbios ok/fallback");
+
+    let _ = println!("[boot] boot_info: cpu init...");
+    let cpu = cpu::initialize().unwrap_or_else(|e| {
+        let _ = println!("[boot] boot_info: cpu fail {:?}", e.status());
+        let _ = println!("[boot] boot_info: cpu fallback");
+        cpu::CpuInfo {
+        vendor: [0; 13],
+        brand: [0; 49],
+        features: 0,
+        extended_features: 0,
+        max_basic_cpuid: 0,
+        max_extended_cpuid: 0,
+        family: 0,
+        model: 0,
+        stepping: 0,
+        cores: 0,
+        threads: 0,
+        cache_line_size: 0,
+        cache_size: 0,
+        microcode_version: 0,
+        apic_id: 0,
+        logical_processors: 0,
+        hypervisor: cpu::HypervisorInfo {
+            present: false,
+            vendor: [0; 13],
+            max_basic_cpuid: 0,
+            features: 0,
+        },
+    }
+    });
+    let _ = println!("[boot] boot_info: cpu ok/fallback");
+
+    let _ = println!("[boot] boot_info: firmware init...");
+    let firmware = firmware::initialize().unwrap_or_else(|e| {
+        let _ = println!("[boot] boot_info: firmware fail {:?}", e.status());
+        let _ = println!("[boot] boot_info: firmware fallback");
+        firmware::FirmwareInfo {
+        vendor: [0; 32],
+        firmware_revision: 0,
+        uefi_revision: uefi::table::Revision::new(0, 0),
+    }
+    });
+    let _ = println!("[boot] boot_info: firmware ok/fallback");
 
     SaiosBootInfo {
         magic: SAIOS_BOOT_MAGIC,
@@ -119,10 +201,10 @@ pub fn initialize_boot_info() -> SaiosBootInfo {
             entries: core::ptr::null(),
             entry_count: 0,
         },
-        acpi: acpi::initialize().expect("Failed to initialize ACPI info"),
-        smbios: smbios::initialize().expect("Failed to initialize SMBIOS info"),
-        cpu: cpu::initialize().expect("Failed to initialize CPU info"),
-        firmware: firmware::initialize().expect("Failed to initialize firmware info"),
+        acpi,
+        smbios,
+        cpu,
+        firmware,
 
         reserved: [0; 16],
     }

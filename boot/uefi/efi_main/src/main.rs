@@ -12,6 +12,8 @@ use uefi::proto::media::file::{File, FileAttribute, FileMode, FileType};
 use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::*;
 
+const FB_BOOT_SMOKE_TEST: bool = true;
+
 fn boot_log(message: &str) {
     println!("[boot] {}", message);
 }
@@ -34,6 +36,173 @@ fn trace_marker(marker: u8) {
     io_out8(0x3F8, marker);
 }
 
+#[inline(always)]
+fn serial_write_byte(value: u8) {
+    io_out8(0x3F8, value);
+}
+
+fn serial_write_str(text: &str) {
+    for b in text.bytes() {
+        if b == b'\n' {
+            serial_write_byte(b'\r');
+        }
+        serial_write_byte(b);
+    }
+}
+
+fn serial_write_hex_u64(value: u64) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    serial_write_str("0x");
+    for shift in (0..16).rev() {
+        let nibble = ((value >> (shift * 4)) & 0xF) as usize;
+        serial_write_byte(HEX[nibble]);
+    }
+}
+
+fn serial_write_hex_usize(value: usize) {
+    serial_write_hex_u64(value as u64);
+}
+
+#[inline(always)]
+fn pack_channel(value: u8, mask: u32) -> u32 {
+    if mask == 0 {
+        return 0;
+    }
+    let shift = mask.trailing_zeros();
+    let width = mask.count_ones();
+    if width == 0 {
+        return 0;
+    }
+    let max = (1u32 << width) - 1;
+    let scaled = ((value as u32) * max + 127) / 255;
+    (scaled << shift) & mask
+}
+
+#[inline(always)]
+fn pack_bitmask(r: u8, g: u8, b: u8, masks: (u32, u32, u32, u32)) -> u32 {
+    let (red_mask, green_mask, blue_mask, reserved_mask) = masks;
+    pack_channel(r, red_mask)
+        | pack_channel(g, green_mask)
+        | pack_channel(b, blue_mask)
+        | reserved_mask
+}
+
+unsafe fn write_packed(dst: *mut u8, packed: u32, bytes_per_pixel: usize) {
+    let bytes = packed.to_le_bytes();
+    let count = core::cmp::min(bytes_per_pixel, 4);
+    let mut i = 0;
+    while i < count {
+        core::ptr::write_volatile(dst.add(i), bytes[i]);
+        i += 1;
+    }
+}
+
+unsafe fn put_pixel_with_stride(
+    fb: &efi_main::graphics::FramebufferInfo,
+    stride_pixels: usize,
+    x: usize,
+    y: usize,
+    color: u32,
+) {
+    if x >= fb.width || y >= fb.height {
+        return;
+    }
+    let bytes_per_pixel = core::cmp::max((fb.bpp + 7) / 8, 1);
+    let Some(offset_pixels) = y.checked_mul(stride_pixels).and_then(|v| v.checked_add(x)) else {
+        return;
+    };
+    let Some(offset) = offset_pixels.checked_mul(bytes_per_pixel) else {
+        return;
+    };
+    if offset + bytes_per_pixel > fb.size {
+        return;
+    }
+
+    let dst = (fb.base as *mut u8).add(offset);
+    let r = ((color >> 16) & 0xFF) as u8;
+    let g = ((color >> 8) & 0xFF) as u8;
+    let b = (color & 0xFF) as u8;
+    match fb.pixel_format {
+        efi_main::graphics::PixelFormat::Rgb => {
+            core::ptr::write_volatile(dst, r);
+            if bytes_per_pixel >= 2 {
+                core::ptr::write_volatile(dst.add(1), g);
+            }
+            if bytes_per_pixel >= 3 {
+                core::ptr::write_volatile(dst.add(2), b);
+            }
+            if bytes_per_pixel >= 4 {
+                core::ptr::write_volatile(dst.add(3), 0xFF);
+            }
+        }
+        efi_main::graphics::PixelFormat::Bgr => {
+            core::ptr::write_volatile(dst, b);
+            if bytes_per_pixel >= 2 {
+                core::ptr::write_volatile(dst.add(1), g);
+            }
+            if bytes_per_pixel >= 3 {
+                core::ptr::write_volatile(dst.add(2), r);
+            }
+            if bytes_per_pixel >= 4 {
+                core::ptr::write_volatile(dst.add(3), 0xFF);
+            }
+        }
+        efi_main::graphics::PixelFormat::Bitmask => {
+            let packed = pack_bitmask(
+                r,
+                g,
+                b,
+                (fb.red_mask, fb.green_mask, fb.blue_mask, fb.reserved_mask),
+            );
+            write_packed(dst, packed, bytes_per_pixel);
+        }
+        efi_main::graphics::PixelFormat::BltOnly => {}
+    }
+}
+
+fn framebuffer_boot_smoke_test(fb: &efi_main::graphics::FramebufferInfo) {
+    if fb.base == 0 || fb.width == 0 || fb.height == 0 || fb.stride == 0 {
+        return;
+    }
+
+    let bytes_per_pixel = core::cmp::max((fb.bpp + 7) / 8, 1);
+    unsafe {
+        // Primary addressing assumption: stride is pixels-per-scanline.
+        put_pixel_with_stride(fb, fb.stride, 0, 0, 0x00FF0000);
+        put_pixel_with_stride(fb, fb.stride, fb.width / 2, fb.height / 2, 0x0000FF00);
+        put_pixel_with_stride(
+            fb,
+            fb.stride,
+            fb.width.saturating_sub(1),
+            fb.height.saturating_sub(1),
+            0x000000FF,
+        );
+
+        // Diagnostic line across top row.
+        let max_x = core::cmp::min(fb.width, 512);
+        for x in 0..max_x {
+            let color = if x % 3 == 0 {
+                0x00FFFFFF
+            } else if x % 3 == 1 {
+                0x00FF00FF
+            } else {
+                0x0000FFFF
+            };
+            put_pixel_with_stride(fb, fb.stride, x, 0, color);
+        }
+
+        // Secondary probe: if stride may be reported in bytes, draw a second marker.
+        if bytes_per_pixel > 0 && fb.stride % bytes_per_pixel == 0 {
+            let alt_stride = fb.stride / bytes_per_pixel;
+            if alt_stride >= fb.width && alt_stride != fb.stride {
+                put_pixel_with_stride(fb, alt_stride, 8, 8, 0x00FFFF00);
+                put_pixel_with_stride(fb, alt_stride, 9, 8, 0x00FFFF00);
+                put_pixel_with_stride(fb, alt_stride, 10, 8, 0x00FFFF00);
+            }
+        }
+    }
+}
+
 struct ExitMapBuffer(UnsafeCell<[u8; 256 * 1024]>);
 
 unsafe impl Sync for ExitMapBuffer {}
@@ -47,21 +216,28 @@ fn main() -> Status {
         return Status::LOAD_ERROR;
     }
     boot_log("uefi init ok");
+    boot_log("boot_info init begin");
     let boot_info = efi_main::initialize_boot_info();
+    boot_log("boot_info init done");
     let _ = println!(
-        "[boot] fb info: base={:#x} size={} {}x{} stride={} bpp={} fmt={:?} masks=({:#x},{:#x},{:#x},{:#x})",
+        "[boot] fb info: base={:#x} size={} {}x{} stride={} bpp={} bytespp={} fmt={:?} masks=({:#x},{:#x},{:#x},{:#x})",
         boot_info.framebuffer.base,
         boot_info.framebuffer.size,
         boot_info.framebuffer.width,
         boot_info.framebuffer.height,
         boot_info.framebuffer.stride,
         boot_info.framebuffer.bpp,
+        core::cmp::max((boot_info.framebuffer.bpp + 7) / 8, 1),
         boot_info.framebuffer.pixel_format,
         boot_info.framebuffer.red_mask,
         boot_info.framebuffer.green_mask,
         boot_info.framebuffer.blue_mask,
         boot_info.framebuffer.reserved_mask,
     );
+    if FB_BOOT_SMOKE_TEST {
+        framebuffer_boot_smoke_test(&boot_info.framebuffer);
+        let _ = println!("[boot] fb smoke test pattern drawn");
+    }
 
     let seed_path = "\\SAIOS\\seed.elf";
     let loader = match load_seed(seed_path) {
@@ -306,6 +482,19 @@ fn main() -> Status {
     if !exited || final_desc_size == 0 || final_map_size > exit_map.len() {
         return Status::ABORTED;
     }
+
+    // No UEFI services available after ExitBootServices; use raw COM1 writes.
+    serial_write_str("\n[boot-post-exit] fb_base=");
+    serial_write_hex_u64(unsafe { (*boot_info_ptr).framebuffer.base });
+    serial_write_str(" stride=");
+    serial_write_hex_usize(unsafe { (*boot_info_ptr).framebuffer.stride });
+    serial_write_str(" bpp=");
+    serial_write_hex_usize(unsafe { (*boot_info_ptr).framebuffer.bpp });
+    serial_write_str(" entry=");
+    serial_write_hex_u64(entry);
+    serial_write_str(" boot_info=");
+    serial_write_hex_u64(boot_info_ptr as u64);
+    serial_write_str("\n");
 
     trace_marker(b'B');
     let final_entry_count = final_map_size / final_desc_size;

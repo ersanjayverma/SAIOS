@@ -28,7 +28,7 @@ pub struct RsdpDescriptor {
     pub reserved: [u8; 3],
 }
 pub fn initialize() -> uefi::Result<AcpiInfo> {
-    let rsdp = self::find_rsdp().expect("RSDP not found");
+    let rsdp = self::find_rsdp().ok_or(uefi::Status::NOT_FOUND)?;
     let _revision = rsdp.revision;
     let _rsdt = rsdp.rsdt_address as u64;
     let _xsdt = rsdp.xsdt_address as u64;
@@ -41,6 +41,18 @@ pub fn initialize() -> uefi::Result<AcpiInfo> {
         xsdt: rsdp.xsdt_address,
         oem_id: rsdp.oem_id,
     })
+}
+
+impl AcpiInfo {
+    pub const fn empty() -> Self {
+        Self {
+            rsdp: 0,
+            revision: 0,
+            rsdt: 0,
+            xsdt: 0,
+            oem_id: [0; 6],
+        }
+    }
 }
 pub fn find_rsdp() -> Option<&'static RsdpDescriptor> {
     let mut candidate: Option<&'static RsdpDescriptor> = None;

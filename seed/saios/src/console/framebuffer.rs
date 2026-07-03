@@ -1,6 +1,7 @@
 use super::backend::ConsoleBackend;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ptr;
 use efi_main::graphics::PixelFormat;
 use efi_main::graphics::FramebufferInfo;
 use crate::graphics::display::{Display, FramebufferDisplay};
@@ -112,21 +113,21 @@ impl FramebufferConsole {
 
         match pixel_format {
             PixelFormat::Rgb => {
-                *dst = r;
-                *dst.add(1) = g;
-                *dst.add(2) = b;
+                ptr::write_volatile(dst, r);
+                ptr::write_volatile(dst.add(1), g);
+                ptr::write_volatile(dst.add(2), b);
                 // Keep alpha non-zero for framebuffers that use channel 3.
                 if bytes_per_pixel >= 4 {
-                    *dst.add(3) = 0xFF;
+                    ptr::write_volatile(dst.add(3), 0xFF);
                 }
             }
             PixelFormat::Bgr => {
-                *dst = b;
-                *dst.add(1) = g;
-                *dst.add(2) = r;
+                ptr::write_volatile(dst, b);
+                ptr::write_volatile(dst.add(1), g);
+                ptr::write_volatile(dst.add(2), r);
                 // Keep alpha non-zero for framebuffers that use channel 3.
                 if bytes_per_pixel >= 4 {
-                    *dst.add(3) = 0xFF;
+                    ptr::write_volatile(dst.add(3), 0xFF);
                 }
             }
             PixelFormat::Bitmask => {
@@ -134,11 +135,11 @@ impl FramebufferConsole {
                 Self::write_packed(dst, pixel, bytes_per_pixel);
             }
             PixelFormat::BltOnly => {
-                *dst = b;
-                *dst.add(1) = g;
-                *dst.add(2) = r;
+                ptr::write_volatile(dst, b);
+                ptr::write_volatile(dst.add(1), g);
+                ptr::write_volatile(dst.add(2), r);
                 if bytes_per_pixel >= 4 {
-                    *dst.add(3) = 0xFF;
+                    ptr::write_volatile(dst.add(3), 0xFF);
                 }
             }
         }
@@ -150,7 +151,7 @@ impl FramebufferConsole {
         let count = core::cmp::min(bytes_per_pixel, 4);
         let mut i = 0;
         while i < count {
-            *dst.add(i) = bytes[i];
+            ptr::write_volatile(dst.add(i), bytes[i]);
             i += 1;
         }
     }

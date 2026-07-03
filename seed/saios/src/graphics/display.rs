@@ -1,3 +1,4 @@
+use core::ptr;
 use efi_main::graphics::{FramebufferInfo, PixelFormat};
 
 pub trait Display {
@@ -27,6 +28,53 @@ pub struct FramebufferDisplay {
 }
 
 impl FramebufferDisplay {
+    #[inline(always)]
+    fn infer_masks_for_format(format: PixelFormat, bytes_per_pixel: usize) -> (u32, u32, u32, u32) {
+        match (format, bytes_per_pixel) {
+            (PixelFormat::Rgb, 2) => (0x001F, 0x07E0, 0xF800, 0),
+            (PixelFormat::Bgr, 2) => (0xF800, 0x07E0, 0x001F, 0),
+            (PixelFormat::Rgb, 3) | (PixelFormat::Rgb, 4) => (0x000000FF, 0x0000FF00, 0x00FF0000, 0),
+            (PixelFormat::Bgr, 3) | (PixelFormat::Bgr, 4) => (0x00FF0000, 0x0000FF00, 0x000000FF, 0),
+            _ => (0, 0, 0, 0),
+        }
+    }
+
+    #[inline(always)]
+    fn normalize_format(
+        pixel_format: PixelFormat,
+        bytes_per_pixel: usize,
+        red_mask: u32,
+        green_mask: u32,
+        blue_mask: u32,
+        reserved_mask: u32,
+    ) -> (PixelFormat, u32, u32, u32, u32) {
+        let masks_zero = red_mask == 0 && green_mask == 0 && blue_mask == 0;
+
+        match pixel_format {
+            PixelFormat::Bitmask => {
+                if masks_zero {
+                    let inferred = if bytes_per_pixel == 2 {
+                        (0xF800, 0x07E0, 0x001F, 0)
+                    } else {
+                        (0x00FF0000, 0x0000FF00, 0x000000FF, 0)
+                    };
+                    (PixelFormat::Bitmask, inferred.0, inferred.1, inferred.2, inferred.3)
+                } else {
+                    (pixel_format, red_mask, green_mask, blue_mask, reserved_mask)
+                }
+            }
+            PixelFormat::Rgb | PixelFormat::Bgr => {
+                if bytes_per_pixel == 2 {
+                    let inferred = Self::infer_masks_for_format(pixel_format, bytes_per_pixel);
+                    (PixelFormat::Bitmask, inferred.0, inferred.1, inferred.2, inferred.3)
+                } else {
+                    (pixel_format, red_mask, green_mask, blue_mask, reserved_mask)
+                }
+            }
+            PixelFormat::BltOnly => (PixelFormat::BltOnly, red_mask, green_mask, blue_mask, reserved_mask),
+        }
+    }
+
     pub fn from_info(info: FramebufferInfo) -> Option<Self> {
         let bytes_per_pixel = (info.bpp.saturating_add(7)) / 8;
         if info.base == 0
@@ -35,10 +83,6 @@ impl FramebufferDisplay {
             || bytes_per_pixel == 0
             || bytes_per_pixel > 4
         {
-            return None;
-        }
-
-        if matches!(info.pixel_format, PixelFormat::Rgb | PixelFormat::Bgr) && bytes_per_pixel < 3 {
             return None;
         }
 
@@ -75,6 +119,15 @@ impl FramebufferDisplay {
             return None;
         }
 
+        let (pixel_format, red_mask, green_mask, blue_mask, reserved_mask) = Self::normalize_format(
+            info.pixel_format,
+            bytes_per_pixel,
+            info.red_mask,
+            info.green_mask,
+            info.blue_mask,
+            info.reserved_mask,
+        );
+
         Some(Self {
             base: info.base as *mut u8,
             width: info.width,
@@ -82,11 +135,11 @@ impl FramebufferDisplay {
             stride: stride_pixels,
             bytes_per_pixel,
             size_bytes: info.size,
-            pixel_format: info.pixel_format,
-            red_mask: info.red_mask,
-            green_mask: info.green_mask,
-            blue_mask: info.blue_mask,
-            reserved_mask: info.reserved_mask,
+            pixel_format,
+            red_mask,
+            green_mask,
+            blue_mask,
+            reserved_mask,
         })
     }
 
@@ -121,8 +174,24 @@ impl FramebufferDisplay {
         let count = core::cmp::min(bytes_per_pixel, 4);
         let mut i = 0;
         while i < count {
-            *dst.add(i) = bytes[i];
+            ptr::write_volatile(dst.add(i), bytes[i]);
             i += 1;
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn write_rgb_like(dst: *mut u8, r: u8, g: u8, b: u8, bytes_per_pixel: usize, bgr: bool) {
+        if bgr {
+            ptr::write_volatile(dst, b);
+            ptr::write_volatile(dst.add(1), g);
+            ptr::write_volatile(dst.add(2), r);
+        } else {
+            ptr::write_volatile(dst, r);
+            ptr::write_volatile(dst.add(1), g);
+            ptr::write_volatile(dst.add(2), b);
+        }
+        if bytes_per_pixel >= 4 {
+            ptr::write_volatile(dst.add(3), 0);
         }
     }
 }
@@ -179,20 +248,10 @@ impl Display for FramebufferDisplay {
                     let p = self.base.add(offset);
                     match self.pixel_format {
                         PixelFormat::Rgb => {
-                            *p = r;
-                            *p.add(1) = g;
-                            *p.add(2) = b;
-                            if self.bytes_per_pixel >= 4 {
-                                *p.add(3) = 0;
-                            }
+                            Self::write_rgb_like(p, r, g, b, self.bytes_per_pixel, false);
                         }
                         PixelFormat::Bgr => {
-                            *p = b;
-                            *p.add(1) = g;
-                            *p.add(2) = r;
-                            if self.bytes_per_pixel >= 4 {
-                                *p.add(3) = 0;
-                            }
+                            Self::write_rgb_like(p, r, g, b, self.bytes_per_pixel, true);
                         }
                         PixelFormat::Bitmask => {
                             Self::write_packed(p, self.pack_bitmask(r, g, b), self.bytes_per_pixel);
