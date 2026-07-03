@@ -1,3 +1,5 @@
+//! UEFI memory map capture and handoff structures.
+
 extern crate alloc;
 use core::cell::UnsafeCell;
 use uefi::boot::MemoryType as UefiMemoryType;
@@ -5,6 +7,7 @@ use uefi::mem::memory_map::MemoryMap;
 
 /// Maximum number of UEFI memory descriptors supported during boot.
 const MEMORY_REGION_CAPACITY: usize = 1024;
+const UEFI_PAGE_SIZE: u64 = 4096;
 
 struct MemoryRegionBuffer(UnsafeCell<[MemoryRegion; MEMORY_REGION_CAPACITY]>);
 
@@ -69,7 +72,7 @@ pub fn initialize() -> uefi::Result<MemoryMapInfo> {
 
         regions[count] = MemoryRegion {
             base: entry.phys_start,
-            length: entry.page_count * 4096,
+            length: entry.page_count * UEFI_PAGE_SIZE,
             region_type: convert_memory_type(entry.ty),
             attributes: entry.att.bits(),
         };

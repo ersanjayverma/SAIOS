@@ -1,3 +1,5 @@
+//! x86_64 paging table structures and CR3 access helpers.
+
 use core::arch::asm;
 
 pub const ENTRY_COUNT: usize = 512;

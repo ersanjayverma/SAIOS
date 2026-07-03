@@ -6,6 +6,7 @@ use hal::arch::x86_64::sync::StaticCell;
 
 const CONFIG_ADDRESS_PORT: u16 = 0xCF8;
 const CONFIG_DATA_PORT: u16 = 0xCFC;
+const CONFIG_ADDRESS_ENABLE: u32 = 0x8000_0000;
 
 #[derive(Debug, Copy, Clone)]
 pub struct PciDevice {
@@ -54,7 +55,7 @@ fn unlock() {
 }
 
 fn config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    0x8000_0000
+    CONFIG_ADDRESS_ENABLE
         | ((bus as u32) << 16)
         | ((device as u32) << 11)
         | ((function as u32) << 8)

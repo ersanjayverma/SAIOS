@@ -1,3 +1,5 @@
+//! Minimal CPU instruction wrappers for x86_64.
+
 use core::arch::asm;
 
 #[inline(always)]

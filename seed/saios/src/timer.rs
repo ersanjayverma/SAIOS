@@ -17,6 +17,24 @@ const PIT_INPUT_HZ: u32 = 1_193_182;
 const TICK_HZ: u32 = 100;
 /// IDT vector used for the timer interrupt (remapped IRQ0).
 const TIMER_VECTOR: u8 = 32;
+const PIC_MASTER_COMMAND_PORT: u16 = 0x20;
+const PIC_MASTER_DATA_PORT: u16 = 0x21;
+const PIC_SLAVE_COMMAND_PORT: u16 = 0xA0;
+const PIC_SLAVE_DATA_PORT: u16 = 0xA1;
+const PIC_END_OF_INTERRUPT: u8 = 0x20;
+const PIC_ICW1_INIT_WITH_ICW4: u8 = 0x11;
+const PIC_MASTER_VECTOR_OFFSET: u8 = 0x20;
+const PIC_SLAVE_VECTOR_OFFSET: u8 = 0x28;
+const PIC_MASTER_SLAVE_ON_IRQ2: u8 = 0x04;
+const PIC_SLAVE_CASCADE_ID: u8 = 0x02;
+const PIC_ICW4_8086_MODE: u8 = 0x01;
+const PIC_MASK_ALL_EXCEPT_IRQ0: u8 = 0xFE;
+const PIC_IRQ0_MASK: u8 = 0x01;
+const PIC_MASK_ALL: u8 = 0xFF;
+const PIT_CHANNEL0_DATA_PORT: u16 = 0x40;
+const PIT_COMMAND_PORT: u16 = 0x43;
+const PIT_CHANNEL0_MODE3_LOHI: u8 = 0x36;
+const PIT_DIVISOR_LOW_BYTE_MASK: u16 = 0x00FF;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static TICKS: AtomicU64 = AtomicU64::new(0);
@@ -56,40 +74,43 @@ extern "C" fn saios_timer_tick() {
     crate::scheduler::on_timer_tick();
     crate::console::on_timer_tick();
     // PIC EOI for IRQ0.
-    outb(0x20, 0x20);
+    outb(PIC_MASTER_COMMAND_PORT, PIC_END_OF_INTERRUPT);
 }
 
 fn remap_pic() {
-    let master_mask = inb(0x21);
-    let slave_mask = inb(0xA1);
+    let master_mask = inb(PIC_MASTER_DATA_PORT);
+    let slave_mask = inb(PIC_SLAVE_DATA_PORT);
 
     // Start PIC initialization.
-    outb(0x20, 0x11);
+    outb(PIC_MASTER_COMMAND_PORT, PIC_ICW1_INIT_WITH_ICW4);
     io_wait();
-    outb(0xA0, 0x11);
+    outb(PIC_SLAVE_COMMAND_PORT, PIC_ICW1_INIT_WITH_ICW4);
     io_wait();
 
     // Vector offsets: 32..39 (master), 40..47 (slave).
-    outb(0x21, 0x20);
+    outb(PIC_MASTER_DATA_PORT, PIC_MASTER_VECTOR_OFFSET);
     io_wait();
-    outb(0xA1, 0x28);
+    outb(PIC_SLAVE_DATA_PORT, PIC_SLAVE_VECTOR_OFFSET);
     io_wait();
 
     // Master has slave on IRQ2, slave identity = 2.
-    outb(0x21, 0x04);
+    outb(PIC_MASTER_DATA_PORT, PIC_MASTER_SLAVE_ON_IRQ2);
     io_wait();
-    outb(0xA1, 0x02);
+    outb(PIC_SLAVE_DATA_PORT, PIC_SLAVE_CASCADE_ID);
     io_wait();
 
     // 8086 mode.
-    outb(0x21, 0x01);
+    outb(PIC_MASTER_DATA_PORT, PIC_ICW4_8086_MODE);
     io_wait();
-    outb(0xA1, 0x01);
+    outb(PIC_SLAVE_DATA_PORT, PIC_ICW4_8086_MODE);
     io_wait();
 
     // Keep only timer IRQ unmasked on master; mask all slave IRQs.
-    outb(0x21, (master_mask | 0xFE) & !0x01);
-    outb(0xA1, 0xFF);
+    outb(
+        PIC_MASTER_DATA_PORT,
+        (master_mask | PIC_MASK_ALL_EXCEPT_IRQ0) & !PIC_IRQ0_MASK,
+    );
+    outb(PIC_SLAVE_DATA_PORT, PIC_MASK_ALL);
 
     // Preserve previous masks if needed later; for now timer-only policy.
     let _ = slave_mask;
@@ -99,9 +120,12 @@ fn init_pit() {
     let divisor = (PIT_INPUT_HZ / TICK_HZ) as u16;
 
     // Channel 0, lobyte/hibyte, mode 3 (square wave), binary.
-    outb(0x43, 0x36);
-    outb(0x40, (divisor & 0xFF) as u8);
-    outb(0x40, (divisor >> 8) as u8);
+    outb(PIT_COMMAND_PORT, PIT_CHANNEL0_MODE3_LOHI);
+    outb(
+        PIT_CHANNEL0_DATA_PORT,
+        (divisor & PIT_DIVISOR_LOW_BYTE_MASK) as u8,
+    );
+    outb(PIT_CHANNEL0_DATA_PORT, (divisor >> 8) as u8);
 }
 
 /// Initializes the PIC and PIT and registers the timer interrupt handler.

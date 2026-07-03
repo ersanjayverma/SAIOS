@@ -1,4 +1,8 @@
+//! Interrupt flag manipulation helpers for x86_64.
+
 use core::arch::asm;
+
+const RFLAGS_INTERRUPT_ENABLE_BIT: u64 = 9;
 
 #[inline(always)]
 pub fn enable() {
@@ -27,7 +31,7 @@ pub fn are_enabled() -> bool {
         );
     }
 
-    (rflags & (1 << 9)) != 0
+    (rflags & (1 << RFLAGS_INTERRUPT_ENABLE_BIT)) != 0
 }
 
 pub fn without_interrupts<F: FnOnce() -> R, R>(f: F) -> R {

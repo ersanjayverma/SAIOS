@@ -1,3 +1,5 @@
+//! Small synchronization primitives used by early x86_64 HAL code.
+
 use core::cell::UnsafeCell;
 
 pub struct StaticCell<T>(UnsafeCell<T>);

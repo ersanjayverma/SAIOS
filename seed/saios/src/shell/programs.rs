@@ -32,6 +32,7 @@ const DT_NULL: i64 = 0;
 const DT_NEEDED: i64 = 1;
 const DT_STRTAB: i64 = 5;
 const DT_STRSZ: i64 = 10;
+const DEFAULT_USER_PROGRAM_BASE: u64 = 0x0040_0000;
 
 #[derive(Clone, Debug)]
 pub struct BinaryMetadata {
@@ -574,7 +575,7 @@ fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Option<BinaryMetadata> {
     }
 
     let preferred_base = if e_type == ET_DYN {
-        0x0040_0000
+        DEFAULT_USER_PROGRAM_BASE
     } else {
         entry_addr & !0xFFF
     };
@@ -595,7 +596,7 @@ pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
     if text.starts_with("SAIOS_BIN_V1") {
         let mut entry: Option<String> = None;
         let mut pie = false;
-        let mut preferred_base = 0x0040_0000u64;
+        let mut preferred_base = DEFAULT_USER_PROGRAM_BASE;
         let mut dynamic = false;
         let mut interpreter: Option<String> = None;
         let mut needed_libraries: Vec<String> = Vec::new();
