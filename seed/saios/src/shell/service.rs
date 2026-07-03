@@ -18,6 +18,7 @@ fn sish_thread_entry() {
     let _ = process::finish_pid1(0);
     let _ = process::ensure_shell_process("snsh");
     console::println!("Launching SNSH...");
+    let _ = engine.execute_line("clear");
     engine.run();
 }
 

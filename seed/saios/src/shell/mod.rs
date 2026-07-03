@@ -3,6 +3,7 @@ mod commands;
 mod compatibility;
 mod dispatcher;
 mod engine;
+mod man;
 mod native;
 mod parser;
 pub mod programs;
@@ -16,10 +17,12 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::console;
+use crate::driver::storage::{self, FilesystemKind};
 use crate::kernel::object as kom;
 use crate::kernel::package_image;
 use crate::object_manager;
 use crate::saifs;
+use crate::vfs;
 use hal::arch::x86_64::sync::StaticCell;
 
 #[derive(Default)]
@@ -148,6 +151,25 @@ fn ensure_init_script() {
     let _ = crate::vfs::write_path("/system/init", script);
 }
 
+fn auto_mount_real_fs() {
+    let Some(volume) = storage::volumes().into_iter().find(|volume| {
+        volume.filesystem == FilesystemKind::Fat32
+            && volume.name != "tmpfs"
+            && volume.mounted_at.is_none()
+    }) else {
+        return;
+    };
+
+    let mountpoint = alloc::format!("/mnt/{}", volume.name);
+    let _ = vfs::mkdir(mountpoint.as_str());
+
+    if vfs::mount(mountpoint.as_str(), volume.filesystem.as_str(), false).is_ok()
+        && storage::mount_volume(volume.name.as_str(), mountpoint.as_str(), false).is_ok()
+    {
+        console::println!("Mounted {} at {}", volume.name, mountpoint);
+    }
+}
+
 pub fn init() {
     console::clear();
     console::println!("SAIOS v1.0");
@@ -158,6 +180,7 @@ pub fn init() {
     object_manager::init();
     saifs::init();
     let _ = package_image::mount_default();
+    auto_mount_real_fs();
     ensure_init_script();
     kom::init();
 }

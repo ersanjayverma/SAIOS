@@ -667,18 +667,18 @@ pub fn poll_input() -> Option<String<256>> {
         match mouse_event {
             MouseEvent::Wheel { delta, .. } => {
                 if delta > 0 {
-                    framebuffer_scrollback_up((delta as usize).saturating_mul(3));
+                    framebuffer_scrollback_up((delta as usize).saturating_mul(8));
                 } else if delta < 0 {
-                    framebuffer_scrollback_down(((-delta) as usize).saturating_mul(3));
+                    framebuffer_scrollback_down(((-delta) as usize).saturating_mul(8));
                 }
             }
             MouseEvent::Move { dy, buttons, .. } => {
                 // Fallback gesture when wheel is unavailable: hold middle button and move.
                 if buttons.middle {
                     if dy > 0 {
-                        framebuffer_scrollback_up((dy as usize).saturating_div(2).max(1));
+                        framebuffer_scrollback_up((dy as usize).max(2));
                     } else if dy < 0 {
-                        framebuffer_scrollback_down(((-dy) as usize).saturating_div(2).max(1));
+                        framebuffer_scrollback_down(((-dy) as usize).max(2));
                     }
                 }
             }

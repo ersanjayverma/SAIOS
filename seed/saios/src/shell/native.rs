@@ -466,17 +466,44 @@ fn cmd_help(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         ctx.session.current_namespace,
         ctx.session.environment.len()
     );
-    for item in &ctx.command_catalog {
-        console::println!("{} - {}", item.name, item.description);
-    }
+    print_command_table(ctx);
     Ok(())
 }
 
 fn cmd_registry(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
-    for item in &ctx.command_catalog {
-        console::println!("{} - {}", item.name, item.description);
-    }
+    print_command_table(ctx);
     Ok(())
+}
+
+fn print_command_table(ctx: &CommandContext) {
+    let name_width = ctx
+        .command_catalog
+        .iter()
+        .map(|item| item.name.len())
+        .max()
+        .unwrap_or(7)
+        .max(7);
+
+    console::println!(
+        "{:<width$}  DESCRIPTION",
+        "COMMAND",
+        width = name_width
+    );
+    console::println!(
+        "{:-<width$}  {:-<11}",
+        "",
+        "",
+        width = name_width
+    );
+
+    for item in &ctx.command_catalog {
+        console::println!(
+            "{:<width$}  {}",
+            item.name,
+            item.description,
+            width = name_width
+        );
+    }
 }
 
 fn cmd_version(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {

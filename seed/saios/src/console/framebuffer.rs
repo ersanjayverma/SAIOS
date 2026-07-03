@@ -528,34 +528,12 @@ impl FramebufferConsole {
         }
     }
 
-    /// Draw one character cell with optional cursor inversion.  This is a
-    /// specialized variant of [`draw_cell`](Self::draw_cell) that swaps the
-    /// foreground and background colors when `invert` is true.
+    /// Draw one character cell with optional cursor overlay.
+    ///
+    /// When the cursor is visible, render an underscore glyph in the current
+    /// foreground color. When hidden, restore the underlying character.
     fn draw_cell_cursor(&mut self, cell_x: usize, cell_y: usize, c: char, invert: bool) {
-        let (fg, bg) = if invert {
-            (self.bg.to_u32(), self.fg.to_u32())
-        } else {
-            (self.fg.to_u32(), self.bg.to_u32())
-        };
-
-        // Reuse the fast 32-bit packed path from draw_cell by temporarily
-        // swapping the console colors.  We restore them afterwards so later
-        // output is unaffected.
-        let saved_fg = self.fg;
-        let saved_bg = self.bg;
-        self.fg = Color {
-            r: ((fg >> 16) & 0xFF) as u8,
-            g: ((fg >> 8) & 0xFF) as u8,
-            b: (fg & 0xFF) as u8,
-        };
-        self.bg = Color {
-            r: ((bg >> 16) & 0xFF) as u8,
-            g: ((bg >> 8) & 0xFF) as u8,
-            b: (bg & 0xFF) as u8,
-        };
-        self.draw_cell(cell_x, cell_y, c);
-        self.fg = saved_fg;
-        self.bg = saved_bg;
+        self.draw_cell(cell_x, cell_y, if invert { '_' } else { c });
     }
 
     /// Number of text columns that fit on the attached display, if any.
