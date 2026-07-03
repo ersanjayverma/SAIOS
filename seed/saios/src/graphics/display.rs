@@ -271,6 +271,37 @@ impl FramebufferDisplay {
         }
     }
 
+    /// Write a source row of 0x00RRGGBB pixels to the framebuffer in 32-bit
+    /// RGB format.  The conversion is done in small stack chunks so a single
+    /// row can be arbitrarily wide without heap allocation, and the whole
+    /// chunk is copied with `copy_nonoverlapping` instead of one `ptr::write`
+    /// per pixel.
+    unsafe fn write_rgb_row(&self, src_row: &[u32], dst_offset: usize) {
+        const CHUNK: usize = 256;
+        let mut buf = [0u32; CHUNK];
+
+        let mut written = 0usize;
+        while written < src_row.len() {
+            let end = core::cmp::min(written.saturating_add(CHUNK), src_row.len());
+            let chunk = &src_row[written..end];
+            for (i, &px) in chunk.iter().enumerate() {
+                buf[i] = self.rgb_to_native_u32(px);
+            }
+            let bytes = chunk.len().saturating_mul(4);
+            if bytes == 0 {
+                break;
+            }
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    buf.as_ptr().cast::<u8>(),
+                    self.base.add(dst_offset.saturating_add(written.saturating_mul(4))),
+                    bytes,
+                );
+            }
+            written += chunk.len();
+        }
+    }
+
     /// Fill the entire visible framebuffer with a single color.
     ///
     /// For 32-bit RGB/BGR displays this uses a wide slice fill (one `u32` write
@@ -386,18 +417,35 @@ impl FramebufferDisplay {
         }
 
         if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Rgb) {
+            let copy_width = x_end.saturating_sub(src_x);
+            if copy_width == 0 {
+                return;
+            }
+
             for y in src_y..y_end {
-                let row_start = y * src_width;
-                for x in src_x..x_end {
-                    let offset = (y * self.stride + x) * 4;
-                    if offset + 4 > self.size_bytes {
-                        continue;
-                    }
-                    let packed = self.rgb_to_native_u32(pixels[row_start + x]);
-                    unsafe {
-                        // OPTIMIZATION: Use ptr::write instead of write_volatile
-                        ptr::write(self.base.add(offset).cast::<u32>(), packed);
-                    }
+                let src_row_start = y * src_width + src_x;
+                if src_row_start >= pixels.len() {
+                    break;
+                }
+
+                let src_row_len = core::cmp::min(copy_width, pixels.len() - src_row_start);
+                if src_row_len == 0 {
+                    continue;
+                }
+
+                let dst_offset = (y * self.stride + src_x) * 4;
+                if dst_offset >= self.size_bytes {
+                    continue;
+                }
+
+                let max_pixels = (self.size_bytes - dst_offset) / 4;
+                let copy_pixels = core::cmp::min(src_row_len, max_pixels);
+                if copy_pixels == 0 {
+                    continue;
+                }
+
+                unsafe {
+                    self.write_rgb_row(&pixels[src_row_start..src_row_start + copy_pixels], dst_offset);
                 }
             }
             return;
@@ -555,16 +603,29 @@ impl Display for FramebufferDisplay {
 
         if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Rgb) {
             for y in 0..height {
-                let row_start = y * src_width;
-                for x in 0..width {
-                    let offset = (y * self.stride + x) * 4;
-                    if offset + 4 > self.size_bytes {
-                        continue;
-                    }
-                    let packed = self.rgb_to_native_u32(pixels[row_start + x]);
-                    unsafe {
-                        ptr::write(self.base.add(offset).cast::<u32>(), packed);
-                    }
+                let src_row_start = y * src_width;
+                if src_row_start >= pixels.len() {
+                    break;
+                }
+
+                let src_row_len = core::cmp::min(width, pixels.len() - src_row_start);
+                if src_row_len == 0 {
+                    continue;
+                }
+
+                let dst_offset = (y * self.stride) * 4;
+                if dst_offset >= self.size_bytes {
+                    continue;
+                }
+
+                let max_pixels = (self.size_bytes - dst_offset) / 4;
+                let copy_pixels = core::cmp::min(src_row_len, max_pixels);
+                if copy_pixels == 0 {
+                    continue;
+                }
+
+                unsafe {
+                    self.write_rgb_row(&pixels[src_row_start..src_row_start + copy_pixels], dst_offset);
                 }
             }
             return;

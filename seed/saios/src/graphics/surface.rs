@@ -92,6 +92,30 @@ impl Surface {
         self.pixels_slice_mut()
     }
 
+    /// Return a mutable slice covering row `y`, or `None` if out of bounds.
+    ///
+    /// This lets callers write directly into a scanline without repeated
+    /// bounds checks and index recalculation, which is much faster than
+    /// calling [`put_pixel`](Self::put_pixel) in an inner loop.
+    pub fn row_mut(&mut self, y: usize) -> Option<&mut [u32]> {
+        if y >= self.height {
+            return None;
+        }
+        let width = self.width;
+        let start = y * width;
+        Some(&mut self.pixels_slice_mut()[start..start + width])
+    }
+
+    /// Return an immutable slice covering row `y`, or `None` if out of bounds.
+    pub fn row(&self, y: usize) -> Option<&[u32]> {
+        if y >= self.height {
+            return None;
+        }
+        let width = self.width;
+        let start = y * width;
+        Some(&self.pixels_slice()[start..start + width])
+    }
+
     /// Fill the entire surface with `color`.
     pub fn clear(&mut self, color: u32) {
         self.pixels_slice_mut().fill(color);
@@ -132,7 +156,41 @@ impl Surface {
     }
 
     /// Draw a line between two points using Bresenham's algorithm.
+    ///
+    /// Horizontal and vertical lines are handled as single slice fills, which
+    /// avoids the per-pixel bounds checking and index math of the generic
+    /// Bresenham loop.
     pub fn draw_line(&mut self, x0: isize, y0: isize, x1: isize, y1: isize, color: u32) {
+        // Fast path: horizontal line → one slice fill.
+        if y0 == y1 && y0 >= 0 && (y0 as usize) < self.height {
+            let y = y0 as usize;
+            let (x_start, x_end) = if x0 <= x1 {
+                (x0.max(0) as usize, (x1 + 1).min(self.width as isize).max(0) as usize)
+            } else {
+                (x1.max(0) as usize, (x0 + 1).min(self.width as isize).max(0) as usize)
+            };
+            if let Some(row) = self.row_mut(y) {
+                row[x_start..x_end].fill(color);
+            }
+            return;
+        }
+
+        // Fast path: vertical line → fill one pixel per row via stride.
+        if x0 == x1 && x0 >= 0 && (x0 as usize) < self.width {
+            let x = x0 as usize;
+            let (y_start, y_end) = if y0 <= y1 {
+                (y0.max(0) as usize, (y1 + 1).min(self.height as isize).max(0) as usize)
+            } else {
+                (y1.max(0) as usize, (y0 + 1).min(self.height as isize).max(0) as usize)
+            };
+            let width = self.width;
+            let pixels = self.pixels_slice_mut();
+            for py in y_start..y_end {
+                pixels[py * width + x] = color;
+            }
+            return;
+        }
+
         let mut x = x0;
         let mut y = y0;
         let dx = (x1 - x0).abs();
@@ -140,10 +198,17 @@ impl Surface {
         let dy = -(y1 - y0).abs();
         let sy = if y0 < y1 { 1 } else { -1 };
         let mut err = dx + dy;
+        let width = self.width;
+        let height = self.height;
+        let pixels = self.pixels_slice_mut();
 
         loop {
             if x >= 0 && y >= 0 {
-                self.put_pixel(x as usize, y as usize, color);
+                let px = x as usize;
+                let py = y as usize;
+                if px < width && py < height {
+                    pixels[py * width + px] = color;
+                }
             }
 
             if x == x1 && y == y1 {
@@ -165,6 +230,9 @@ impl Surface {
     /// Copy a rectangular block of pixels from one location to another within
     /// the same surface. A temporary buffer is used so source and destination
     /// regions may overlap.
+    ///
+    /// The copy is performed row-by-row with slice operations instead of
+    /// per-pixel loops, which removes most bounds-check overhead.
     pub fn copy_region(
         &mut self,
         src_x: usize,
@@ -178,33 +246,40 @@ impl Surface {
             return;
         }
 
-        let mut temp: Vec<u32> = Vec::new();
-        let _ = temp.try_reserve(width.saturating_mul(height));
-
-        for y in 0..height {
-            for x in 0..width {
-                let sx = src_x.saturating_add(x);
-                let sy = src_y.saturating_add(y);
-                if sx < self.width && sy < self.height {
-                    temp.push(self.pixels_slice()[sy * self.width + sx]);
-                } else {
-                    temp.push(0);
-                }
-            }
+        let src_x_end = core::cmp::min(src_x.saturating_add(width), self.width);
+        let src_y_end = core::cmp::min(src_y.saturating_add(height), self.height);
+        let copy_width = src_x_end.saturating_sub(src_x);
+        let copy_height = src_y_end.saturating_sub(src_y);
+        if copy_width == 0 || copy_height == 0 {
+            return;
         }
 
-        let mut idx = 0usize;
-        for y in 0..height {
-            for x in 0..width {
-                let dx = dst_x.saturating_add(x);
-                let dy = dst_y.saturating_add(y);
-                if dx < self.width && dy < self.height {
-                    let width_self = self.width;
-                    let out_idx = dy.saturating_mul(width_self).saturating_add(dx);
-                    self.pixels_slice_mut()[out_idx] = temp[idx];
-                }
-                idx += 1;
+        // Read the source region into a temporary row buffer.  Using one row at
+        // a time avoids a large allocation and still lets us copy via slices.
+        let mut temp: Vec<u32> = Vec::new();
+        if temp.try_reserve(copy_width).is_err() {
+            return;
+        }
+        temp.resize(copy_width, 0);
+
+        for y in 0..copy_height {
+            let sy = src_y + y;
+            let dy = dst_y.saturating_add(y);
+            if dy >= self.height {
+                continue;
             }
+
+            let src_start = sy * self.width + src_x;
+            temp.copy_from_slice(&self.pixels_slice()[src_start..src_start + copy_width]);
+
+            let dst_start = dy * self.width + dst_x;
+            let available = self.width.saturating_sub(dst_x);
+            let write_width = core::cmp::min(copy_width, available);
+            if write_width == 0 {
+                continue;
+            }
+            self.pixels_slice_mut()[dst_start..dst_start + write_width]
+                .copy_from_slice(&temp[..write_width]);
         }
     }
 

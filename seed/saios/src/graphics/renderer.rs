@@ -187,7 +187,11 @@ impl<'a> Renderer<'a> {
     }
 
     /// Draw one character glyph at pixel `(x, y)` with explicit foreground and
-    /// background colors. Writes glyph rows as contiguous slices for speed.
+    /// background colors.
+    ///
+    /// Each 8-pixel glyph row is expanded into a small stack array and copied
+    /// into the surface row with a single `copy_from_slice`, avoiding the
+    /// per-pixel branch and bounds checks of a naive `put_pixel` loop.
     pub fn draw_char(&mut self, x: usize, y: usize, ch: char, fg: u32, bg: u32) {
         let surface_width = self.surface.width();
         let surface_height = self.surface.height();
@@ -202,12 +206,18 @@ impl<'a> Renderer<'a> {
 
         for row_idx in 0..draw_height {
             let row_bits = glyph_row(ch, row_idx);
-            let row_start = (y + row_idx) * surface_width + x;
-            let row = &mut pixels[row_start..row_start + draw_width];
-            for (bit, px) in row.iter_mut().enumerate() {
-                let mask = 1u8 << bit;
-                *px = if (row_bits & mask) != 0 { fg } else { bg };
+            let mut row_colors = [bg; FONT_WIDTH];
+            let mut bits = row_bits;
+            for px in row_colors.iter_mut().take(draw_width) {
+                if (bits & 1) != 0 {
+                    *px = fg;
+                }
+                bits >>= 1;
             }
+
+            let row_start = (y + row_idx) * surface_width + x;
+            pixels[row_start..row_start + draw_width]
+                .copy_from_slice(&row_colors[..draw_width]);
         }
     }
 

@@ -108,39 +108,36 @@ impl FramebufferConsole {
         };
 
         if bytes_per_pixel == 4 && matches!(pixel_format, PixelFormat::Bgr | PixelFormat::Rgb) {
-            // Fast path: view the framebuffer as a u32 slice and write one word
-            // per pixel. Slice indexing removes the per-pixel byte-offset math
-            // and bounds arithmetic of the generic path.
+            // Fast path: view the framebuffer as a u32 slice and copy each
+            // 8-pixel glyph row as a contiguous slice.  This avoids the
+            // per-pixel branch and bounds checks of the generic path.
             let total_pixels = fb_size / 4;
             let fb32 = unsafe { core::slice::from_raw_parts_mut(fb.cast::<u32>(), total_pixels) };
 
-            for row_idx in 0..FONT_HEIGHT {
-                let y = py.saturating_add(row_idx);
-                if y >= height {
-                    break;
-                }
+            let draw_width = core::cmp::min(FONT_WIDTH, width.saturating_sub(px));
+            let draw_height = core::cmp::min(FONT_HEIGHT, height.saturating_sub(py));
 
+            for row_idx in 0..draw_height {
+                let y = py + row_idx;
                 let row_bits = glyph_row(c, row_idx);
-                let row_base = y.saturating_mul(stride);
-
-                for bit in 0..FONT_WIDTH {
-                    let x = px.saturating_add(bit);
-                    if x >= width {
-                        break;
+                let mut row_colors = [bg_packed; FONT_WIDTH];
+                let mut bits = row_bits;
+                for px in row_colors.iter_mut().take(draw_width) {
+                    if (bits & 1) != 0 {
+                        *px = fg_packed;
                     }
-
-                    let idx = row_base + x;
-                    if idx >= total_pixels {
-                        break;
-                    }
-
-                    let mask = 1u8 << bit;
-                    fb32[idx] = if (row_bits & mask) != 0 {
-                        fg_packed
-                    } else {
-                        bg_packed
-                    };
+                    bits >>= 1;
                 }
+
+                let row_base = y.saturating_mul(stride);
+                let dst_start = row_base + px;
+                let dst_end = core::cmp::min(dst_start + draw_width, total_pixels);
+                let copy_width = dst_end.saturating_sub(dst_start);
+                if copy_width == 0 {
+                    continue;
+                }
+                fb32[dst_start..dst_start + copy_width]
+                    .copy_from_slice(&row_colors[..copy_width]);
             }
             return;
         }
