@@ -181,10 +181,6 @@ impl<B: ConsoleBackend> Console<B> {
         }
 
         if self.backend.scroll_up(1) {
-            self.backend.set_cursor(0, last);
-            for x in 0..self.cursor.width {
-                self.backend.put_char(self.buffer[last][x]);
-            }
             self.backend.set_cursor(self.cursor.x, self.cursor.y);
         } else {
             self.redraw();

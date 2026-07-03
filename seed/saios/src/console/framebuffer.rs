@@ -313,6 +313,95 @@ impl FramebufferConsole {
         }
     }
 
+    fn scroll_pixels_up(&mut self, text_rows: usize) -> bool {
+        let Some(display) = self.display.as_mut() else {
+            return false;
+        };
+
+        let shift_px = text_rows.saturating_mul(FONT_HEIGHT);
+        if shift_px == 0 {
+            return true;
+        }
+
+        let width = display.width();
+        let height = display.height();
+        let stride = display.stride();
+        let bytes_per_pixel = display.bytes_per_pixel();
+        let fb_size = display.framebuffer_size();
+        let pixel_format = display.pixel_format();
+        let pixel_masks = display.pixel_masks();
+        let fb = display.framebuffer();
+        let bg = self.bg.to_u32();
+
+        if width == 0 || height == 0 || bytes_per_pixel == 0 || stride == 0 {
+            return false;
+        }
+
+        let shift_px = shift_px.min(height);
+        let row_bytes = stride.saturating_mul(bytes_per_pixel);
+        if row_bytes == 0 {
+            return false;
+        }
+
+        if shift_px < height {
+            let src_offset = shift_px.saturating_mul(row_bytes);
+            let copy_bytes = (height - shift_px).saturating_mul(row_bytes);
+            if src_offset.saturating_add(copy_bytes) > fb_size {
+                return false;
+            }
+
+            unsafe {
+                ptr::copy(fb.add(src_offset), fb, copy_bytes);
+            }
+        }
+
+        let clear_start = height - shift_px;
+
+        if bytes_per_pixel == 4 && matches!(pixel_format, PixelFormat::Bgr | PixelFormat::Rgb) {
+            let pack = |color: u32| -> u32 {
+                let r = (color >> 16) & 0xFF;
+                let g = (color >> 8) & 0xFF;
+                let b = color & 0xFF;
+                match pixel_format {
+                    PixelFormat::Bgr => b | (g << 8) | (r << 16) | (0xFF << 24),
+                    PixelFormat::Rgb => r | (g << 8) | (b << 16) | (0xFF << 24),
+                    PixelFormat::Bitmask | PixelFormat::BltOnly => 0,
+                }
+            };
+
+            let bg_packed = pack(bg);
+            for y in clear_start..height {
+                let row_base = y.saturating_mul(stride);
+                for x in 0..width {
+                    let offset = (row_base + x).saturating_mul(4);
+                    if offset + 4 > fb_size {
+                        break;
+                    }
+                    unsafe {
+                        ptr::write_volatile(fb.add(offset).cast::<u32>(), bg_packed);
+                    }
+                }
+            }
+            return true;
+        }
+
+        for y in clear_start..height {
+            let row_base = y.saturating_mul(stride);
+            for x in 0..width {
+                let offset = (row_base + x).saturating_mul(bytes_per_pixel);
+                if offset + bytes_per_pixel > fb_size {
+                    break;
+                }
+                unsafe {
+                    let p = fb.add(offset);
+                    Self::write_pixel(p, bg, pixel_format, pixel_masks, bytes_per_pixel);
+                }
+            }
+        }
+
+        true
+    }
+
     pub fn scroll_view_lines(&mut self, lines: isize) -> bool {
         let Some((_, rows)) = self.text_bounds() else {
             return false;
@@ -423,22 +512,23 @@ impl ConsoleBackend for FramebufferConsole {
         };
 
         let rows = core::cmp::max(1, rows).min(row_count);
-        for _ in 0..rows {
-            let vanished = self.row_to_scrollback(0, cols);
+        for row in 0..rows {
+            let vanished = self.row_to_scrollback(row, cols);
             self.push_scrollback_line(vanished);
+        }
 
-            for y in 1..row_count {
-                for x in 0..cols {
-                    self.screen[y - 1][x] = self.screen[y][x];
-                }
-            }
+        self.screen[..row_count].copy_within(rows..row_count, 0);
+
+        for y in row_count - rows..row_count {
             for x in 0..cols {
-                self.screen[row_count - 1][x] = ' ';
+                self.screen[y][x] = ' ';
             }
         }
 
         if self.view_offset_lines == 0 {
-            self.render_viewport();
+            if !self.scroll_pixels_up(rows) {
+                self.render_viewport();
+            }
         } else {
             let max_offset = (self.scrollback.len() + row_count).saturating_sub(row_count);
             self.view_offset_lines = self.view_offset_lines.min(max_offset);
