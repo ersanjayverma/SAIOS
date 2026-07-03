@@ -1,3 +1,9 @@
+//! Kernel object manager.
+//!
+//! Maintains the registry of kernel objects, providers and synthetic system
+//! paths (for example `/sys/...`). Objects can be introspected, explained and
+//! diagnosed through a unified interface.
+
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -21,6 +27,7 @@ use crate::{heap, pmm, scheduler, timer};
 #[path = "object_manager/tests.rs"]
 pub mod tests;
 
+/// Classification of objects in the object namespace.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ObjectType {
     Kernel,
@@ -39,6 +46,7 @@ pub enum ObjectType {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+/// Operational status of an object.
 pub enum ObjectStatus {
     Online,
     Busy,
@@ -47,6 +55,7 @@ pub enum ObjectStatus {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+/// Health assessment for an object.
 pub enum Health {
     Healthy,
     Warning,
@@ -55,57 +64,94 @@ pub enum Health {
 }
 
 #[derive(Debug, Clone)]
+/// A string property attached to an object.
 pub struct Property {
+    /// Property name.
     pub key: String,
+    /// Property value.
     pub value: String,
 }
 
+/// Property bag type used by objects and providers.
 pub type PropertyMap = Vec<Property>;
 
+/// Trait for objects exposed through the object manager.
 pub trait KernelObject {
+    /// Returns the object's identifier.
     fn id(&self) -> ObjectId;
+    /// Returns the object's name.
     fn name(&self) -> &str;
+    /// Returns the object's type.
     fn kind(&self) -> ObjectType;
+    /// Returns the object's status.
     fn status(&self) -> ObjectStatus;
+    /// Returns the object's properties.
     fn properties(&self) -> PropertyMap;
+    /// Returns the object's children.
     fn children(&self) -> &[ObjectId];
 }
 
+/// Marker trait for system-owned objects.
 pub trait SystemObject: KernelObject {}
 
+/// Human-readable explanation returned by an [`Explainable`] object.
 pub struct Explanation {
+    /// Explanation title.
     pub title: String,
+    /// Explanation body lines.
     pub lines: Vec<String>,
 }
 
+/// Diagnostic report returned by a [`Diagnosable`] object.
 pub struct DiagnosticReport {
+    /// Object the report concerns.
     pub target: String,
+    /// Assessed health.
     pub health: Health,
+    /// Report detail lines.
     pub lines: Vec<String>,
+    /// Recommended action.
     pub recommendation: String,
 }
 
 #[derive(Clone)]
+/// Metadata snapshot returned by object introspection.
 pub struct ObjectMetadata {
+    /// Object identifier.
     pub id: ObjectId,
+    /// Object name.
     pub name: String,
+    /// Name of the owning provider.
     pub provider_name: String,
+    /// Object type.
     pub kind: ObjectType,
+    /// Operational status.
     pub status: ObjectStatus,
+    /// Health assessment.
     pub health: Health,
+    /// Object class.
     pub class: ObjectClass,
+    /// Creation timestamp.
     pub created: u64,
+    /// Last modification timestamp.
     pub modified: u64,
+    /// Provider identifier.
     pub provider: ProviderId,
+    /// Object properties.
     pub properties: PropertyMap,
+    /// Child object identifiers.
     pub children: Vec<ObjectId>,
 }
 
+/// Trait for objects that can explain themselves.
 pub trait Explainable {
+    /// Returns a human-readable explanation.
     fn explain(&self) -> Explanation;
 }
 
+/// Trait for objects that can produce a diagnostic report.
 pub trait Diagnosable {
+    /// Returns a diagnostic report.
     fn diagnose(&self) -> DiagnosticReport;
 }
 
@@ -205,10 +251,15 @@ struct ObjectManager {
 }
 
 #[derive(Clone)]
+/// Information about a registered provider.
 pub struct ProviderInfo {
+    /// Provider identifier.
     pub id: ProviderId,
+    /// Provider name.
     pub name: String,
+    /// Provider category.
     pub provider_type: ProviderType,
+    /// Provider namespace path.
     pub namespace: String,
 }
 
@@ -759,6 +810,7 @@ fn network_status_lines() -> Vec<String> {
     out
 }
 
+/// Initializes the object manager and seeds bootstrap/runtime objects.
 pub fn init() {
     with_manager_mut(|manager| {
         if manager.initialized {
@@ -771,20 +823,24 @@ pub fn init() {
     });
 }
 
+/// Returns true if the object manager has been initialized.
 pub fn is_initialized() -> bool {
     with_manager_mut(|manager| manager.initialized)
 }
 
+/// Returns the names of all object types currently in use.
 pub fn object_types() -> Vec<String> {
     init();
     with_manager_mut(|manager| manager.object_types())
 }
 
+/// Returns a snapshot of all registered providers.
 pub fn providers() -> Vec<ProviderInfo> {
     init();
     with_manager_mut(|manager| manager.providers.clone())
 }
 
+/// Queries objects using a simple `key=value,key!=value` expression.
 pub fn query(expression: &str) -> Result<Vec<String>, &'static str> {
     init();
 
@@ -861,11 +917,13 @@ pub fn query(expression: &str) -> Result<Vec<String>, &'static str> {
     })
 }
 
+/// Lists all object paths under `namespace`.
 pub fn list_namespace(namespace: &str) -> Vec<String> {
     init();
     with_manager_mut(|manager| manager.list_by_prefix(&canonical_path(namespace)))
 }
 
+/// Looks up an object by identifier.
 pub fn lookup_by_id(id: ObjectId) -> Option<(ObjectId, String, ObjectType)> {
     init();
     with_manager_mut(|manager| {
@@ -877,6 +935,7 @@ pub fn lookup_by_id(id: ObjectId) -> Option<(ObjectId, String, ObjectType)> {
     })
 }
 
+/// Looks up an object by name.
 pub fn lookup_by_name(name: &str) -> Option<(ObjectId, String, ObjectType)> {
     init();
     with_manager_mut(|manager| {
@@ -888,6 +947,7 @@ pub fn lookup_by_name(name: &str) -> Option<(ObjectId, String, ObjectType)> {
     })
 }
 
+/// Returns metadata for the object at `path`, if it exists.
 pub fn metadata(path: &str) -> Option<ObjectMetadata> {
     init();
     with_manager_mut(|manager| {
@@ -909,6 +969,7 @@ pub fn metadata(path: &str) -> Option<ObjectMetadata> {
     })
 }
 
+/// Returns a human-readable inspection of the object at `path`.
 pub fn inspect(path: &str) -> Result<Vec<String>, &'static str> {
     init();
     with_manager_mut(|manager| {
@@ -952,6 +1013,7 @@ pub fn inspect(path: &str) -> Result<Vec<String>, &'static str> {
     })
 }
 
+/// Returns a human-readable explanation of the object at `path`.
 pub fn explain(path: &str) -> Result<Vec<String>, &'static str> {
     init();
     with_manager_mut(|manager| {

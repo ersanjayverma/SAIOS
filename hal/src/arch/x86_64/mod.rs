@@ -1,3 +1,8 @@
+//! x86_64 hardware abstraction layer.
+//!
+//! Provides low-level drivers and data structures for the x86_64 architecture:
+//! GDT, IDT, APIC, PCI, serial, console and platform helpers.
+
 pub mod apic;
 pub mod console;
 pub mod cpu;

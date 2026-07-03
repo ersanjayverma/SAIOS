@@ -13,6 +13,14 @@ const MAX_TEXT_COLS: usize = 160;
 const MAX_TEXT_ROWS: usize = 100;
 const MAX_SCROLLBACK_LINES: usize = 2048;
 
+/// A text console rendered onto a linear framebuffer.
+///
+/// It keeps a character grid ([`screen`](Self::screen)) plus a scrollback
+/// buffer of lines that have scrolled off the top, and draws glyphs directly to
+/// the hardware framebuffer through a [`FramebufferDisplay`]. Rendering is
+/// incremental: normal output touches only the changed cell, while scrolling
+/// uses a fast framebuffer `memmove`. When the user scrolls back through
+/// history the whole viewport is repainted from the character model.
 pub struct FramebufferConsole {
     display: Option<FramebufferDisplay>,
     cursor_x: usize,
@@ -25,6 +33,8 @@ pub struct FramebufferConsole {
 }
 
 impl FramebufferConsole {
+    /// Create an unattached console. No drawing happens until
+    /// [`attach`](Self::attach) supplies framebuffer info.
     pub const fn new() -> Self {
         Self {
             display: None,
@@ -38,10 +48,14 @@ impl FramebufferConsole {
         }
     }
 
+    /// Returns `true` once a framebuffer display has been attached and drawing
+    /// is possible.
     pub fn ensure_renderer_ready(&mut self) -> bool {
         self.display.is_some()
     }
 
+    /// Current usable text grid size as `(columns, rows)`, clamped to the fixed
+    /// screen-model capacity. Returns `None` when no display is attached.
     fn text_bounds(&self) -> Option<(usize, usize)> {
         let cols = self.text_columns()?;
         let rows = self.text_rows()?;
@@ -51,6 +65,9 @@ impl FramebufferConsole {
         Some((cols.min(MAX_TEXT_COLS), rows.min(MAX_TEXT_ROWS)))
     }
 
+    /// Draw a single character at text-grid cell `(cell_x, cell_y)` using the
+    /// current foreground/background colors. Chooses a `u32`-slice fast path for
+    /// 32-bit RGB/BGR displays and a generic byte writer otherwise.
     fn draw_cell(&mut self, cell_x: usize, cell_y: usize, c: char) {
         let Some(display) = self.display.as_mut() else {
             return;
@@ -91,45 +108,38 @@ impl FramebufferConsole {
         };
 
         if bytes_per_pixel == 4 && matches!(pixel_format, PixelFormat::Bgr | PixelFormat::Rgb) {
-            // OPTIMIZATION: Direct row-based glyph drawing into u32 buffer
+            // Fast path: view the framebuffer as a u32 slice and write one word
+            // per pixel. Slice indexing removes the per-pixel byte-offset math
+            // and bounds arithmetic of the generic path.
+            let total_pixels = fb_size / 4;
+            let fb32 = unsafe { core::slice::from_raw_parts_mut(fb.cast::<u32>(), total_pixels) };
+
             for row_idx in 0..FONT_HEIGHT {
                 let y = py.saturating_add(row_idx);
                 if y >= height {
-                    continue;
+                    break;
                 }
 
                 let row_bits = glyph_row(c, row_idx);
-                let row_base_px = y * stride;
-
-                // OPTIMIZATION: Get a mutable slice for the row and write directly (no write_volatile)
-                let row_start = row_base_px * bytes_per_pixel;
-                if row_start >= fb_size {
-                    continue;
-                }
+                let row_base = y.saturating_mul(stride);
 
                 for bit in 0..FONT_WIDTH {
                     let x = px.saturating_add(bit);
                     if x >= width {
-                        continue;
+                        break;
                     }
 
-                    let offset = row_start + x * bytes_per_pixel;
-                    if offset + 4 > fb_size {
-                        continue;
+                    let idx = row_base + x;
+                    if idx >= total_pixels {
+                        break;
                     }
 
                     let mask = 1u8 << bit;
-                    let packed = if (row_bits & mask) != 0 {
+                    fb32[idx] = if (row_bits & mask) != 0 {
                         fg_packed
                     } else {
                         bg_packed
                     };
-
-                    // OPTIMIZATION: Use ptr::write instead of write_volatile
-                    // Framebuffer memory is normal RAM with write-combining, not MMIO
-                    unsafe {
-                        ptr::write(fb.add(offset).cast::<u32>(), packed);
-                    }
                 }
             }
             return;
@@ -254,6 +264,8 @@ impl FramebufferConsole {
             | reserved_mask
     }
 
+    /// Snapshot a screen-model row into an owned `String`, trimming trailing
+    /// blanks, for storage in the scrollback history.
     fn row_to_scrollback(&self, row: usize, cols: usize) -> String {
         let mut out = String::new();
         let cols = cols.min(MAX_TEXT_COLS);
@@ -268,6 +280,8 @@ impl FramebufferConsole {
         out
     }
 
+    /// Append a line to scrollback, evicting the oldest lines once the history
+    /// cap ([`MAX_SCROLLBACK_LINES`]) is exceeded.
     fn push_scrollback_line(&mut self, line: String) {
         self.scrollback.push(line);
         if self.scrollback.len() > MAX_SCROLLBACK_LINES {
@@ -276,6 +290,7 @@ impl FramebufferConsole {
         }
     }
 
+    /// Reset the in-memory character grid to blanks (does not touch pixels).
     fn clear_screen_model(&mut self, cols: usize, rows: usize) {
         let cols = cols.min(MAX_TEXT_COLS);
         let rows = rows.min(MAX_TEXT_ROWS);
@@ -286,6 +301,9 @@ impl FramebufferConsole {
         }
     }
 
+    /// Fully repaint the screen from the character model plus scrollback,
+    /// honoring the current scroll-back offset. Used when the visible window is
+    /// not simply the live bottom of the buffer.
     fn render_viewport(&mut self) {
         let Some((cols, rows)) = self.text_bounds() else {
             return;
@@ -326,12 +344,17 @@ impl FramebufferConsole {
         }
     }
 
+    /// Clear the physical framebuffer to the current background color.
     fn clear_direct(&mut self) {
         if let Some(display) = self.display.as_mut() {
             display.clear_color(self.bg.to_u32());
         }
     }
 
+    /// Scroll the visible framebuffer up by `text_rows` character rows using a
+    /// single `memmove`, then clear the newly exposed rows at the bottom.
+    /// Returns `false` if it cannot do the fast in-place scroll (the caller then
+    /// falls back to a full repaint).
     fn scroll_pixels_up(&mut self, text_rows: usize) -> bool {
         let Some(display) = self.display.as_mut() else {
             return false;
@@ -397,32 +420,19 @@ impl FramebufferConsole {
 
         let bg_packed = pack_color(bg);
 
-        // OPTIMIZATION: Clear by rows using memset instead of pixel loops
+        // Clear the freshly exposed rows at the bottom of the screen.
         if bytes_per_pixel == 4 {
-            // Fast path: 4-byte pixels can fill entire rows efficiently
-            let clear_rows = shift_px;
-            let clear_bytes = clear_rows.saturating_mul(row_bytes);
-            let clear_start_offset = clear_start.saturating_mul(row_bytes);
-
-            if clear_start_offset.saturating_add(clear_bytes) > fb_size {
-                return false;
-            }
-
-            // Fill u32 packed color into each pixel
+            // Fast path: fill whole rows through a u32 slice view of the
+            // framebuffer using `slice::fill` (a tight memory-set loop).
+            let total_pixels = fb_size / 4;
+            let fb32 = unsafe { core::slice::from_raw_parts_mut(fb.cast::<u32>(), total_pixels) };
             for y in clear_start..height {
                 let row_base = y.saturating_mul(stride);
-                let row_offset = row_base.saturating_mul(4);
-
-                for x in 0..width {
-                    let offset = row_offset + x * 4;
-                    if offset + 4 > fb_size {
-                        break;
-                    }
-                    unsafe {
-                        // OPTIMIZATION: Use ptr::write instead of write_volatile
-                        ptr::write(fb.add(offset).cast::<u32>(), bg_packed);
-                    }
+                if row_base >= total_pixels {
+                    break;
                 }
+                let end = core::cmp::min(row_base + width, total_pixels);
+                fb32[row_base..end].fill(bg_packed);
             }
             return true;
         }
@@ -451,6 +461,8 @@ impl FramebufferConsole {
         true
     }
 
+    /// Move the scroll-back view by `lines` (positive scrolls into history,
+    /// negative back toward the live output) and repaint if it changed.
     pub fn scroll_view_lines(&mut self, lines: isize) -> bool {
         let Some((_, rows)) = self.text_bounds() else {
             return false;
@@ -476,6 +488,8 @@ impl FramebufferConsole {
         changed
     }
 
+    /// Jump the view back to the live bottom of the output, repainting if the
+    /// view was previously scrolled up.
     pub fn scroll_to_bottom(&mut self) -> bool {
         if self.view_offset_lines == 0 {
             return false;
@@ -485,6 +499,8 @@ impl FramebufferConsole {
         true
     }
 
+    /// Bind the console to a hardware framebuffer described by `info`, resetting
+    /// the cursor and clearing the screen.
     pub fn attach(&mut self, info: FramebufferInfo) {
         self.display = FramebufferDisplay::from_info(info);
 
@@ -493,12 +509,14 @@ impl FramebufferConsole {
         self.clear();
     }
 
+    /// Number of text columns that fit on the attached display, if any.
     pub fn text_columns(&self) -> Option<usize> {
         self.display
             .as_ref()
             .map(|display| display.width() / FONT_WIDTH)
     }
 
+    /// Number of text rows that fit on the attached display, if any.
     pub fn text_rows(&self) -> Option<usize> {
         self.display
             .as_ref()
@@ -507,6 +525,9 @@ impl FramebufferConsole {
 }
 
 impl ConsoleBackend for FramebufferConsole {
+    /// Write one character at the cursor, handling `\n`, `\r` and `\t`
+    /// specially, advancing the cursor, and drawing the glyph immediately when
+    /// viewing the live output.
     fn put_char(&mut self, c: char) {
         let Some((cols, rows)) = self.text_bounds() else {
             return;
@@ -543,6 +564,7 @@ impl ConsoleBackend for FramebufferConsole {
         }
     }
 
+    /// Clear the screen and character model and home the cursor.
     fn clear(&mut self) {
         self.clear_direct();
         if let Some((cols, rows)) = self.text_bounds() {
@@ -554,11 +576,15 @@ impl ConsoleBackend for FramebufferConsole {
         self.view_offset_lines = 0;
     }
 
+    /// Move the text cursor to cell `(x, y)`.
     fn set_cursor(&mut self, x: usize, y: usize) {
         self.cursor_x = x;
         self.cursor_y = y;
     }
 
+    /// Scroll the console up by `rows` text rows: push the vanishing rows into
+    /// scrollback, shift the character model, and update the framebuffer (fast
+    /// in-place scroll when possible, otherwise a full repaint).
     fn scroll_up(&mut self, rows: usize) -> bool {
         let Some((cols, row_count)) = self.text_bounds() else {
             return false;

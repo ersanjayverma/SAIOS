@@ -1,18 +1,43 @@
 use core::ptr;
 use efi_main::graphics::{FramebufferInfo, PixelFormat};
 
+/// Abstract drawing target that owns a linear framebuffer.
+///
+/// A `Display` describes the geometry and pixel layout of a screen and knows
+/// how to copy a source image (a slice of packed 0x00RRGGBB `u32` pixels) onto
+/// the real hardware framebuffer. The renderer/console layers draw into an
+/// off-screen [`crate::graphics::surface::Surface`] and then hand the finished
+/// pixels to [`Display::flush`], keeping all format-specific conversion in one
+/// place.
 pub trait Display {
+    /// Number of visible pixels per row.
     fn width(&self) -> usize;
+    /// Number of visible pixel rows.
     fn height(&self) -> usize;
+    /// Number of pixels between the start of one row and the next. This can be
+    /// larger than [`Display::width`] when the firmware pads each scanline.
     fn stride(&self) -> usize;
+    /// Number of bytes each pixel occupies in the hardware framebuffer.
     fn bytes_per_pixel(&self) -> usize;
+    /// Total size of the hardware framebuffer in bytes; used to bound all writes.
     fn framebuffer_size(&self) -> usize;
+    /// The pixel encoding used by the hardware (RGB, BGR, bitmask, ...).
     fn pixel_format(&self) -> PixelFormat;
+    /// The red/green/blue/reserved channel masks for [`PixelFormat::Bitmask`].
     fn pixel_masks(&self) -> (u32, u32, u32, u32);
+    /// Raw mutable pointer to the start of the hardware framebuffer.
     fn framebuffer(&mut self) -> *mut u8;
+    /// Copy a full off-screen image onto the framebuffer, converting each pixel
+    /// to the hardware format as needed. `src_width`/`src_height` describe the
+    /// source image dimensions so rows can be indexed correctly.
     fn flush(&mut self, pixels: &[u32], src_width: usize, src_height: usize);
 }
 
+/// Concrete [`Display`] backed by the UEFI Graphics Output Protocol framebuffer.
+///
+/// Construct one with [`FramebufferDisplay::from_info`], which validates the
+/// firmware-reported geometry and normalizes odd pixel formats into a form the
+/// fast paths can handle.
 pub struct FramebufferDisplay {
     base: *mut u8,
     width: usize,
@@ -28,6 +53,8 @@ pub struct FramebufferDisplay {
 }
 
 impl FramebufferDisplay {
+    /// Convert a logical 0x00RRGGBB color into the 32-bit word that must be
+    /// written to a 4-byte hardware pixel for this display's format.
     #[inline(always)]
     fn rgb_to_native_u32(&self, color: u32) -> u32 {
         match self.pixel_format {
@@ -48,6 +75,9 @@ impl FramebufferDisplay {
         }
     }
 
+    /// Pick reasonable red/green/blue/reserved channel masks for a plain
+    /// RGB/BGR format at a given pixel size, used when the firmware reports a
+    /// packed 16-bit layout but no explicit masks.
     #[inline(always)]
     fn infer_masks_for_format(format: PixelFormat, bytes_per_pixel: usize) -> (u32, u32, u32, u32) {
         match (format, bytes_per_pixel) {
@@ -63,6 +93,10 @@ impl FramebufferDisplay {
         }
     }
 
+    /// Collapse firmware-reported formats into a canonical form. In particular
+    /// 16-bit RGB/BGR and mask-less bitmask modes are turned into a
+    /// [`PixelFormat::Bitmask`] with concrete channel masks so the write paths
+    /// only have to handle a small number of cases.
     #[inline(always)]
     fn normalize_format(
         pixel_format: PixelFormat,
@@ -117,6 +151,13 @@ impl FramebufferDisplay {
         }
     }
 
+    /// Build a display from firmware-provided framebuffer info.
+    ///
+    /// Returns `None` when the geometry is unusable (null base, zero size, or a
+    /// pixel depth outside 1..=4 bytes). Some firmware reports the scanline
+    /// stride in bytes instead of pixels; this routine detects and corrects
+    /// that, and rejects layouts that would not fit within the reported
+    /// framebuffer size.
     pub fn from_info(info: FramebufferInfo) -> Option<Self> {
         let bytes_per_pixel = (info.bpp.saturating_add(7)) / 8;
         if info.base == 0
@@ -185,6 +226,8 @@ impl FramebufferDisplay {
         })
     }
 
+    /// Scale an 8-bit channel value into an arbitrary bit field described by
+    /// `mask` and shift it into place. Used to build bitmask-format pixels.
     #[inline(always)]
     fn pack_channel(value: u8, mask: u32) -> u32 {
         if mask == 0 {
@@ -202,6 +245,8 @@ impl FramebufferDisplay {
         (scaled << shift) & mask
     }
 
+    /// Assemble a full bitmask-format pixel from 8-bit R/G/B components using
+    /// this display's channel masks.
     #[inline(always)]
     fn pack_bitmask(&self, r: u8, g: u8, b: u8) -> u32 {
         Self::pack_channel(r, self.red_mask)
@@ -210,6 +255,8 @@ impl FramebufferDisplay {
             | self.reserved_mask
     }
 
+    /// Convert a logical 0x00RRGGBB color into the little-endian byte sequence
+    /// to store for a single hardware pixel (up to 4 bytes wide).
     #[inline(always)]
     fn native_pixel_bytes(&self, color: u32) -> [u8; 4] {
         let r = ((color >> 16) & 0xFF) as u8;
@@ -224,24 +271,38 @@ impl FramebufferDisplay {
         }
     }
 
+    /// Fill the entire visible framebuffer with a single color.
+    ///
+    /// For 32-bit RGB/BGR displays this uses a wide slice fill (one `u32` write
+    /// per pixel via `slice::fill`, which the compiler lowers to a fast memory
+    /// set), taking a whole-buffer shortcut when the scanline stride matches the
+    /// visible width. Other formats fall back to a per-pixel byte writer.
     pub fn clear_color(&mut self, color: u32) {
         if self.bytes_per_pixel == 4
             && matches!(self.pixel_format, PixelFormat::Rgb | PixelFormat::Bgr)
         {
             let packed = self.rgb_to_native_u32(color);
-            // OPTIMIZATION: Fill rows with packed u32 values instead of per-pixel writes
-            for y in 0..self.height {
-                let row_base = y * self.stride * self.bytes_per_pixel;
-                for x in 0..self.width {
-                    let offset = row_base + x * self.bytes_per_pixel;
-                    if offset + 4 > self.size_bytes {
+            let total_pixels = self.size_bytes / 4;
+            if total_pixels == 0 {
+                return;
+            }
+
+            // The framebuffer is normal (write-combining) RAM; treat it as a
+            // slice of u32 and let `fill` emit a tight memory-set loop.
+            let fb32 =
+                unsafe { core::slice::from_raw_parts_mut(self.base.cast::<u32>(), total_pixels) };
+
+            if self.stride == self.width {
+                let count = core::cmp::min(self.width.saturating_mul(self.height), total_pixels);
+                fb32[..count].fill(packed);
+            } else {
+                for y in 0..self.height {
+                    let row = y.saturating_mul(self.stride);
+                    if row >= total_pixels {
                         break;
                     }
-                    unsafe {
-                        // OPTIMIZATION: Use ptr::write instead of write_volatile
-                        // Framebuffer memory is normal RAM, not MMIO
-                        ptr::write(self.base.add(offset).cast::<u32>(), packed);
-                    }
+                    let end = core::cmp::min(row + self.width, total_pixels);
+                    fb32[row..end].fill(packed);
                 }
             }
             return;
@@ -268,6 +329,11 @@ impl FramebufferDisplay {
         }
     }
 
+    /// Copy a sub-rectangle of an off-screen image onto the framebuffer.
+    ///
+    /// `src_x`/`src_y`/`width`/`height` select the region (clipped to the
+    /// visible area). The BGR 32-bit case is a straight per-row
+    /// `copy_nonoverlapping` memcpy; RGB and exotic formats convert per pixel.
     pub fn flush_region(
         &mut self,
         pixels: &[u32],
@@ -360,6 +426,8 @@ impl FramebufferDisplay {
                         PixelFormat::Bitmask => {
                             Self::write_packed(p, self.pack_bitmask(r, g, b), self.bytes_per_pixel)
                         }
+                        // BltOnly framebuffers do not support direct pixel
+                        // access; flushing is a no-op for this format.
                         PixelFormat::BltOnly => {}
                     }
                 }
@@ -367,6 +435,8 @@ impl FramebufferDisplay {
         }
     }
 
+    /// Write up to `bytes_per_pixel` little-endian bytes of an already-packed
+    /// pixel value to `dst`.
     #[inline(always)]
     unsafe fn write_packed(dst: *mut u8, packed: u32, bytes_per_pixel: usize) {
         let bytes = packed.to_le_bytes();
@@ -381,6 +451,8 @@ impl FramebufferDisplay {
         }
     }
 
+    /// Write an R/G/B triple (plus optional zero alpha byte) to `dst` in either
+    /// RGB or BGR channel order depending on `bgr`.
     #[inline(always)]
     unsafe fn write_rgb_like(dst: *mut u8, r: u8, g: u8, b: u8, bytes_per_pixel: usize, bgr: bool) {
         if bgr {
@@ -521,6 +593,8 @@ impl Display for FramebufferDisplay {
                         PixelFormat::Bitmask => {
                             Self::write_packed(p, self.pack_bitmask(r, g, b), self.bytes_per_pixel);
                         }
+                        // BltOnly framebuffers do not support direct pixel
+                        // access; flushing is a no-op for this format.
                         PixelFormat::BltOnly => {}
                     }
                 }

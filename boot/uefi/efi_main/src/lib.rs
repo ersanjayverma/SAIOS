@@ -1,5 +1,14 @@
+//! Shared types and helpers for the SAIOS UEFI bootloader.
+//!
+//! This crate defines the boot information structure passed from the UEFI
+//! application to the kernel, plus minimal ELF parsing and relocation helpers
+//! used during kernel loading.
+
 #![no_std]
-pub const SAIOS_BOOT_MAGIC: u64 = 0x5341_494F_5342_4F4F; // Choose your preferred value
+
+/// Magic value identifying a valid [`SaiosBootInfo`] structure.
+pub const SAIOS_BOOT_MAGIC: u64 = 0x5341_494F_5342_4F4F;
+/// Version of the boot information structure.
 pub const SAIOS_BOOT_VERSION: u32 = 1;
 pub mod acpi;
 pub mod cpu;
@@ -12,17 +21,27 @@ pub const R_X86_64_RELATIVE: u32 = 8;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SaiosBootInfo {
+    /// Must equal [`SAIOS_BOOT_MAGIC`].
     pub magic: u64,
+    /// Structure version, currently [`SAIOS_BOOT_VERSION`].
     pub version: u32,
+    /// Total size of this structure in bytes.
     pub size: u32,
 
+    /// Framebuffer information for the kernel console.
     pub framebuffer: graphics::FramebufferInfo,
+    /// UEFI memory map describing available physical memory.
     pub memorymap: memorymap::MemoryMapInfo,
+    /// ACPI RSDP and revision information.
     pub acpi: acpi::AcpiInfo,
+    /// SMBIOS entry point information.
     pub smbios: smbios::SmbiosInfo,
+    /// CPU feature and topology information.
     pub cpu: cpu::CpuInfo,
+    /// UEFI firmware vendor and revision information.
     pub firmware: firmware::FirmwareInfo,
 
+    /// Reserved for future expansion.
     pub reserved: [u64; 16],
 }
 #[repr(C)]
@@ -106,6 +125,7 @@ pub struct Elf64Rela {
     pub r_info: u64,
     pub r_addend: i64,
 }
+/// Collects boot information from UEFI firmware and hardware probes.
 pub fn initialize_boot_info() -> SaiosBootInfo {
     let framebuffer = graphics::initialize().unwrap_or_else(|_| graphics::FramebufferInfo::empty());
     let acpi = acpi::initialize().unwrap_or_else(|_| acpi::AcpiInfo::empty());
@@ -213,6 +233,7 @@ pub fn parse_dynamic(bytes: &[u8], segment: &Elf64ProgramHeader) -> DynamicInfo 
             x if x == DynamicTag::RelaEnt as i64 => {
                 dynamic_info.rela_entry_size = Some(dyn_entry.d_val)
             }
+            // Ignore unknown or unneeded dynamic tags.
             _ => {}
         }
     }

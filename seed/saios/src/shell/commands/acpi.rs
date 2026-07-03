@@ -1,5 +1,10 @@
-/// ACPI System Command
-/// Displays ACPI system information, processor details, and power management options
+//! ACPI shell command.
+//!
+//! Displays ACPI system information, processor details, discovered tables and
+//! provides power management subcommands (shutdown/reboot). Full AML
+//! interpretation is not yet implemented, so DSDT/SSDT device enumeration is
+//! limited.
+
 use alloc::boxed::Box;
 
 use crate::console;
@@ -8,6 +13,7 @@ use crate::shell::command::{ShellResult, StaticCommand};
 use crate::shell::registry::CommandRegistry;
 use crate::shell::session::CommandContext;
 
+/// Registers the `acpi` command with the shell registry.
 pub fn register(registry: &mut CommandRegistry) {
     registry.register(Box::new(StaticCommand {
         name: "acpi",
@@ -16,6 +22,7 @@ pub fn register(registry: &mut CommandRegistry) {
     }));
 }
 
+/// Handles the `acpi` command and its subcommands.
 fn cmd_acpi(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     if args.is_empty() {
         display_acpi_info();
@@ -65,6 +72,7 @@ fn cmd_acpi(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
+/// Prints usage information for the `acpi` command.
 fn print_acpi_help() {
     console::println!("ACPI Commands:");
     console::println!("  acpi            - Show ACPI info");
@@ -77,6 +85,7 @@ fn print_acpi_help() {
     console::println!("  acpi help       - Show this help");
 }
 
+/// Displays general ACPI information.
 fn display_acpi_info() {
     if let Some(acpi_mgr) = kernel::acpi::get_manager() {
         console::println!("ACPI System Information");
@@ -112,6 +121,7 @@ fn display_acpi_info() {
     }
 }
 
+/// Displays processors discovered in the MADT.
 fn display_acpi_processors() {
     if let Some(acpi_mgr) = kernel::acpi::get_manager() {
         console::println!("ACPI Processors");
@@ -149,6 +159,7 @@ fn display_acpi_processors() {
     }
 }
 
+/// Displays the list of discovered ACPI tables.
 fn display_acpi_tables() {
     console::println!("Discovered ACPI Tables");
     console::println!("======================");
@@ -209,6 +220,7 @@ fn display_acpi_tables() {
     }
 }
 
+/// Displays the ACPI subsystem status.
 fn display_acpi_status() {
     console::println!("ACPI Subsystem Status");
     console::println!("====================");

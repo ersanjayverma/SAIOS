@@ -1,3 +1,9 @@
+//! Virtual memory manager (VMM).
+//!
+//! Manages the kernel page tables, tracking virtual-to-physical mappings and
+//! allocating kernel virtual address space. All operations are serialized with
+//! a simple spinlock.
+
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::asm;
@@ -9,36 +15,61 @@ use hal::arch::x86_64::sync::StaticCell;
 use crate::kernel::testing::report::{VerifyCheck, VerifyReport};
 use crate::pmm;
 
+/// Virtual address type.
 pub type VirtAddr = u64;
+/// Physical address type.
 pub type PhysAddr = u64;
 
+/// Size of a page in bytes.
 pub const PAGE_SIZE: u64 = 4096;
+/// Base of the kernel's higher-half virtual address space.
 pub const KERNEL_VIRT_BASE: VirtAddr = 0xFFFF_8000_0000_0000;
+/// Page-table slot used for recursive mapping.
 const RECURSIVE_SLOT: u64 = 511;
 
+/// Page-table flag: readable.
 pub const FLAG_READ: u64 = 1 << 0;
+/// Page-table flag: writable.
 pub const FLAG_WRITE: u64 = 1 << 1;
+/// Page-table flag: executable.
 pub const FLAG_EXEC: u64 = 1 << 2;
+/// Page-table flag: user-accessible.
 pub const FLAG_USER: u64 = 1 << 3;
+/// Page-table flag: global (not flushed on TLB switch).
 pub const FLAG_GLOBAL: u64 = 1 << 4;
+/// Page-table flag: device memory (uncached).
 pub const FLAG_DEVICE: u64 = 1 << 5;
 
+/// A recorded virtual-to-physical mapping.
 #[derive(Clone, Debug)]
 pub struct Mapping {
+    /// Start of the virtual range.
     pub virt_start: VirtAddr,
+    /// Start of the physical range.
     pub phys_start: PhysAddr,
+    /// Number of pages in the mapping.
     pub pages: usize,
+    /// Page-table flags for the mapping.
     pub flags: u64,
+    /// Human-readable owner/description.
     pub owner: String,
+    /// True if the physical pages were allocated by the VMM and should be
+    /// freed on unmap.
     pub owned_physical: bool,
 }
 
+/// Snapshot of VMM state.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct VmmStats {
+    /// True if the VMM has been initialized.
     pub initialized: bool,
+    /// Physical address of the current PML4.
     pub cr3: u64,
+    /// Number of recorded mappings.
     pub mappings: usize,
+    /// Total number of mapped pages.
     pub mapped_pages: usize,
+    /// Next free kernel virtual address.
     pub next_kernel_virt: VirtAddr,
 }
 
@@ -315,6 +346,7 @@ fn translate_hw(virt: VirtAddr) -> Option<PhysAddr> {
     pt.entries[l1].address().checked_add(off)
 }
 
+/// Initializes the VMM with the given physical PML4 address.
 pub fn init(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
     if !is_page_aligned(kernel_pml4_phys) {
         return Err("vmm: cr3 physical address must be page aligned");
@@ -332,6 +364,7 @@ pub fn init(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
     })
 }
 
+/// Maps `pages` pages from `phys_start` to `virt_start` with the given flags.
 pub fn map(
     virt_start: VirtAddr,
     phys_start: PhysAddr,
@@ -394,6 +427,8 @@ pub fn map(
     })
 }
 
+/// Maps `pages` pages from `phys_start` to `virt_start` and records the VMM
+/// as the owner of the physical pages.
 pub fn map_owned(
     virt_start: VirtAddr,
     phys_start: PhysAddr,
@@ -414,6 +449,7 @@ pub fn map_owned(
     Ok(())
 }
 
+/// Allocates physical pages and maps them into kernel virtual address space.
 pub fn alloc_and_map(pages: usize, flags: u64, owner: &str) -> Result<VirtAddr, &'static str> {
     if pages == 0 {
         return Err("vmm: pages must be > 0");
@@ -439,6 +475,7 @@ pub fn alloc_and_map(pages: usize, flags: u64, owner: &str) -> Result<VirtAddr, 
     Ok(virt)
 }
 
+/// Maps physical pages at the next available kernel virtual address.
 pub fn map_physical_anywhere(
     phys_start: PhysAddr,
     pages: usize,
@@ -477,6 +514,7 @@ pub fn map_physical_anywhere(
     Ok(virt)
 }
 
+/// Removes the mapping starting at `virt_start` and frees owned physical pages.
 pub fn unmap(virt_start: VirtAddr) -> Result<(), &'static str> {
     if !is_page_aligned(virt_start) {
         return Err("vmm: virtual address must be page aligned");
@@ -510,6 +548,7 @@ pub fn unmap(virt_start: VirtAddr) -> Result<(), &'static str> {
     })
 }
 
+/// Returns the physical address mapped at `virt`, if any.
 pub fn translate(virt: VirtAddr) -> Option<PhysAddr> {
     with_state(|state| {
         if state.initialized {
@@ -520,10 +559,12 @@ pub fn translate(virt: VirtAddr) -> Option<PhysAddr> {
     })
 }
 
+/// Returns a snapshot of all recorded mappings.
 pub fn mappings() -> Vec<Mapping> {
     with_state(|state| state.mappings.clone())
 }
 
+/// Returns a snapshot of VMM statistics.
 pub fn stats() -> VmmStats {
     with_state(|state| {
         let mapped_pages = state

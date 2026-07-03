@@ -1,3 +1,11 @@
+//! Built-in shell programs and program execution helpers.
+//!
+//! This module implements the user-space commands available in the SAIOS
+//! shell. The `cc` command is currently a stub: it parses a tiny subset of C
+//! source, extracts a string literal and writes a `SAIOS_CC_STUB` marker file
+//! that [`execute_compiled_stub`] can later "run". Real compilation and
+//! dynamic linking are not yet implemented.
+
 use crate::console;
 use crate::kernel::process;
 use crate::kernel::telemetry;
@@ -9,6 +17,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+/// Result type returned by built-in programs.
 type ProgramResult = Result<i32, &'static str>;
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -26,12 +35,19 @@ const DT_STRSZ: i64 = 10;
 
 #[derive(Clone, Debug)]
 pub struct BinaryMetadata {
+    /// Entry point name used to dispatch the binary.
     pub entry: String,
+    /// True if the binary is position-independent.
     pub pie: bool,
+    /// Preferred load address.
     pub preferred_base: u64,
+    /// True if the binary has a dynamic segment.
     pub dynamic: bool,
+    /// Path to the interpreter, if any.
     pub interpreter: Option<String>,
+    /// Names of libraries recorded as DT_NEEDED.
     pub needed_libraries: Vec<String>,
+    /// Symbols required by the binary.
     pub required_symbols: Vec<String>,
 }
 
@@ -110,6 +126,8 @@ fn extract_first_string_literal(source: &str) -> Option<String> {
     None
 }
 
+/// Stub C compiler: extracts a string literal from the source file and
+/// writes a `SAIOS_CC_STUB` marker file at the requested output path.
 fn cc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let src_arg = args.first().copied().ok_or("cc: missing source file")?;
     let src = resolve_relative_path(src_arg);
@@ -140,6 +158,7 @@ fn cc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     Ok(0)
 }
 
+/// Reads the message embedded in a `SAIOS_CC_STUB` file, if any.
 fn compiled_stub_message(path: &str) -> Option<String> {
     let text = saifs::read_text(path).ok()?;
     if !text.starts_with("SAIOS_CC_STUB") {
@@ -155,6 +174,7 @@ fn compiled_stub_message(path: &str) -> Option<String> {
     Some("Hello World".to_string())
 }
 
+/// "Executes" a `SAIOS_CC_STUB` file by printing its embedded message.
 fn execute_compiled_stub(path: &str, args: &[&str]) -> ProgramResult {
     let Some(msg) = compiled_stub_message(path) else {
         return Err("program not found");
@@ -668,6 +688,10 @@ fn execute_entry(entry: &str, args: &[&str], env: &[(String, String)]) -> Progra
     }
 }
 
+/// Executes the program at `path`.
+///
+/// If `path` is a compiled stub, it is executed as a stub. Otherwise the
+/// binary metadata is read and the named entry point is dispatched.
 pub fn execute_path(
     path: &str,
     name: &str,
@@ -684,22 +708,27 @@ pub fn execute_path(
     execute_entry(entry.as_str(), args, env)
 }
 
+/// Spawns a built-in program by name.
 pub fn spawn(name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
     execute_entry(name, args, env)
 }
 
+/// Returns the given exit code.
 pub fn exit(code: i32) -> ProgramResult {
     Ok(code)
 }
 
+/// Returns the given wait code.
 pub fn wait(code: i32) -> ProgramResult {
     Ok(code)
 }
 
+/// Replaces the current program with the named built-in program.
 pub fn exec(name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
     execute_entry(name, args, env)
 }
 
+/// Returns true if `path` refers to a recognized binary or compiled stub.
 pub fn supports_binary(path: &str) -> bool {
     binary_metadata(path).is_some() || compiled_stub_message(path).is_some()
 }

@@ -1,7 +1,15 @@
+//! UEFI boot-time UI helpers.
+//!
+//! Provides bitmap parsing and framebuffer drawing routines used to display
+//! the boot splash screen before the kernel takes over the display.
+
 use crate::graphics::FramebufferInfo;
 use crate::graphics::PixelFormat;
+
+/// Boot splash bitmap embedded at compile time.
 pub static SPLASH: &[u8] = include_bytes!("./assets/splash.bmp");
 
+/// Packs an 8-bit color channel into the position described by `mask`.
 #[inline(always)]
 fn pack_channel(value: u8, mask: u32) -> u32 {
     if mask == 0 {
@@ -42,23 +50,32 @@ unsafe fn write_packed(dst: *mut u8, packed: u32, bytes_per_pixel: usize) {
 
 #[repr(C)]
 pub struct Bitmap<'a> {
+    /// Bitmap width in pixels.
     pub width: u32,
+    /// Bitmap height in pixels.
     pub height: u32,
+    /// Bits per pixel (24 or 32).
     pub bpp: u16,
+    /// Bytes between the start of two bitmap rows.
     pub stride: u32,
+    /// Raw pixel data.
     pub pixels: &'a [u8],
 }
 
+/// Wrapper around the firmware framebuffer.
 pub struct Framebuffer {
+    /// Framebuffer geometry and pixel format information.
     pub info: FramebufferInfo,
 }
 
 impl Framebuffer {
+    /// Returns the number of bytes per framebuffer pixel.
     #[inline(always)]
     fn bytes_per_pixel(&self) -> usize {
         core::cmp::max(self.info.bpp / 8, 1)
     }
 
+    /// Fills a rectangle with `color`.
     pub fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: [u8; 4]) {
         let x_end = core::cmp::min(x.saturating_add(width), self.info.width);
         let y_end = core::cmp::min(y.saturating_add(height), self.info.height);
@@ -70,6 +87,7 @@ impl Framebuffer {
         }
     }
 
+    /// Draws the outline of a rectangle with `color`.
     pub fn draw_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: [u8; 4]) {
         if width == 0 || height == 0 {
             return;
@@ -81,6 +99,7 @@ impl Framebuffer {
         self.fill_rect(x + width.saturating_sub(1), y, 1, height, color);
     }
 
+    /// Writes a single pixel to the framebuffer.
     pub fn put_pixel(&mut self, x: usize, y: usize, color: [u8; 4]) {
         if x >= self.info.width || y >= self.info.height {
             return;
@@ -221,6 +240,8 @@ impl<'a> Bitmap<'a> {
                             core::ptr::write_volatile(dst.add(2), pixel[0]);
                             core::ptr::write_volatile(dst.add(3), 0xFF);
                         }
+                        // can_fast_blit only returns true for Rgb/Bgr, so
+                        // this arm is defensive and should not be reached.
                         PixelFormat::Bitmask | PixelFormat::BltOnly => {}
                     }
                 }
@@ -228,6 +249,7 @@ impl<'a> Bitmap<'a> {
         }
     }
 
+    /// Parses a 24-bit or 32-bit uncompressed BMP from `data`.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, &'static str> {
         if data.len() < 54 {
             return Err("BMP too small");
@@ -270,6 +292,7 @@ impl<'a> Bitmap<'a> {
             pixels: &data[pixel_offset..],
         })
     }
+    /// Draws the bitmap at `(dst_x, dst_y)` in the framebuffer.
     pub fn draw_at(&self, framebuffer: &mut Framebuffer, dst_x: usize, dst_y: usize) {
         if self.can_fast_blit(framebuffer) {
             self.draw_at_fast(framebuffer, dst_x, dst_y);

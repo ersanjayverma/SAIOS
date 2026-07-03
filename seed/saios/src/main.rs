@@ -1,3 +1,9 @@
+//! SAIOS kernel main binary.
+//!
+//! This is the kernel entry point. It initializes the GDT, IDT, physical and
+//! virtual memory managers, heap, console, KSF services, ACPI and finally
+//! hands control to the seed runtime.
+
 #![no_std]
 #![no_main]
 
@@ -141,6 +147,10 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     seed.run()
 }
 
+/// Kernel panic handler.
+///
+/// Disables interrupts, prints panic information to the emergency serial path
+/// and halts the CPU forever.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     interrupt::disable();

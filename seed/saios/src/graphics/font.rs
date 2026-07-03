@@ -1,8 +1,13 @@
 use font8x8::UnicodeFonts;
 
+/// Width of a rendered glyph cell, in pixels.
 pub const FONT_WIDTH: usize = 8;
+/// Height of a rendered glyph cell, in pixels (the 8-row source font is scaled
+/// to 16 scanlines — see [`glyph_row`]).
 pub const FONT_HEIGHT: usize = 16;
 
+/// Look up an 8x8 bitmap for `ch`, trying each font8x8 code-block table in turn.
+/// Returns `None` if the character is not present in any table.
 fn lookup_font8x8(ch: char) -> Option<[u8; 8]> {
     UnicodeFonts::get(&font8x8::BASIC_FONTS, ch)
         .or_else(|| UnicodeFonts::get(&font8x8::LATIN_FONTS, ch))
@@ -14,6 +19,9 @@ fn lookup_font8x8(ch: char) -> Option<[u8; 8]> {
         .or_else(|| UnicodeFonts::get(&font8x8::SGA_FONTS, ch))
 }
 
+/// Generate a deterministic pseudo-random bit pattern for characters that have
+/// no bitmap in any font table, so unknown glyphs render as a distinct,
+/// bordered placeholder box instead of blank space.
 fn fallback_row(ch: char, row8: usize) -> u8 {
     let mut state = (ch as u32) ^ ((row8 as u32) * 0x9E37_79B9);
     state ^= state >> 16;
@@ -28,6 +36,9 @@ fn fallback_row(ch: char, row8: usize) -> u8 {
     bits
 }
 
+/// Return the 8 horizontal pixels (as one bit each) for scanline `row16` of the
+/// glyph for `ch`. `row16` ranges over `0..FONT_HEIGHT`; the 8-row source font
+/// is scaled to 16 lines by doubling each source row.
 pub fn glyph_row(ch: char, row16: usize) -> u8 {
     if row16 >= FONT_HEIGHT {
         return 0;

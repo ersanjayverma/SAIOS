@@ -2,6 +2,7 @@ use super::font::{FONT_HEIGHT, FONT_WIDTH, glyph_row};
 use super::framebuffer::Color;
 use super::surface::Surface;
 
+/// The 16 standard ANSI terminal colors (8 normal + 8 bright).
 #[derive(Copy, Clone)]
 pub enum AnsiColor {
     Black,
@@ -23,6 +24,7 @@ pub enum AnsiColor {
 }
 
 impl AnsiColor {
+    /// Map an ANSI color to its concrete RGB [`Color`] (VGA-style palette).
     pub const fn to_color(self) -> Color {
         match self {
             AnsiColor::Black => Color {
@@ -109,33 +111,41 @@ impl AnsiColor {
     }
 }
 
+/// Stateless drawing helper that renders primitives (pixels, lines, rects,
+/// text, bitmaps) into a borrowed [`Surface`].
 pub struct Renderer<'a> {
     surface: &'a mut Surface,
 }
 
 impl<'a> Renderer<'a> {
+    /// Wrap a mutable surface for drawing.
     pub fn new(surface: &'a mut Surface) -> Self {
         Self { surface }
     }
 
+    /// Pack 8-bit red/green/blue components into a 0x00RRGGBB word.
     #[inline]
     pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
         ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
     }
 
+    /// Convert a [`Color`] into a packed 0x00RRGGBB word.
     #[inline]
     pub const fn color(color: Color) -> u32 {
         color.to_u32()
     }
 
+    /// Draw a single pixel.
     pub fn draw_pixel(&mut self, x: usize, y: usize, color: u32) {
         self.surface.put_pixel(x, y, color);
     }
 
+    /// Draw a line between two points.
     pub fn draw_line(&mut self, x0: isize, y0: isize, x1: isize, y1: isize, color: u32) {
         self.surface.draw_line(x0, y0, x1, y1, color);
     }
 
+    /// Draw the outline of a rectangle.
     pub fn draw_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
         if w == 0 || h == 0 {
             return;
@@ -171,10 +181,13 @@ impl<'a> Renderer<'a> {
         );
     }
 
+    /// Fill a solid rectangle.
     pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
         self.surface.fill_rect(x, y, w, h, color);
     }
 
+    /// Draw one character glyph at pixel `(x, y)` with explicit foreground and
+    /// background colors. Writes glyph rows as contiguous slices for speed.
     pub fn draw_char(&mut self, x: usize, y: usize, ch: char, fg: u32, bg: u32) {
         let surface_width = self.surface.width();
         let surface_height = self.surface.height();
@@ -198,6 +211,7 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// Draw a string left-to-right starting at pixel `(x, y)`.
     pub fn draw_string(&mut self, x: usize, y: usize, text: &str, fg: u32, bg: u32) {
         let mut cx = x;
         for ch in text.chars() {
@@ -206,6 +220,7 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// Draw a character using ANSI palette colors.
     pub fn draw_char_ansi(&mut self, x: usize, y: usize, ch: char, fg: AnsiColor, bg: AnsiColor) {
         self.draw_char(
             x,
@@ -216,6 +231,7 @@ impl<'a> Renderer<'a> {
         );
     }
 
+    /// Draw a string using ANSI palette colors.
     pub fn draw_string_ansi(
         &mut self,
         x: usize,
@@ -233,6 +249,8 @@ impl<'a> Renderer<'a> {
         );
     }
 
+    /// Blit a raw `width` x `height` bitmap of packed pixels at `(x, y)`,
+    /// clipping to the surface and copying each row as a contiguous slice.
     pub fn draw_bitmap(&mut self, x: usize, y: usize, width: usize, height: usize, pixels: &[u32]) {
         let surface_width = self.surface.width();
         let surface_height = self.surface.height();

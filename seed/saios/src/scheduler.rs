@@ -1,3 +1,9 @@
+//! Cooperative/preemptive thread scheduler.
+//!
+//! Maintains a set of kernel threads, a run queue and a simple round-robin
+//! policy driven by timer ticks. Context switch is performed in assembly by
+//! [`switch_context`].
+
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec;
@@ -10,7 +16,9 @@ use hal::arch::x86_64::sync::StaticCell;
 #[path = "scheduler/tests.rs"]
 pub mod tests;
 
+/// Unique identifier for a scheduler thread.
 pub type ThreadId = u64;
+/// Virtual address type.
 pub type VirtAddr = u64;
 
 type ThreadEntry = fn();
@@ -19,6 +27,7 @@ const STACK_SIZE: usize = 64 * 1024;
 const DEFAULT_QUANTUM_TICKS: u64 = 10;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+/// Execution state of a scheduler thread.
 pub enum ThreadState {
     Ready,
     Running,
@@ -29,6 +38,7 @@ pub enum ThreadState {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default)]
+/// Callee-saved CPU state used for context switches.
 pub struct CpuContext {
     pub rsp: u64,
     pub rbx: u64,
@@ -40,16 +50,24 @@ pub struct CpuContext {
 }
 
 #[derive(Debug, Copy, Clone)]
+/// A kernel thread.
 pub struct Thread {
+    /// Thread identifier.
     pub id: ThreadId,
+    /// Current execution state.
     pub state: ThreadState,
+    /// Saved CPU context.
     pub context: CpuContext,
+    /// Top of the thread's stack.
     pub stack_top: VirtAddr,
 }
 
 #[derive(Debug, Copy, Clone)]
+/// Lightweight snapshot of a thread for introspection.
 pub struct ThreadInfo {
+    /// Thread identifier.
     pub id: ThreadId,
+    /// Current execution state.
     pub state: ThreadState,
 }
 
@@ -246,6 +264,7 @@ fn do_schedule() {
     }
 }
 
+/// Initializes the scheduler and creates the bootstrap and idle threads.
 pub fn init() {
     interrupt::without_interrupts(|| {
         let slot = unsafe { &mut *SCHEDULER.get() };
@@ -281,6 +300,7 @@ pub fn init() {
     });
 }
 
+/// Spawns a new kernel thread running `entry`.
 pub fn spawn(entry: ThreadEntry) -> ThreadId {
     interrupt::without_interrupts(|| {
         let scheduler = scheduler_mut().expect("scheduler not initialized");
@@ -288,6 +308,7 @@ pub fn spawn(entry: ThreadEntry) -> ThreadId {
     })
 }
 
+/// Called by the timer interrupt handler to advance scheduling state.
 pub fn on_timer_tick() {
     interrupt::without_interrupts(|| {
         let scheduler = match scheduler_mut() {
@@ -302,6 +323,7 @@ pub fn on_timer_tick() {
     });
 }
 
+/// Yields the CPU if the current thread's quantum has expired.
 pub fn maybe_preempt() {
     let should_reschedule = interrupt::without_interrupts(|| {
         let scheduler = match scheduler_ref() {
@@ -316,10 +338,12 @@ pub fn maybe_preempt() {
     }
 }
 
+/// Voluntarily yields the CPU to the next runnable thread.
 pub fn yield_now() {
     interrupt::without_interrupts(do_schedule);
 }
 
+/// Returns a snapshot of all threads known to the scheduler.
 pub fn threads() -> Vec<ThreadInfo> {
     interrupt::without_interrupts(|| {
         let scheduler = match scheduler_ref() {
@@ -338,6 +362,7 @@ pub fn threads() -> Vec<ThreadInfo> {
     })
 }
 
+/// Verifies the scheduler and returns a report.
 pub fn verify() -> crate::kernel::testing::report::VerifyReport {
     let snapshot = threads();
     let mut checks = Vec::new();

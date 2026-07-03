@@ -1,3 +1,10 @@
+//! Kernel Service Framework (KSF).
+//!
+//! KSF is a minimal dependency-aware service manager. Services implement the
+//! [`KernelService`] trait, declare their dependencies and are started in
+//! dependency order by [`bootstrap`]. The framework also exposes health,
+//! verification and lifecycle helpers used by the shell and boot sequence.
+
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -8,6 +15,7 @@ use hal::arch::x86_64::sync::StaticCell;
 use crate::som::HealthState;
 use crate::{object_manager, scheduler, shell, sif, timer};
 
+/// Unique identifier for a kernel service.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ServiceId(pub u16);
 
@@ -34,6 +42,7 @@ pub mod ids {
     pub const SAIRU: ServiceId = ServiceId(18);
 }
 
+/// Lifecycle state of a service managed by KSF.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ServiceState {
     Registered,
@@ -46,28 +55,55 @@ pub enum ServiceState {
     Failed,
 }
 
+/// Interface implemented by every kernel service.
+///
+/// Services declare an identity, version, dependency list and lifecycle
+/// callbacks. The `stop` callback is intentionally a no-op for most services
+/// because the kernel does not currently support clean shutdown of these
+/// subsystems.
 pub trait KernelService {
+    /// Returns the service's unique identifier.
     fn id(&self) -> ServiceId;
+    /// Returns the service's short name.
     fn name(&self) -> &'static str;
+    /// Returns the service's version string.
     fn version(&self) -> &'static str;
+    /// Returns the list of services that must be running before this one.
     fn dependencies(&self) -> &'static [ServiceId];
+    /// Initializes the service. Called before `start`.
     fn initialize(&mut self) -> Result<(), &'static str>;
+    /// Starts the service.
     fn start(&mut self) -> Result<(), &'static str>;
+    /// Stops the service.
+    ///
+    /// Most kernel services do not implement a clean shutdown path, so the
+    /// default implementation for each service is currently a no-op.
     fn stop(&mut self);
+    /// Returns the current health of the service.
     fn health(&self) -> HealthState;
 }
 
+/// Snapshot of a service's state returned by [`ServiceManager::snapshots`].
 pub struct ServiceSnapshot {
+    /// Service identifier.
     pub id: ServiceId,
+    /// Service name.
     pub name: String,
+    /// Service version.
     pub version: String,
+    /// Current lifecycle state.
     pub state: ServiceState,
+    /// Current health.
     pub health: HealthState,
+    /// Resolved dependency list.
     pub dependencies: Vec<ServiceId>,
 }
 
+/// Dependency-aware kernel service manager.
 pub struct ServiceManager {
+    /// Registered service instances.
     services: Vec<Box<dyn KernelService>>,
+    /// Lifecycle state for each registered service.
     states: Vec<ServiceState>,
 }
 
@@ -78,6 +114,7 @@ impl Default for ServiceManager {
 }
 
 impl ServiceManager {
+    /// Creates an empty service manager.
     pub fn new() -> Self {
         Self {
             services: Vec::new(),
@@ -85,6 +122,7 @@ impl ServiceManager {
         }
     }
 
+    /// Registers a service if no service with the same id is already present.
     pub fn register(&mut self, service: Box<dyn KernelService>) {
         let id = service.id();
         if self.index_of(id).is_some() {
@@ -95,10 +133,12 @@ impl ServiceManager {
         self.states.push(ServiceState::Registered);
     }
 
+    /// Returns the index of the service with `id`, if registered.
     fn index_of(&self, id: ServiceId) -> Option<usize> {
         self.services.iter().position(|s| s.id() == id)
     }
 
+    /// Returns true when all dependencies of the service at `idx` are ready.
     fn deps_ready_to_start(&self, idx: usize) -> bool {
         self.services[idx].dependencies().iter().all(|dep| {
             self.index_of(*dep)
@@ -107,6 +147,7 @@ impl ServiceManager {
         })
     }
 
+    /// Initializes the service at `idx` if it is not already ready or running.
     fn init_at(&mut self, idx: usize) -> Result<(), &'static str> {
         match self.states[idx] {
             ServiceState::Registered | ServiceState::Stopped => {
@@ -130,6 +171,7 @@ impl ServiceManager {
         }
     }
 
+    /// Starts the service at `idx` after ensuring its dependencies are ready.
     fn start_at(&mut self, idx: usize) -> Result<(), &'static str> {
         if !self.deps_ready_to_start(idx) {
             return Err("dependencies not ready");
@@ -154,6 +196,7 @@ impl ServiceManager {
         }
     }
 
+    /// Starts all registered services in dependency order.
     pub fn start_all(&mut self) -> Result<(), &'static str> {
         let mut progressed = true;
 
@@ -185,6 +228,7 @@ impl ServiceManager {
         Ok(())
     }
 
+    /// Starts the service with the given name.
     pub fn start_by_name(&mut self, name: &str) -> Result<(), &'static str> {
         let idx = self
             .services
@@ -194,6 +238,10 @@ impl ServiceManager {
         self.start_at(idx)
     }
 
+    /// Stops the service with the given name.
+    ///
+    /// The service's `stop` callback is invoked; most services currently
+    /// implement this as a no-op.
     pub fn stop_by_name(&mut self, name: &str) -> Result<(), &'static str> {
         let idx = self
             .services
@@ -207,11 +255,13 @@ impl ServiceManager {
         Ok(())
     }
 
+    /// Stops and then restarts the service with the given name.
     pub fn restart_by_name(&mut self, name: &str) -> Result<(), &'static str> {
         self.stop_by_name(name)?;
         self.start_by_name(name)
     }
 
+    /// Returns a snapshot of every registered service.
     pub fn snapshots(&self) -> Vec<ServiceSnapshot> {
         self.services
             .iter()
@@ -293,6 +343,7 @@ impl KernelService for ConsoleService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -328,6 +379,7 @@ impl KernelService for MemoryService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -363,6 +415,7 @@ impl KernelService for ObjectService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -398,6 +451,7 @@ impl KernelService for ProviderService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -433,6 +487,7 @@ impl KernelService for SifService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -468,6 +523,7 @@ impl KernelService for TimerService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -503,6 +559,7 @@ impl KernelService for SchedulerService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -538,6 +595,7 @@ impl KernelService for EventService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -572,6 +630,7 @@ impl KernelService for HealthService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -606,6 +665,7 @@ impl KernelService for InputService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -644,6 +704,7 @@ impl KernelService for ShellService {
         shell::start_service()
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -678,6 +739,7 @@ impl KernelService for VfsService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -713,6 +775,7 @@ impl KernelService for DriverManagerService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -748,6 +811,7 @@ impl KernelService for DeviceManagerService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -783,6 +847,7 @@ impl KernelService for ProcessManagerService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -817,6 +882,7 @@ impl KernelService for IpcService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -851,6 +917,7 @@ impl KernelService for NetworkService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -885,6 +952,7 @@ impl KernelService for SairuService {
         Ok(())
     }
 
+    /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
     fn stop(&mut self) {}
 
     fn health(&self) -> HealthState {
@@ -892,6 +960,7 @@ impl KernelService for SairuService {
     }
 }
 
+/// Registers all built-in kernel services and starts them in dependency order.
 pub fn bootstrap() -> Result<(), &'static str> {
     with_manager(|manager| {
         manager.register(Box::new(ConsoleService));
@@ -916,22 +985,27 @@ pub fn bootstrap() -> Result<(), &'static str> {
     })
 }
 
+/// Returns snapshots of all registered services.
 pub fn list() -> Vec<ServiceSnapshot> {
     with_manager(|manager| manager.snapshots())
 }
 
+/// Starts the service with the given name.
 pub fn start(name: &str) -> Result<(), &'static str> {
     with_manager(|manager| manager.start_by_name(name))
 }
 
+/// Stops the service with the given name.
 pub fn stop(name: &str) -> Result<(), &'static str> {
     with_manager(|manager| manager.stop_by_name(name))
 }
 
+/// Restarts the service with the given name.
 pub fn restart(name: &str) -> Result<(), &'static str> {
     with_manager(|manager| manager.restart_by_name(name))
 }
 
+/// Returns the current health of every registered service.
 pub fn health() -> Vec<(String, HealthState)> {
     with_manager(|manager| {
         manager
@@ -942,6 +1016,7 @@ pub fn health() -> Vec<(String, HealthState)> {
     })
 }
 
+/// Returns a snapshot for the service with the given name, if it exists.
 pub fn info(name: &str) -> Option<ServiceSnapshot> {
     with_manager(|manager| {
         manager
@@ -951,6 +1026,7 @@ pub fn info(name: &str) -> Option<ServiceSnapshot> {
     })
 }
 
+/// Verifies the service registry and returns a report.
 pub fn verify() -> crate::kernel::testing::report::VerifyReport {
     let snapshots = list();
     let mut checks = Vec::new();

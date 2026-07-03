@@ -1,3 +1,9 @@
+//! Storage driver and volume registry.
+//!
+//! This module maintains a list of detected storage volumes, probes raw images
+//! for common filesystem signatures (Ext4, NTFS, FAT variants) and exposes
+//! mount/unmount/format helpers used by the VFS and shell.
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -8,6 +14,10 @@ use hal::arch::x86_64::sync::StaticCell;
 
 use crate::pci;
 
+/// Filesystem types recognized by the storage subsystem.
+///
+/// `TmpFs` represents the memory-backed root filesystem; the other variants
+/// are disk filesystems that can be probed from a raw image.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum FilesystemKind {
     TmpFs,
@@ -20,6 +30,7 @@ pub enum FilesystemKind {
 }
 
 impl FilesystemKind {
+    /// Returns the human-readable filesystem label.
     pub const fn as_str(self) -> &'static str {
         match self {
             FilesystemKind::TmpFs => "tmpfs",
@@ -32,6 +43,8 @@ impl FilesystemKind {
         }
     }
 
+    /// Returns the driver name used to report this filesystem in provider
+    /// properties.
     pub const fn driver_name(self) -> &'static str {
         match self {
             FilesystemKind::TmpFs => "storage",
@@ -44,6 +57,7 @@ impl FilesystemKind {
         }
     }
 
+    /// Parses a filesystem label into a [`FilesystemKind`].
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
@@ -59,24 +73,35 @@ impl FilesystemKind {
     }
 }
 
+/// A storage volume known to the kernel.
 #[derive(Clone, Debug)]
 pub struct DetectedVolume {
+    /// Volume name used in the namespace (e.g. `"tmpfs"`, `"disk0"`).
     pub name: String,
+    /// Detected or assigned filesystem type.
     pub filesystem: FilesystemKind,
+    /// Description of the backing store (e.g. `"memory"`, PCI location).
     pub backing: String,
+    /// Total capacity in bytes, or zero when unknown.
     pub total_bytes: u64,
+    /// Sector size in bytes.
     pub sector_size: u16,
+    /// Mount path if the volume is currently mounted.
     pub mounted_at: Option<String>,
+    /// True if the volume supports writes.
     pub writable: bool,
 }
 
 #[derive(Clone)]
 struct StorageState {
+    /// True after the default volume list has been seeded.
     initialized: bool,
+    /// Detected volumes.
     volumes: Vec<DetectedVolume>,
 }
 
 impl StorageState {
+    /// Creates an empty storage state.
     fn new() -> Self {
         Self {
             initialized: false,
@@ -85,10 +110,14 @@ impl StorageState {
     }
 }
 
+/// Result of probing a raw image for a filesystem signature.
 #[derive(Debug, Copy, Clone)]
 struct ProbeResult {
+    /// Recognized filesystem type.
     fs: FilesystemKind,
+    /// Total size in bytes.
     total_bytes: u64,
+    /// Sector size in bytes.
     sector_size: u16,
 }
 
@@ -140,10 +169,14 @@ fn with_state<R>(f: impl FnOnce(&StorageState) -> R) -> R {
     out
 }
 
+/// Reads a little-endian `u16` from `bytes` at `at`, returning `None` if the
+/// bytes are out of range.
 fn le_u16(bytes: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes([*bytes.get(at)?, *bytes.get(at + 1)?]))
 }
 
+/// Reads a little-endian `u32` from `bytes` at `at`, returning `None` if the
+/// bytes are out of range.
 fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes([
         *bytes.get(at)?,
@@ -153,6 +186,8 @@ fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
     ]))
 }
 
+/// Reads a little-endian `u64` from `bytes` at `at`, returning `None` if the
+/// bytes are out of range.
 fn le_u64(bytes: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes([
         *bytes.get(at)?,
@@ -166,15 +201,18 @@ fn le_u64(bytes: &[u8], at: usize) -> Option<u64> {
     ]))
 }
 
+/// Returns true if the image ends with the MBR boot signature.
 fn has_mbr_signature(image: &[u8]) -> bool {
     matches!((image.get(510), image.get(511)), (Some(0x55), Some(0xAA)))
 }
 
+/// Parses an ASCII string of `len` bytes starting at `at`.
 fn parse_ascii(bytes: &[u8], at: usize, len: usize) -> Option<&str> {
     let slice = bytes.get(at..at + len)?;
     core::str::from_utf8(slice).ok()
 }
 
+/// Probes `image` for an Ext4 superblock signature.
 fn probe_ext4(image: &[u8]) -> Option<ProbeResult> {
     if image.len() < 2048 {
         return None;
@@ -197,6 +235,7 @@ fn probe_ext4(image: &[u8]) -> Option<ProbeResult> {
     })
 }
 
+/// Probes `image` for an NTFS boot sector signature.
 fn probe_ntfs(image: &[u8]) -> Option<ProbeResult> {
     if image.len() < 512 || !has_mbr_signature(image) {
         return None;
@@ -217,6 +256,7 @@ fn probe_ntfs(image: &[u8]) -> Option<ProbeResult> {
     })
 }
 
+/// Probes `image` for a FAT family boot sector signature.
 fn probe_fat(image: &[u8]) -> Option<ProbeResult> {
     if image.len() < 512 || !has_mbr_signature(image) {
         return None;
@@ -265,12 +305,16 @@ fn probe_fat(image: &[u8]) -> Option<ProbeResult> {
     })
 }
 
+/// Probes `image` for any supported filesystem signature.
 fn probe_filesystem(image: &[u8]) -> Option<ProbeResult> {
     probe_ext4(image)
         .or_else(|| probe_ntfs(image))
         .or_else(|| probe_fat(image))
 }
 
+/// Builds a minimal synthetic disk image that can be recognized as `fs`.
+///
+/// `TmpFs` has no on-disk layout, so it leaves the buffer empty.
 fn synthetic_image_for(fs: FilesystemKind) -> Vec<u8> {
     let mut image = vec![0u8; 4096];
     image[510] = 0x55;
@@ -306,12 +350,15 @@ fn synthetic_image_for(fs: FilesystemKind) -> Vec<u8> {
             };
             image[82..90].copy_from_slice(label);
         }
+        // TmpFs is memory-backed and has no synthetic disk image.
         FilesystemKind::TmpFs => {}
     }
 
     image
 }
 
+/// Seeds the volume list with the memory-backed tmpfs root and a set of
+/// synthetic ramdisk images for each disk filesystem.
 fn seed_default_volumes(state: &mut StorageState) {
     state.volumes.clear();
     state.volumes.push(DetectedVolume {
@@ -351,6 +398,7 @@ fn seed_default_volumes(state: &mut StorageState) {
     }
 }
 
+/// Appends placeholder volumes for every PCI mass-storage controller found.
 fn append_mass_storage_backends(state: &mut StorageState) {
     let mut disk_index = 0usize;
     for dev in pci::devices() {
@@ -369,6 +417,7 @@ fn append_mass_storage_backends(state: &mut StorageState) {
     }
 }
 
+/// Initializes the storage subsystem if it has not already been initialized.
 pub fn init() {
     with_state_mut(|state| {
         if state.initialized {
@@ -381,6 +430,7 @@ pub fn init() {
     });
 }
 
+/// Rescans storage backends and rebuilds the volume list.
 pub fn rescan() {
     with_state_mut(|state| {
         seed_default_volumes(state);
@@ -389,6 +439,7 @@ pub fn rescan() {
     });
 }
 
+/// Returns the list of disk filesystems that can be probed from an image.
 pub fn supported_filesystems() -> &'static [FilesystemKind] {
     &[
         FilesystemKind::Ext4,
@@ -400,11 +451,13 @@ pub fn supported_filesystems() -> &'static [FilesystemKind] {
     ]
 }
 
+/// Returns a snapshot of all currently known volumes.
 pub fn volumes() -> Vec<DetectedVolume> {
     init();
     with_state(|state| state.volumes.clone())
 }
 
+/// Probes a raw image and returns the recognized filesystem kind, if any.
 pub fn probe_image(image: &[u8]) -> Option<FilesystemKind> {
     probe_filesystem(image).map(|p| p.fs)
 }

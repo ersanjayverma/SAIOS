@@ -1,3 +1,9 @@
+//! Kernel console subsystem.
+//!
+//! The console multiplexes output between a serial port and an optional
+//! framebuffer renderer. It also handles keyboard/mouse input events and
+//! provides the `println!` style output used by the rest of the kernel.
+
 mod backend;
 mod cursor;
 mod framebuffer;
@@ -280,6 +286,7 @@ fn emergency_write_str(s: &str) {
     SerialConsole::emergency_write_str(s);
 }
 
+/// Initializes the serial port, input devices and console state.
 pub fn init() {
     SerialConsole::init();
     unsafe {
@@ -374,9 +381,12 @@ fn framebuffer_scrollback_to_bottom() {
     });
 }
 
+/// Attaches a framebuffer as an additional console output backend.
+///
+/// The framebuffer address is used as provided by the bootloader. The VMM
+/// remap path is temporarily disabled on this hardware due to early page
+/// faults, so no virtual-memory remapping is performed.
 pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
-    // Use framebuffer address as provided by bootloader. The VMM remap path
-    // is temporarily disabled on this hardware due to early page faults.
     let mapped_info = info;
 
     with_console(|console| {
@@ -405,6 +415,7 @@ pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
     });
 }
 
+/// Ensures the framebuffer renderer is ready and returns true on success.
 pub fn promote_framebuffer_renderer() -> bool {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         return false;
@@ -413,14 +424,17 @@ pub fn promote_framebuffer_renderer() -> bool {
     try_with_console(|console| console.backend.right_mut().ensure_renderer_ready()).unwrap_or(false)
 }
 
+/// Enables or disables serial output logging.
 pub fn set_serial_logging(enabled: bool) {
     SerialConsole::set_output_enabled(enabled);
 }
 
+/// Returns true if serial output logging is enabled.
 pub fn serial_logging_enabled() -> bool {
     SerialConsole::output_enabled()
 }
 
+/// Writes a single character to the console.
 pub fn put_char(c: char) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         SerialConsole::emergency_put_char(c);
@@ -432,6 +446,7 @@ pub fn put_char(c: char) {
     }
 }
 
+/// Writes a string to the console.
 pub fn write_str(s: &str) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         emergency_write_str(s);
@@ -443,6 +458,7 @@ pub fn write_str(s: &str) {
     }
 }
 
+/// Clears the console screen.
 pub fn clear() {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         return;
@@ -451,6 +467,7 @@ pub fn clear() {
     let _ = try_with_console(|console| console.clear());
 }
 
+/// Sets the prompt displayed before read-line input.
 pub fn set_input_prompt(prompt: &str) {
     // SAFETY: single-core early kernel context.
     unsafe {
@@ -464,6 +481,7 @@ pub fn set_input_prompt(prompt: &str) {
     }
 }
 
+/// Begins capturing console output to an internal buffer.
 pub fn begin_output_capture(suppress_console: bool) {
     capture_lock();
     // SAFETY: guarded by capture lock.
@@ -476,6 +494,7 @@ pub fn begin_output_capture(suppress_console: bool) {
     capture_unlock();
 }
 
+/// Ends output capture and returns the captured text.
 pub fn end_output_capture() -> AllocString {
     capture_lock();
     // SAFETY: guarded by capture lock.
@@ -489,6 +508,7 @@ pub fn end_output_capture() -> AllocString {
     out
 }
 
+/// Moves the text cursor to `(x, y)`.
 pub fn set_cursor(x: usize, y: usize) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         return;
@@ -497,6 +517,7 @@ pub fn set_cursor(x: usize, y: usize) {
     let _ = try_with_console(|console| console.set_cursor(x, y));
 }
 
+/// Moves the text cursor one cell to the left.
 pub fn move_cursor_left() {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         return;
@@ -505,6 +526,7 @@ pub fn move_cursor_left() {
     let _ = try_with_console(|console| console.move_cursor_left());
 }
 
+/// Moves the text cursor one cell to the right.
 pub fn move_cursor_right() {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         return;
@@ -513,14 +535,17 @@ pub fn move_cursor_right() {
     let _ = try_with_console(|console| console.move_cursor_right());
 }
 
+/// Writes a newline to the console.
 pub fn newline() {
     put_char('\n');
 }
 
+/// Writes a string to the console.
 pub fn print(s: &str) {
     write_str(s);
 }
 
+/// Writes formatted arguments to the console.
 pub fn print_fmt(args: fmt::Arguments) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         hal::arch::x86_64::console::_print(args);
@@ -536,15 +561,19 @@ pub fn print_fmt(args: fmt::Arguments) {
     }
 }
 
+/// Emergency string output used during panics.
 pub fn panic_write_str(s: &str) {
     emergency_write_str(s);
 }
 
+/// Emergency line output used during panics.
 pub fn panic_println(s: &str) {
     panic_write_str(s);
     panic_write_str("\n");
 }
 
+/// Polls for keyboard/mouse input and returns a processed input line if
+/// available.
 pub fn poll_input() -> Option<String<256>> {
     fn cell_width(ch: char) -> usize {
         UnicodeWidthChar::width(ch).unwrap_or(1).max(1)
@@ -868,6 +897,7 @@ pub fn poll_input() -> Option<String<256>> {
     }
 }
 
+/// Blocks until a complete input line is available and returns it.
 pub fn read_line() -> String<256> {
     loop {
         if let Some(line) = poll_input() {

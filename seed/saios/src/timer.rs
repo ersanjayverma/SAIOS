@@ -1,3 +1,9 @@
+//! Programmable Interval Timer (PIT) based kernel timer.
+//!
+//! Configures the legacy 8259 PIC and PIT channel 0 to deliver 100 Hz timer
+//! interrupts on IRQ0. The interrupt stub saves scratch registers, calls
+//! [`saios_timer_tick`] and acknowledges the interrupt with an EOI.
+
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
@@ -5,8 +11,11 @@ use core::time::Duration;
 use hal::arch::x86_64::idt;
 use hal::arch::x86_64::io::{inb, io_wait, outb};
 
+/// PIT input clock frequency in Hz.
 const PIT_INPUT_HZ: u32 = 1_193_182;
+/// Desired timer tick frequency in Hz.
 const TICK_HZ: u32 = 100;
+/// IDT vector used for the timer interrupt (remapped IRQ0).
 const TIMER_VECTOR: u8 = 32;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -94,6 +103,7 @@ fn init_pit() {
     outb(0x40, (divisor >> 8) as u8);
 }
 
+/// Initializes the PIC and PIT and registers the timer interrupt handler.
 pub fn init() {
     if INITIALIZED.swap(true, Ordering::AcqRel) {
         return;
@@ -104,14 +114,17 @@ pub fn init() {
     idt::register_raw(TIMER_VECTOR, saios_timer_irq0_stub as *const () as usize);
 }
 
+/// Returns the number of timer ticks since initialization.
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
+/// Returns the approximate uptime since initialization.
 pub fn uptime() -> Duration {
     Duration::from_millis((ticks() * 1000) / (TICK_HZ as u64))
 }
 
+/// Busy-waits for approximately `ms` milliseconds.
 pub fn sleep(ms: u64) {
     let tick_delta = (ms.saturating_mul(TICK_HZ as u64)).div_ceil(1000);
     let target = ticks().saturating_add(tick_delta);

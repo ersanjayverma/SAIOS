@@ -1,6 +1,12 @@
+//! Simple shell command parser.
+//!
+//! Splits an input line into statements, pipelines and individual commands,
+//! respecting single and double quotes and recognizing basic I/O redirections.
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// Direction of an I/O redirection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RedirectKind {
     Read,
@@ -10,22 +16,29 @@ pub enum RedirectKind {
 
 #[derive(Clone, Debug)]
 pub struct Redirection {
+    /// Direction of the redirection.
     pub kind: RedirectKind,
+    /// Target file path.
     pub path: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct ParsedCommand {
+    /// Command name or path.
     pub command: String,
+    /// Command arguments.
     pub args: Vec<String>,
+    /// I/O redirections attached to the command.
     pub redirections: Vec<Redirection>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ParsedPipeline {
+    /// Commands connected by pipes in a single statement.
     pub commands: Vec<ParsedCommand>,
 }
 
+/// Splits `line` into statements separated by unquoted semicolons.
 fn split_statements(line: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -43,6 +56,7 @@ fn split_statements(line: &str) -> Vec<&str> {
                 }
                 start = idx + ch.len_utf8();
             }
+            // Other characters are part of the statement.
             _ => {}
         }
     }
@@ -55,6 +69,7 @@ fn split_statements(line: &str) -> Vec<&str> {
     out
 }
 
+/// Splits `statement` into pipeline stages separated by unquoted pipes.
 fn split_pipeline(statement: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -72,6 +87,7 @@ fn split_pipeline(statement: &str) -> Vec<&str> {
                 }
                 start = idx + ch.len_utf8();
             }
+            // Other characters are part of the pipeline stage.
             _ => {}
         }
     }
@@ -84,6 +100,10 @@ fn split_pipeline(statement: &str) -> Vec<&str> {
     out
 }
 
+/// Tokenizes a single pipeline stage into words and redirection operators.
+///
+/// Quote characters toggle quoting state and are stripped from the resulting
+/// tokens.
 fn tokenize(part: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
@@ -121,6 +141,7 @@ fn tokenize(part: &str) -> Vec<String> {
                 }
                 out.push("<".into());
             }
+            // Append any other character to the current token.
             _ => current.push(ch),
         }
     }
@@ -132,6 +153,7 @@ fn tokenize(part: &str) -> Vec<String> {
     out
 }
 
+/// Parses a single pipeline stage into a command, arguments and redirections.
 fn parse_command(part: &str) -> Option<ParsedCommand> {
     let tokens = tokenize(part);
     if tokens.is_empty() {
@@ -173,6 +195,7 @@ fn parse_command(part: &str) -> Option<ParsedCommand> {
                 i += 2;
                 continue;
             }
+            // Regular word: first becomes the command, rest become arguments.
             _ => {}
         }
 
@@ -192,6 +215,7 @@ fn parse_command(part: &str) -> Option<ParsedCommand> {
     })
 }
 
+/// Parses a complete input line into one or more parsed pipelines.
 pub fn parse_line(line: &str) -> Vec<ParsedPipeline> {
     let mut pipelines = Vec::new();
     for statement in split_statements(line) {

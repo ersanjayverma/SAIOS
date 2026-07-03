@@ -1,3 +1,9 @@
+//! Virtual filesystem (VFS) layer.
+//!
+//! The VFS provides a tree of in-memory nodes backed by a simple tmpfs
+//! implementation. It supports path resolution, file open/read/write/seek,
+//! directory creation and mount-point tracking.
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -8,6 +14,7 @@ use hal::arch::x86_64::sync::StaticCell;
 
 use crate::object_manager;
 
+/// Type of a VFS node.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum FileType {
     Directory,
@@ -16,30 +23,44 @@ pub enum FileType {
 
 #[derive(Debug, Clone)]
 pub struct VNode {
+    /// Inode number.
     pub inode: u64,
+    /// File or directory name.
     pub name: String,
+    /// Node type.
     pub kind: FileType,
 }
 
+/// File descriptor identifier used by the VFS.
 pub type VfsFd = u32;
 
 #[derive(Debug, Copy, Clone)]
 pub enum SeekFrom {
+    /// Seek relative to the start of the file.
     Start(usize),
+    /// Seek relative to the current offset.
     Current(isize),
+    /// Seek relative to the end of the file.
     End(isize),
 }
 
+/// Flags controlling how a file is opened.
 #[derive(Debug, Copy, Clone)]
 pub struct OpenOptions {
+    /// Open for reading.
     pub read: bool,
+    /// Open for writing.
     pub write: bool,
+    /// Create the file if it does not exist.
     pub create: bool,
+    /// Truncate the file to zero length.
     pub truncate: bool,
+    /// Append writes to the end of the file.
     pub append: bool,
 }
 
 impl OpenOptions {
+    /// Returns options for read-only access.
     pub const fn read_only() -> Self {
         Self {
             read: true,
@@ -50,6 +71,7 @@ impl OpenOptions {
         }
     }
 
+    /// Returns options for write-only access, creating the file if needed.
     pub const fn write_only_create() -> Self {
         Self {
             read: false,
@@ -60,6 +82,7 @@ impl OpenOptions {
         }
     }
 
+    /// Returns options for read/write access, creating the file if needed.
     pub const fn read_write_create() -> Self {
         Self {
             read: true,
@@ -70,6 +93,7 @@ impl OpenOptions {
         }
     }
 
+    /// Returns options for append-only access, creating the file if needed.
     pub const fn append_create() -> Self {
         Self {
             read: false,
@@ -92,8 +116,11 @@ struct OpenFile {
 
 #[derive(Debug, Clone)]
 pub struct MountRecord {
+    /// Absolute mount path.
     pub path: String,
+    /// Name of the mounted filesystem.
     pub fs_name: String,
+    /// True if the mount is read-only.
     pub read_only: bool,
 }
 
@@ -199,6 +226,7 @@ impl TmpFs {
 
         for part in Self::path_parts(path) {
             match part {
+                // Current directory: no change.
                 "." => {}
                 ".." => {
                     let parent = self.node(current)?.parent;
@@ -343,6 +371,7 @@ impl TmpFs {
 
         for p in Self::path_parts(path) {
             match p {
+                // Current directory: no change.
                 "." => {}
                 ".." => {
                     let _ = parts.pop();
@@ -650,10 +679,12 @@ fn with_vfs<R>(f: impl FnOnce(&mut VfsState) -> R) -> R {
     out
 }
 
+/// Initializes the VFS subsystem.
 pub fn init() {
     with_vfs(|_| {});
 }
 
+/// Creates a directory at `path`.
 pub fn mkdir(path: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
@@ -667,6 +698,7 @@ pub fn mkdir(path: &str) -> Result<(), &'static str> {
     })
 }
 
+/// Creates an empty file at `path`.
 pub fn touch(path: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
@@ -680,6 +712,7 @@ pub fn touch(path: &str) -> Result<(), &'static str> {
     })
 }
 
+/// Records a mount of `fs_name` at `path`.
 pub fn mount(path: &str, fs_name: &str, read_only: bool) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
@@ -702,6 +735,7 @@ pub fn mount(path: &str, fs_name: &str, read_only: bool) -> Result<(), &'static 
     })
 }
 
+/// Returns a snapshot of all recorded mount points.
 pub fn mounts() -> Vec<MountRecord> {
     with_vfs(|vfs| vfs.mounts.clone())
 }
@@ -724,6 +758,8 @@ pub fn umount(path: &str) -> Result<(), &'static str> {
     })
 }
 
+/// Opens the file at `path` with the given options and returns a file
+/// descriptor.
 pub fn open(path: &str, options: OpenOptions) -> Result<VfsFd, &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
@@ -770,10 +806,12 @@ pub fn open(path: &str, options: OpenOptions) -> Result<VfsFd, &'static str> {
     })
 }
 
+/// Closes a file descriptor previously returned by [`open`].
 pub fn close(fd: VfsFd) -> Result<(), &'static str> {
     with_vfs(|vfs| vfs.close_fd(fd))
 }
 
+/// Reads up to `max_len` bytes from the file descriptor.
 pub fn read(fd: VfsFd, max_len: usize) -> Result<Vec<u8>, &'static str> {
     with_vfs(|vfs| {
         let (inode, offset, readable) = {
@@ -792,6 +830,8 @@ pub fn read(fd: VfsFd, max_len: usize) -> Result<Vec<u8>, &'static str> {
     })
 }
 
+/// Writes `data` to the file descriptor and returns the number of bytes
+/// written.
 pub fn write(fd: VfsFd, data: &[u8]) -> Result<usize, &'static str> {
     with_vfs(|vfs| {
         let (inode, mut offset, writable, append) = {
@@ -813,6 +853,7 @@ pub fn write(fd: VfsFd, data: &[u8]) -> Result<usize, &'static str> {
     })
 }
 
+/// Repositions the file descriptor's offset according to `from`.
 pub fn seek(fd: VfsFd, from: SeekFrom) -> Result<usize, &'static str> {
     with_vfs(|vfs| {
         let (inode, current) = {
@@ -840,6 +881,7 @@ pub fn seek(fd: VfsFd, from: SeekFrom) -> Result<usize, &'static str> {
     })
 }
 
+/// Lists the entries in `path`, or the current directory if `path` is None.
 pub fn ls(path: Option<&str>) -> Result<Vec<String>, &'static str> {
     with_vfs(|vfs| {
         let req = path.unwrap_or(".");
@@ -852,11 +894,13 @@ pub fn ls(path: Option<&str>) -> Result<Vec<String>, &'static str> {
     })
 }
 
+/// Reads the entire file at `path` as a UTF-8 string.
 pub fn cat(path: &str) -> Result<String, &'static str> {
     let bytes = read_path(path)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// Reads the entire file at `path` as raw bytes.
 pub fn read_path(path: &str) -> Result<Vec<u8>, &'static str> {
     let abs = with_vfs(|vfs| vfs.fs.normalized_path(path));
     if is_sys_path(&abs) {
@@ -872,10 +916,12 @@ pub fn read_path(path: &str) -> Result<Vec<u8>, &'static str> {
     Ok(bytes)
 }
 
+/// Removes the file or directory at `path`.
 pub fn rm(path: &str) -> Result<(), &'static str> {
     unlink(path)
 }
 
+/// Removes the file or directory at `path`.
 pub fn unlink(path: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
@@ -891,6 +937,7 @@ pub fn unlink(path: &str) -> Result<(), &'static str> {
     })
 }
 
+/// Renames or moves `from` to `to`.
 pub fn rename(from: &str, to: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs_from = vfs.fs.normalized_path(from);
@@ -905,6 +952,7 @@ pub fn rename(from: &str, to: &str) -> Result<(), &'static str> {
     })
 }
 
+/// Changes the current working directory to `path`.
 pub fn cd(path: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let inode = vfs.fs.resolve(path)?;
@@ -917,10 +965,12 @@ pub fn cd(path: &str) -> Result<(), &'static str> {
     })
 }
 
+/// Returns the current working directory.
 pub fn pwd() -> String {
     with_vfs(|vfs| vfs.fs.cwd_path())
 }
 
+/// Writes `data` to the file at `path`, creating it if necessary.
 pub fn write_path(path: &str, data: &[u8]) -> Result<(), &'static str> {
     let fd = open(path, OpenOptions::write_only_create())?;
     let write_result = write(fd, data);
@@ -929,6 +979,7 @@ pub fn write_path(path: &str, data: &[u8]) -> Result<(), &'static str> {
     close_result
 }
 
+/// Returns the VFS node for `path` without opening it.
 pub fn open_node(path: &str) -> Result<VNode, &'static str> {
     with_vfs(|vfs| vfs.fs.open_node(path))
 }

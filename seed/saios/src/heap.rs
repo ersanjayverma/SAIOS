@@ -1,3 +1,9 @@
+//! Kernel heap allocator.
+//!
+//! A bump-style allocator that grows by allocating physical pages and mapping
+//! them into kernel virtual address space. It serves as the global allocator
+//! for the `alloc` crate.
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -5,10 +11,15 @@ use hal::arch::x86_64::sync::StaticCell;
 
 use crate::pmm::{self, HeapStats, PAGE_SIZE};
 
-const INITIAL_HEAP_BYTES: usize = 32 * 1024 * 1024; // 32 MiB initial mapped heap
-const RESERVED_VIRTUAL_HEAP_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB virtual heap budget
-const HEAP_GROW_STEP_SMALL_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
-const HEAP_GROW_STEP_LARGE_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+/// Initial heap size in bytes (32 MiB).
+const INITIAL_HEAP_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum virtual heap budget in bytes (1 GiB).
+const RESERVED_VIRTUAL_HEAP_BYTES: usize = 1024 * 1024 * 1024;
+/// Small grow step in bytes (2 MiB).
+const HEAP_GROW_STEP_SMALL_BYTES: usize = 2 * 1024 * 1024;
+/// Large grow step in bytes (4 MiB).
+const HEAP_GROW_STEP_LARGE_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum number of heap chunks.
 const MAX_HEAP_CHUNKS: usize = 512;
 
 #[derive(Copy, Clone)]
@@ -172,6 +183,7 @@ fn compute_used_bytes(state: &HeapState) -> usize {
     used
 }
 
+/// Global allocator used by the kernel.
 pub struct KernelHeapAllocator;
 
 unsafe impl GlobalAlloc for KernelHeapAllocator {
@@ -217,10 +229,12 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
     }
 
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Bump allocator v1: no reclaim yet.
+        // Bump allocator v1: deallocation is a no-op because individual
+        // allocations are not tracked.
     }
 }
 
+/// Initializes the kernel heap.
 pub fn init() {
     lock();
     let state = unsafe { &mut *STATE.get() };
@@ -249,6 +263,7 @@ pub fn init() {
     unlock();
 }
 
+/// Returns current heap usage statistics.
 pub fn stats() -> HeapStats {
     lock();
     let state = unsafe { &*STATE.get() };

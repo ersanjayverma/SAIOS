@@ -1,12 +1,15 @@
+//! ACPI (Advanced Configuration and Power Interface) support module.
+//!
+//! Provides ACPI table parsing, processor and interrupt discovery via the
+//! MADT, and platform shutdown/reboot helpers. Full AML interpretation and
+//! DSDT/SSDT device enumeration are not yet implemented.
+
 use alloc::string::String;
-/// ACPI (Advanced Configuration and Power Interface) Support Module
-/// Provides full ACPI table parsing, device enumeration, power management,
-/// and interrupt routing for the SAIOS kernel.
 use alloc::vec::Vec;
 use core::mem;
 use core::ptr;
 
-/// ACPI signature constants (4-byte big-endian identifiers)
+/// ACPI table signature constants (4-byte big-endian identifiers).
 pub const RSDT_SIGNATURE: &[u8; 4] = b"RSDT";
 pub const XSDT_SIGNATURE: &[u8; 4] = b"XSDT";
 pub const DSDT_SIGNATURE: &[u8; 4] = b"DSDT";
@@ -16,7 +19,7 @@ pub const MADT_SIGNATURE: &[u8; 4] = b"APIC";
 pub const SRAT_SIGNATURE: &[u8; 4] = b"SRAT";
 pub const SLIT_SIGNATURE: &[u8; 4] = b"SLIT";
 
-/// Generic ACPI System Description Table Header
+/// Common header present at the start of every ACPI system description table.
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct AcpiTableHeader {
@@ -31,8 +34,9 @@ pub struct AcpiTableHeader {
     pub creator_revision: u32,
 }
 
-/// Generic Address Space (GAS) Structure
-/// Used for ACPI register addresses
+/// ACPI Generic Address Space (GAS) structure.
+///
+/// Describes the location and access width of an ACPI register.
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct GenericAddressSpace {
@@ -44,23 +48,23 @@ pub struct GenericAddressSpace {
 }
 
 impl GenericAddressSpace {
-    /// Check if this GAS describes an IO port access
+    /// Returns true if the register is accessed via an I/O port.
     pub fn is_io_port(&self) -> bool {
         self.address_space_id == 1
     }
 
-    /// Check if this GAS describes memory access
+    /// Returns true if the register is accessed via memory.
     pub fn is_memory(&self) -> bool {
         self.address_space_id == 0
     }
 
-    /// Check if GAS is valid (has a non-zero address)
+    /// Returns true if the register has a non-zero address.
     pub fn is_valid(&self) -> bool {
         self.address != 0
     }
 }
 
-/// Root System Description Pointer (RSDP)
+/// Root System Description Pointer (RSDP).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct RsdpDescriptor {
@@ -75,21 +79,21 @@ pub struct RsdpDescriptor {
     pub reserved: [u8; 3],
 }
 
-/// Root System Description Table (RSDT) - for ACPI 1.0
+/// Root System Description Table (RSDT) for ACPI 1.0.
 #[repr(C, packed)]
 pub struct Rsdt {
     pub header: AcpiTableHeader,
-    // Followed by array of u32 pointers to other tables
+    // Followed by array of u32 pointers to other tables.
 }
 
-/// Extended System Description Table (XSDT) - for ACPI 2.0+
+/// Extended System Description Table (XSDT) for ACPI 2.0+.
 #[repr(C, packed)]
 pub struct Xsdt {
     pub header: AcpiTableHeader,
-    // Followed by array of u64 pointers to other tables
+    // Followed by array of u64 pointers to other tables.
 }
 
-/// Fixed ACPI Description Table (FADT)
+/// Fixed ACPI Description Table (FADT / FACP).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct Fadt {
@@ -140,7 +144,7 @@ pub struct Fadt {
     pub x_dsdt: u64,
 }
 
-/// Multiple APIC Description Table (MADT)
+/// Multiple APIC Description Table (MADT / APIC).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct Madt {
@@ -149,7 +153,7 @@ pub struct Madt {
     pub flags: u32,
 }
 
-/// MADT Entry Types
+/// MADT entry type identifiers.
 #[repr(u8)]
 pub enum MadtEntryType {
     ProcessorLocalApic = 0,
@@ -255,7 +259,10 @@ pub struct InterruptSourceOverride {
     pub flags: u16,
 }
 
-/// Main ACPI Manager
+/// Main ACPI manager.
+///
+/// Holds the parsed RSDP, discovered tables and extracted hardware
+/// information (processors, IO APICs, interrupt overrides).
 pub struct AcpiManager {
     rsdp_address: u64,
     revision: u8,
@@ -270,7 +277,7 @@ pub struct AcpiManager {
     enabled: bool,
 }
 
-/// Processor Information
+/// Information about a processor discovered in the MADT.
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessorInfo {
     pub acpi_processor_id: u8,
@@ -279,7 +286,7 @@ pub struct ProcessorInfo {
 }
 
 impl AcpiManager {
-    /// Create a new ACPI manager with the RSDP address from bootloader
+    /// Creates a new ACPI manager for the given RSDP physical address.
     pub fn new(rsdp_address: u64) -> Self {
         Self {
             rsdp_address,
@@ -296,7 +303,7 @@ impl AcpiManager {
         }
     }
 
-    /// Initialize ACPI - parses tables and discovers hardware
+    /// Parses the RSDP, root table, FADT and MADT to discover hardware.
     pub fn initialize(&mut self) -> Result<(), &'static str> {
         if self.rsdp_address == 0 {
             return Err("ACPI: No RSDP address provided");
@@ -421,7 +428,10 @@ impl AcpiManager {
             [b'D', b'S', b'D', b'T'] => self.dsdt_address = table_addr,
             [b'F', b'A', b'C', b'P'] => self.fadt_address = table_addr,
             [b'A', b'P', b'I', b'C'] => self.madt_address = table_addr,
-            _ => {} // Ignore other tables for now
+            // SSDT, SRAT, SLIT and other tables are recorded by address only;
+            // parsing them requires an AML interpreter or additional parsers
+            // that are not yet implemented.
+            _ => {}
         }
     }
 
@@ -495,7 +505,9 @@ impl AcpiManager {
                 0 => self.parse_madt_processor_local_apic(entry_ptr),
                 1 => self.parse_madt_io_apic(entry_ptr),
                 2 => self.parse_madt_interrupt_source_override(entry_ptr),
-                _ => {} // Ignore other entry types for now
+                // NMI, local APIC address override, x2APIC, GIC and other
+                // entry types are not yet parsed.
+                _ => {}
             }
 
             offset += entry_length as usize;
@@ -550,43 +562,46 @@ impl AcpiManager {
         sum == 0
     }
 
-    /// Get discovered processors
+    /// Returns the list of processors discovered in the MADT.
     pub fn processors(&self) -> &[ProcessorInfo] {
         &self.processors
     }
 
-    /// Get local APIC address
+    /// Returns the physical address of the local APIC.
     pub fn local_apic_address(&self) -> u32 {
         self.local_apic_addr
     }
 
-    /// Get IO APICs discovered in MADT
+    /// Returns the list of IO APICs discovered in the MADT.
     pub fn io_apics(&self) -> &[IoApicInfo] {
         &self.io_apics
     }
 
-    /// Get interrupt source overrides discovered in MADT
+    /// Returns the list of interrupt source overrides discovered in the MADT.
     pub fn interrupt_overrides(&self) -> &[InterruptSourceOverride] {
         &self.interrupt_overrides
     }
 
-    /// Check if ACPI is initialized and enabled
+    /// Returns true if ACPI has been initialized successfully.
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    /// Get ACPI revision
+    /// Returns the ACPI revision reported by the RSDP.
     pub fn revision(&self) -> u8 {
         self.revision
     }
 
-    /// Get number of discovered processors
+    /// Returns the number of processors discovered in the MADT.
     pub fn processor_count(&self) -> usize {
         self.processors.len()
     }
 
-    /// Attempt to enter sleep state (requires AML interpreter in full implementation)
-    /// Attempt to enter sleep state (requires AML interpreter in full implementation)
+    /// Attempts to enter the requested ACPI sleep state.
+    ///
+    /// Only `SleepState::S5` (soft power-off) is implemented directly. All
+    /// other sleep states require an AML interpreter to evaluate `\_S<n>`
+    /// objects and are not yet supported.
     pub fn enter_sleep_state(&self, state: SleepState) -> Result<(), &'static str> {
         if !self.enabled {
             return Err("ACPI: Not enabled");
@@ -608,7 +623,7 @@ impl AcpiManager {
         Err("ACPI: Sleep state support requires AML interpreter (Phase 2)")
     }
 
-    /// Shutdown system using ACPI S5 (soft power-off) or platform shutdown
+    /// Shuts down the system using ACPI S5 or a platform-specific fallback.
     pub fn shutdown(&self) -> Result<(), &'static str> {
         if self.fadt_address == 0 {
             return self.platform_shutdown();
@@ -669,7 +684,7 @@ impl AcpiManager {
         }
     }
 
-    /// Reboot system using ACPI reset or platform-specific method
+    /// Reboots the system using the ACPI reset register or a platform-specific fallback.
     pub fn reboot(&self) -> Result<(), &'static str> {
         if self.fadt_address == 0 {
             return self.platform_reset();
@@ -750,12 +765,14 @@ impl AcpiManager {
         Err("ACPI: Platform reset failed")
     }
 
-    /// Get ACPI devices found via DSDT/SSDT parsing
+    /// Returns ACPI devices found via DSDT/SSDT parsing.
+    ///
+    /// Currently always empty because AML interpretation is not implemented.
     pub fn devices(&self) -> &[AcpiDevice] {
         &self.devices
     }
 
-    /// Get OEM information from RSDP
+    /// Returns the OEM ID and ACPI revision from the RSDP.
     pub fn oem_info(&self) -> Result<(String, u8), &'static str> {
         if self.rsdp_address == 0 {
             return Err("ACPI: No RSDP available");
@@ -783,7 +800,7 @@ static mut ACPI_MANAGER: Option<AcpiManager> = None;
 static ACPI_INITIALIZED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// Initialize global ACPI manager
+/// Initializes the global ACPI manager.
 pub fn init(rsdp_address: u64) -> Result<(), &'static str> {
     if ACPI_INITIALIZED.load(core::sync::atomic::Ordering::SeqCst) {
         return Err("ACPI: Already initialized");
@@ -807,7 +824,7 @@ pub fn init(rsdp_address: u64) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Get reference to global ACPI manager
+/// Returns an immutable reference to the global ACPI manager, if initialized.
 pub fn get_manager() -> Option<&'static AcpiManager> {
     if ACPI_INITIALIZED.load(core::sync::atomic::Ordering::SeqCst) {
         unsafe {
@@ -821,7 +838,7 @@ pub fn get_manager() -> Option<&'static AcpiManager> {
     }
 }
 
-/// Get mutable reference to global ACPI manager
+/// Returns a mutable reference to the global ACPI manager, if initialized.
 pub fn get_manager_mut() -> Option<&'static mut AcpiManager> {
     if ACPI_INITIALIZED.load(core::sync::atomic::Ordering::SeqCst) {
         unsafe {

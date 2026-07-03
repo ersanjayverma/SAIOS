@@ -1,10 +1,19 @@
 use alloc::vec::Vec;
 
+/// Backing storage for a [`Surface`]: either a heap-owned pixel buffer or a
+/// borrowed static slice (e.g. a reserved region used as a scratch buffer).
 enum PixelStorage {
     Owned(Vec<u32>),
     Borrowed(&'static mut [u32]),
 }
 
+/// An off-screen, CPU-side image of `width` x `height` packed 0x00RRGGBB
+/// pixels.
+///
+/// Higher layers draw into a `Surface` and then flush it to a
+/// [`crate::graphics::display::Display`]. Keeping drawing off-screen lets the
+/// renderer batch work and avoids slow read-modify-write traffic to the
+/// hardware framebuffer.
 pub struct Surface {
     width: usize,
     height: usize,
@@ -12,6 +21,8 @@ pub struct Surface {
 }
 
 impl Surface {
+    /// Allocate a heap-backed surface, returning `None` if the pixel buffer
+    /// cannot be reserved.
     pub fn try_new(width: usize, height: usize) -> Option<Self> {
         let len = width.saturating_mul(height);
         let mut pixels = Vec::new();
@@ -26,6 +37,8 @@ impl Surface {
         })
     }
 
+    /// Wrap an externally owned static pixel buffer as a surface, clearing it to
+    /// black. Returns `None` if the slice is too small for the geometry.
     pub fn new_borrowed(width: usize, height: usize, pixels: &'static mut [u32]) -> Option<Self> {
         let len = width.saturating_mul(height);
         if pixels.len() < len {
@@ -43,6 +56,7 @@ impl Surface {
         })
     }
 
+    /// Immutable access to the underlying pixel slice regardless of storage kind.
     fn pixels_slice(&self) -> &[u32] {
         match &self.pixels {
             PixelStorage::Owned(v) => v.as_slice(),
@@ -50,6 +64,7 @@ impl Surface {
         }
     }
 
+    /// Mutable access to the underlying pixel slice regardless of storage kind.
     fn pixels_slice_mut(&mut self) -> &mut [u32] {
         match &mut self.pixels {
             PixelStorage::Owned(v) => v.as_mut_slice(),
@@ -57,26 +72,32 @@ impl Surface {
         }
     }
 
+    /// Width of the surface in pixels.
     pub fn width(&self) -> usize {
         self.width
     }
 
+    /// Height of the surface in pixels.
     pub fn height(&self) -> usize {
         self.height
     }
 
+    /// Immutable view of the raw pixel buffer (row-major, `width * height`).
     pub fn pixels(&self) -> &[u32] {
         self.pixels_slice()
     }
 
+    /// Mutable view of the raw pixel buffer (row-major, `width * height`).
     pub fn pixels_mut(&mut self) -> &mut [u32] {
         self.pixels_slice_mut()
     }
 
+    /// Fill the entire surface with `color`.
     pub fn clear(&mut self, color: u32) {
         self.pixels_slice_mut().fill(color);
     }
 
+    /// Set a single pixel, silently ignoring out-of-bounds coordinates.
     pub fn put_pixel(&mut self, x: usize, y: usize, color: u32) {
         if x >= self.width || y >= self.height {
             return;
@@ -87,6 +108,8 @@ impl Surface {
         self.pixels_slice_mut()[idx] = color;
     }
 
+    /// Fill an axis-aligned rectangle with `color`, clipping to the surface
+    /// bounds. Uses per-row slice fills for speed.
     pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
         if w == 0 || h == 0 {
             return;
@@ -108,6 +131,7 @@ impl Surface {
         }
     }
 
+    /// Draw a line between two points using Bresenham's algorithm.
     pub fn draw_line(&mut self, x0: isize, y0: isize, x1: isize, y1: isize, color: u32) {
         let mut x = x0;
         let mut y = y0;
@@ -138,6 +162,9 @@ impl Surface {
         }
     }
 
+    /// Copy a rectangular block of pixels from one location to another within
+    /// the same surface. A temporary buffer is used so source and destination
+    /// regions may overlap.
     pub fn copy_region(
         &mut self,
         src_x: usize,
@@ -181,6 +208,9 @@ impl Surface {
         }
     }
 
+    /// Scroll the whole surface up by `rows` pixel rows, filling the newly
+    /// exposed rows at the bottom with `fill`. Implemented as a single
+    /// `copy_within` plus a slice fill.
     pub fn scroll_up(&mut self, rows: usize, fill: u32) {
         if rows == 0 || self.width == 0 || self.height == 0 {
             return;
