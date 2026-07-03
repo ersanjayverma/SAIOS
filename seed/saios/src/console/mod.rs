@@ -336,7 +336,7 @@ fn framebuffer_scrollback_to_bottom() {
 }
 
 pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
-    let mut mapped_info = info;
+    let mut mapped_info = FramebufferInfo::empty();
     if info.base != 0 && info.size != 0 {
         let phys_base = info.base;
         let page_base = phys_base & !0xFFFu64;
@@ -349,19 +349,22 @@ pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
             crate::vmm::FLAG_WRITE | crate::vmm::FLAG_DEVICE,
             "framebuffer",
         ) {
+            mapped_info = info;
             mapped_info.base = mapped_base + page_offset as u64;
         }
     }
 
     with_console(|console| {
         console.backend.right_mut().attach(mapped_info);
-        let _ = driver::ensure_driver("framebuffer", "0.1.0", "SAIOS", &["serial"], driver::DriverStatus::Running);
-        let _ = device::ensure_device("fb0", "framebuffer", "display", device::DeviceStatus::Online);
-        if let (Some(columns), Some(rows)) = (
-            console.backend.right_mut().text_columns(),
-            console.backend.right_mut().text_rows(),
-        ) {
-            console.resize(columns, rows);
+        if mapped_info.base != 0 {
+            let _ = driver::ensure_driver("framebuffer", "0.1.0", "SAIOS", &["serial"], driver::DriverStatus::Running);
+            let _ = device::ensure_device("fb0", "framebuffer", "display", device::DeviceStatus::Online);
+            if let (Some(columns), Some(rows)) = (
+                console.backend.right_mut().text_columns(),
+                console.backend.right_mut().text_rows(),
+            ) {
+                console.resize(columns, rows);
+            }
         }
     });
 }

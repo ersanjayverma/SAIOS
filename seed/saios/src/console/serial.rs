@@ -9,7 +9,7 @@ use hal::arch::x86_64::sync::StaticCell;
 
 const COM1_DATA: u16 = 0x3F8;
 const COM1_LINE_STATUS: u16 = COM1_DATA + 5;
-const SERIAL_INPUT_ENABLED: bool = false;
+const SERIAL_INPUT_ENABLED: bool = true;
 const LSR_DATA_READY: u8 = 0x01;
 const LSR_ERROR_MASK: u8 = 0x1E;
 

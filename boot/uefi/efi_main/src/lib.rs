@@ -107,12 +107,14 @@ pub struct Elf64Rela {
     pub r_addend: i64,
 }
 pub fn initialize_boot_info() -> SaiosBootInfo {
+    let framebuffer = graphics::initialize().unwrap_or_else(|_| graphics::FramebufferInfo::empty());
+
     SaiosBootInfo {
         magic: SAIOS_BOOT_MAGIC,
         version: SAIOS_BOOT_VERSION,
         size: core::mem::size_of::<SaiosBootInfo>() as u32,
 
-        framebuffer: graphics::FramebufferInfo::empty(),
+        framebuffer,
         memorymap: memorymap::MemoryMapInfo {
             entries: core::ptr::null(),
             entry_count: 0,

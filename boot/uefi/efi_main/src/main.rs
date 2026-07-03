@@ -3,8 +3,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 use core::arch::asm;
+use core::cell::UnsafeCell;
 use core::time::Duration;
-use uefi::mem::memory_map::MemoryMap;
 use uefi::boot::{AllocateType, EventType, MemoryType, TimerTrigger, Tpl};
 use uefi::println;
 use uefi::proto::loaded_image::LoadedImage;
@@ -12,65 +12,52 @@ use uefi::proto::media::file::{File, FileAttribute, FileMode, FileType};
 use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::*;
 
+fn boot_log(message: &str) {
+    println!("[boot] {}", message);
+}
+
+#[inline(always)]
+fn io_out8(port: u16, value: u8) {
+    unsafe {
+        asm!(
+            "out dx, al",
+            in("dx") port,
+            in("al") value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+}
+
+#[inline(always)]
+fn trace_marker(marker: u8) {
+    // Emit a raw byte to COM1 for handoff-stage tracing.
+    io_out8(0x3F8, marker);
+}
+
+struct ExitMapBuffer(UnsafeCell<[u8; 256 * 1024]>);
+
+unsafe impl Sync for ExitMapBuffer {}
+
+static EXIT_MAP_BUFFER: ExitMapBuffer = ExitMapBuffer(UnsafeCell::new([0u8; 256 * 1024]));
+
 #[entry]
 fn main() -> Status {
     if let Err(e) = uefi::helpers::init() {
         let _ = println!("UEFI init failed: {:?}", e);
         return Status::LOAD_ERROR;
     }
+    boot_log("uefi init ok");
     let boot_info = efi_main::initialize_boot_info();
 
     let seed_path = "\\SAIOS\\seed.elf";
-    let mut loader = match load_seed(seed_path) {
+    let loader = match load_seed(seed_path) {
         Ok(loader) => loader,
         Err(e) => {
             let _ = println!("load_seed failed: {:?}", e.status());
             return e.status();
         }
     };
-    let dynamic =
-        if let Some(segment) = efi_main::find_dynamic_segment(&loader.image.program_headers) {
-            Some(efi_main::parse_dynamic(&loader.image.bytes, segment))
-        } else {
-            None
-        };
-    loader.image.dynamic = dynamic;
-    if let Some(dynamic) = &loader.image.dynamic {
-        println!("Dynamic Section");
-
-        println!("DT_RELA    : {:?}", dynamic.rela);
-        println!("DT_RELASZ  : {:?}", dynamic.rela_size);
-        println!("DT_RELAENT : {:?}", dynamic.rela_entry_size);
-    }
-    let relocations = if let Some(dynamic) = &loader.image.dynamic {
-        if let (Some(rela_offset), Some(rela_size), Some(rela_entry_size)) =
-            (dynamic.rela, dynamic.rela_size, dynamic.rela_entry_size)
-        {
-            let num_relocations = (rela_size / rela_entry_size) as usize;
-            let mut relocations = Vec::with_capacity(num_relocations);
-            for i in 0..num_relocations {
-                let rela_vaddr = rela_offset.saturating_add((i as u64).saturating_mul(rela_entry_size));
-                let Some(offset) = efi_main::virtual_to_file_offset(&loader.image.program_headers, rela_vaddr) else {
-                    break;
-                };
-                if offset + core::mem::size_of::<efi_main::Elf64Rela>() > loader.image.bytes.len() {
-                    break;
-                }
-                let rela: efi_main::Elf64Rela = unsafe {
-                    core::ptr::read_unaligned(
-                        loader.image.bytes[offset..].as_ptr() as *const efi_main::Elf64Rela
-                    )
-                };
-                relocations.push(rela);
-            }
-            relocations
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
-    loader.image.relocations = relocations;
+    boot_log("seed loaded");
     let mut image_start = u64::MAX;
     let mut image_end = 0u64;
     for i in 0..loader.image.elf_header.phnum {
@@ -78,45 +65,15 @@ fn main() -> Status {
         if ph.p_type != efi_main::ProgramHeaderType::Load as u32 {
             continue;
         }
-        println!(
-            "Reading segment {}: offset {:#x}, vaddr {:#x}, filesz {:#x}, memsz {:#x}",
-            i, ph.p_offset, ph.p_vaddr, ph.p_filesz, ph.p_memsz
-        );
         image_start = image_start.min(ph.p_vaddr);
         image_end = image_end.max(ph.p_vaddr + ph.p_memsz);
-        println!(
-            "Segment {}: Image start: {:#x}, Image end: {:#x}, Total size: {:#x}",
-            i,
-            image_start,
-            image_end,
-            image_end - image_start
-        );
     }
-    println!(
-        "Final Image start: {:#x}, Image end: {:#x}, Total size: {:#x}",
-        image_start,
-        image_end,
-        image_end - image_start
-    );
     const PAGE_SIZE: u64 = 4096;
-    println!(
-        "Aligning image start and end to page boundaries (page size: {:#x})",
-        PAGE_SIZE
-    );
     let aligned_start = image_start & !(PAGE_SIZE - 1);
     let aligned_end = (image_end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
     let total_size = aligned_end - aligned_start;
     let pages = (total_size / PAGE_SIZE) as usize;
-    println!(
-        "Aligned start: {:#x}, Aligned end: {:#x}, Total size: {:#x}, Pages: {}",
-        aligned_start, aligned_end, total_size, pages
-    );
-    println!(
-        "Allocating {} pages at aligned start address {:#x}",
-        pages, aligned_start
-    );
-    let mut used_fallback = false;
     let base = match boot::allocate_pages(
         AllocateType::Address(aligned_start),
         MemoryType::LOADER_DATA,
@@ -124,42 +81,20 @@ fn main() -> Status {
     ) {
         Ok(base) => base,
         Err(_) => {
-            if loader.image.elf_header.elf_type != 3 {
-                let _ = println!(
-                    "Kernel fixed-address allocation failed at {:#x}; ELF type={} is not relocatable",
-                    aligned_start,
-                    loader.image.elf_header.elf_type
-                );
-                return Status::OUT_OF_RESOURCES;
-            }
-
             let _ = println!(
-                "Kernel fixed-address allocation failed at {:#x}; retrying with AnyPages for ET_DYN",
+                "Kernel fixed-address allocation failed at {:#x}; static kernel cannot relocate",
                 aligned_start
             );
-            used_fallback = true;
-            match boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages) {
-                Ok(base) => base,
-                Err(e) => {
-                    let _ = println!("Kernel fallback allocation failed: {:?}", e.status());
-                    return e.status();
-                }
-            }
+            return Status::OUT_OF_RESOURCES;
         }
     };
-    println!("Allocated at {:p}", base.as_ptr());
-    println!("Copying segments to allocated memory");
+    boot_log("kernel memory allocated");
     for i in 0..loader.image.elf_header.phnum {
         let ph = &loader.image.program_headers[i as usize];
 
         if ph.p_type != efi_main::ProgramHeaderType::Load as u32 {
             continue;
         }
-
-        println!(
-            "Copying segment {}: offset {:#x}, vaddr {:#x}, filesz {:#x}, memsz {:#x}",
-            i, ph.p_offset, ph.p_vaddr, ph.p_filesz, ph.p_memsz
-        );
         let src = &loader.image.bytes[ph.p_offset as usize..(ph.p_offset + ph.p_filesz) as usize];
 
         let dst = (base.as_ptr() as u64 + (ph.p_vaddr - aligned_start)) as *mut u8;
@@ -174,32 +109,8 @@ fn main() -> Status {
             );
         }
     }
-    println!("All segments copied successfully");
-    if used_fallback {
-        let load_bias = (base.as_ptr() as u64).wrapping_sub(aligned_start);
-        if let Err(e) = efi_main::apply_relocations(load_bias, &loader.image.relocations) {
-            let _ = println!("Fallback relocation failed: {}", e);
-            return Status::LOAD_ERROR;
-        }
-    }
-    println!("All relocations applied successfully");
-    println!("Initializing boot information");
-
-    // Print metadata fields explicitly for validation
-    println!(
-        "Magic Check:   0x{:X} (Expected: 0x{:X})",
-        boot_info.magic,
-        efi_main::SAIOS_BOOT_MAGIC
-    );
-    println!(
-        "Boot Version:  {}.{}",
-        boot_info.version >> 16,
-        boot_info.version & 0xFFFF
-    );
-
-
-    println!("ELF entry = {:#x}", loader.entry_point);
-    println!("Jump to kernel entry point");
+    boot_log("segments copied");
+    boot_log("boot info staging");
     let stack_pages = 16;
 
     let stack = match boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, stack_pages) {
@@ -209,23 +120,42 @@ fn main() -> Status {
             return e.status();
         }
     };
+    boot_log("stack allocated");
 
-    let stack_top = stack.as_ptr() as u64 + stack_pages as u64 * 4096;
+    let stack_base = stack.as_ptr() as u64;
+    let stack_top = stack_base + stack_pages as u64 * 4096;
+    let stack_span = stack_top.wrapping_sub(stack_base);
+    if stack_top <= stack_base || stack_span < 4096 {
+        let _ = println!(
+            "[boot] invalid stack: pages={} base={:#x} top={:#x} span={:#x}",
+            stack_pages,
+            stack_base,
+            stack_top,
+            stack_span
+        );
+        return Status::LOAD_ERROR;
+    }
     // Rust entry points expect call-compatible stack alignment (rsp % 16 == 8).
     let kernel_rsp = stack_top - 8;
 
     let boot_info_pages =
         (core::mem::size_of::<efi_main::SaiosBootInfo>() as u64 + 4095) / 4096;
-    let boot_info_storage = boot::allocate_pages(
+    let boot_info_storage = match boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,
         boot_info_pages as usize,
-    )
-    .expect("Failed to allocate stable boot info storage");
+    ) {
+        Ok(storage) => storage,
+        Err(e) => {
+            let _ = println!("Boot info allocation failed: {:?}", e.status());
+            return e.status();
+        }
+    };
     let boot_info_ptr = boot_info_storage.as_ptr() as *mut efi_main::SaiosBootInfo;
     unsafe {
         boot_info_ptr.write(boot_info.clone());
     }
+    boot_log("boot info copied");
 
     // ── Pre-allocate storage for memory-map entries ──────────────────
     //
@@ -238,46 +168,133 @@ fn main() -> Status {
     let entries_bytes = MAX_ENTRIES * entry_size; // 32 KiB
     let entries_pages = (entries_bytes as u64 + 4095) / 4096;
 
-    let entries_storage = boot::allocate_pages(
+    let entries_storage = match boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,
         entries_pages as usize,
-    )
-    .expect("Failed to allocate stable memory-map storage");
+    ) {
+        Ok(storage) => storage,
+        Err(e) => {
+            let _ = println!("Memory-map storage allocation failed: {:?}", e.status());
+            return e.status();
+        }
+    };
+    boot_log("map storage allocated");
 
-    let pre_exit_memorymap =
-        efi_main::memorymap::initialize().expect("Failed to capture pre-exit memory map");
+    let pre_exit_memorymap = match efi_main::memorymap::initialize() {
+        Ok(memorymap) => memorymap,
+        Err(e) => {
+            let _ = println!("Pre-exit memory map capture failed: {:?}", e.status());
+            return e.status();
+        }
+    };
     unsafe {
         (*boot_info_ptr).memorymap = pre_exit_memorymap;
     }
+    boot_log("pre-exit map captured");
 
-    let entry = loader
-        .entry_point
+    let raw_entry = loader.entry_point;
+    let entry = raw_entry
         .wrapping_add((base.as_ptr() as u64).wrapping_sub(aligned_start));
-    drop(loader);
-    let p = entry as *const u8;
-    println!("===============================================",);
-    // Print the STABLE copy, not the stale local `boot_info`.
-    unsafe {
-        println!("{:#?}", (*boot_info_ptr).memorymap);
-    }
-    println!("==============================================");
-    unsafe {
-        println!(
-            "entry bits {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
-            *p.add(0),
-            *p.add(1),
-            *p.add(2),
-            *p.add(3),
-            *p.add(4),
-            *p.add(5),
-            *p.add(6),
-            *p.add(7),
+    if entry < (base.as_ptr() as u64) || entry >= ((base.as_ptr() as u64) + total_size) {
+        let _ = println!(
+            "[boot] invalid entry: raw={:#x} resolved={:#x} load_range=[{:#x}..{:#x})",
+            raw_entry,
+            entry,
+            base.as_ptr() as u64,
+            (base.as_ptr() as u64) + total_size
         );
+        return Status::LOAD_ERROR;
+    }
+    drop(loader);
+    boot_log("entry resolved");
+    let _ = println!(
+        "[boot] diag image: start={:#x} end={:#x} aligned_start={:#x} aligned_end={:#x} pages={} base={:#x}",
+        image_start,
+        image_end,
+        aligned_start,
+        aligned_end,
+        pages,
+        base.as_ptr() as u64
+    );
+    let _ = println!(
+        "[boot] diag handoff: entry={:#x} rsp={:#x} boot_info={:#x} stack_base={:#x} stack_top={:#x}",
+        entry,
+        kernel_rsp,
+        boot_info_ptr as u64,
+        stack_base,
+        stack_top
+    );
+    let _ = println!(
+        "[boot] diag stack: pages={} span={:#x}",
+        stack_pages,
+        stack_span
+    );
+    let _ = println!(
+        "[boot] diag elf: raw_entry={:#x} aligned_start={:#x} aligned_end={:#x}",
+        raw_entry,
+        aligned_start,
+        aligned_end
+    );
+    let _ = println!(
+        "[boot] diag mmap: pre_exit_entries={} max_entries={} entries_buf={:#x} entries_bytes={}",
+        pre_exit_memorymap.entry_count,
+        MAX_ENTRIES,
+        entries_storage.as_ptr() as u64,
+        entries_bytes
+    );
+
+    boot_log("exit boot services begin");
+    trace_marker(b'A');
+    let st = match table::system_table_raw() {
+        Some(st) => st,
+        None => return Status::ABORTED,
+    };
+    let st = unsafe { st.as_ref() };
+    if st.boot_services.is_null() {
+        return Status::ABORTED;
+    }
+    let bt = unsafe { &*st.boot_services };
+    let image = boot::image_handle().as_ptr();
+
+    let exit_map = unsafe { &mut *EXIT_MAP_BUFFER.0.get() };
+    let mut final_map_size = 0usize;
+    let mut final_desc_size = 0usize;
+    let mut exited = false;
+
+    for _ in 0..2 {
+        let mut map_size = exit_map.len();
+        let mut map_key = 0usize;
+        let mut desc_size = 0usize;
+        let mut desc_version = 0u32;
+
+        let get_map_status = unsafe {
+            (bt.get_memory_map)(
+                &mut map_size,
+                exit_map.as_mut_ptr().cast(),
+                &mut map_key,
+                &mut desc_size,
+                &mut desc_version,
+            )
+        };
+        if !get_map_status.is_success() {
+            return get_map_status;
+        }
+
+        let exit_status = unsafe { (bt.exit_boot_services)(image, map_key) };
+        if exit_status.is_success() {
+            final_map_size = map_size;
+            final_desc_size = desc_size;
+            exited = true;
+            break;
+        }
+    }
+    if !exited || final_desc_size == 0 || final_map_size > exit_map.len() {
+        return Status::ABORTED;
     }
 
-    let final_uefi_map = unsafe { boot::exit_boot_services(None) };
-    let final_entry_count = final_uefi_map.len();
+    trace_marker(b'B');
+    let final_entry_count = final_map_size / final_desc_size;
     if final_entry_count > MAX_ENTRIES {
         loop {
             core::hint::spin_loop();
@@ -286,7 +303,15 @@ fn main() -> Status {
 
     if final_entry_count != 0 {
         let dst = entries_storage.as_ptr() as *mut efi_main::memorymap::MemoryRegion;
-        for (idx, desc) in final_uefi_map.entries().enumerate() {
+        for idx in 0..final_entry_count {
+            let offset = idx * final_desc_size;
+            let desc_ptr = unsafe {
+                exit_map
+                    .as_ptr()
+                    .add(offset)
+                    .cast::<uefi::mem::memory_map::MemoryDescriptor>()
+            };
+            let desc = unsafe { core::ptr::read_unaligned(desc_ptr) };
             let region = efi_main::memorymap::MemoryRegion {
                 base: desc.phys_start,
                 length: desc.page_count * 4096,
@@ -307,14 +332,10 @@ fn main() -> Status {
         }
     }
 
-    let _ = println!(
-        "handoff: entry={:#x} map_entries={} stack={:#x}",
-        entry,
-        unsafe { (*boot_info_ptr).memorymap.entry_count },
-        kernel_rsp,
-    );
+    trace_marker(b'C');
 
     unsafe {
+        trace_marker(b'D');
         asm!(
             "mov rsp, {stack}",
             "jmp {entry}",
@@ -367,34 +388,27 @@ pub struct Loader {
     pub entry_point: u64,
 }
 pub fn load_seed(path: &str) -> uefi::Result<Loader> {
-    println!(" Get LoadedImage protocol");
     let loaded_image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle())
         .map_err(|_| uefi::Error::from(uefi::Status::LOAD_ERROR))?;
 
-    println!("Map the Option into a uefi::Result safely");
     let device = loaded_image
         .device()
         .ok_or(uefi::Error::from(uefi::Status::LOAD_ERROR))?;
 
-    println!("Get SimpleFileSystem protocol");
     let mut fs = boot::open_protocol_exclusive::<SimpleFileSystem>(device)
         .map_err(|_| uefi::Error::from(uefi::Status::LOAD_ERROR))?;
 
-    println!("Open root volume");
     let mut root = fs
         .open_volume()
         .map_err(|_| uefi::Error::from(uefi::Status::LOAD_ERROR))?;
 
-    println!("Convert &str → CString16");
     let cstr_path =
         CString16::try_from(path).map_err(|_| uefi::Error::from(uefi::Status::LOAD_ERROR))?;
 
-    println!("Open file");
     let file = root
         .open(&cstr_path, FileMode::Read, FileAttribute::empty())
         .map_err(|_| uefi::Error::from(uefi::Status::NOT_FOUND))?;
 
-    println!("Match on FileType::Regular");
     let mut regular = match file
         .into_type()
         .map_err(|_| uefi::Error::from(uefi::Status::LOAD_ERROR))?
@@ -402,8 +416,6 @@ pub fn load_seed(path: &str) -> uefi::Result<Loader> {
         FileType::Regular(f) => f,
         _ => return Err(uefi::Error::from(uefi::Status::LOAD_ERROR)),
     };
-
-    println!("Read file into buffer");
 
     let mut buffer = Vec::with_capacity(1024 * 1024);
     let mut chunk = [0u8; 4096];
@@ -420,7 +432,6 @@ pub fn load_seed(path: &str) -> uefi::Result<Loader> {
     if size < core::mem::size_of::<efi_main::Elf64Header>() {
         return Err(uefi::Error::from(uefi::Status::LOAD_ERROR));
     }
-    println!("Parse ELF header");
     drop(regular);
     drop(root);
     drop(fs);

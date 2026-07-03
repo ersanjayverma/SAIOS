@@ -41,10 +41,11 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     hal::arch::x86_64::console::_print(format_args!("kernel: _start enter\n"));
     interrupt::disable();
     let boot_info = unsafe { &*boot_info };
+    let framebuffer_info = boot_info.framebuffer;
     hal::arch::x86_64::console::_print(format_args!(
         "kernel: boot_info map_entries={} fb_base={:#x}\n",
         boot_info.memorymap.entry_count,
-        boot_info.framebuffer.base,
+        framebuffer_info.base,
     ));
     gdt::init();
     idt::init();
@@ -71,15 +72,29 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
 
     heap::init();
     hal::arch::x86_64::console::_print(format_args!("kernel: heap init ok\n"));
+    hal::arch::x86_64::console::_print(format_args!(
+        "kernel: fb info base={:#x} size={} {}x{} stride={} bpp={}\n",
+        framebuffer_info.base,
+        framebuffer_info.size,
+        framebuffer_info.width,
+        framebuffer_info.height,
+        framebuffer_info.stride,
+        framebuffer_info.bpp,
+    ));
     kernel::timeline::init();
     kernel::timeline::mark("Boot");
     kernel::timeline::mark("Memory");
-    // Temporary isolation: keep graphics framebuffer detached until hardware
-    // console rendering is validated on real firmware.
-    // console::attach_framebuffer(boot_info.framebuffer);
+    // Attach framebuffer provided by the bootloader so console output is visible on-screen.
+    hal::arch::x86_64::console::_print(format_args!("kernel: fb attach begin\n"));
+    console::attach_framebuffer(framebuffer_info);
+    hal::arch::x86_64::console::_print(format_args!("kernel: fb attach done\n"));
     driver::console::init();
     kernel::timeline::mark("Heap");
-    // let _ = console::promote_framebuffer_renderer();
+    let fb_ready = console::promote_framebuffer_renderer();
+    hal::arch::x86_64::console::_print(format_args!(
+        "kernel: fb renderer ready={}\n",
+        fb_ready
+    ));
     ksf::bootstrap().expect("KSF bootstrap failed");
     kernel::timeline::mark("Services");
     interrupt::enable();
