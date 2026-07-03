@@ -1,6 +1,7 @@
 use super::backend::ConsoleBackend;
 use alloc::string::String;
 use alloc::vec::Vec;
+use efi_main::graphics::PixelFormat;
 use efi_main::graphics::FramebufferInfo;
 use crate::graphics::display::{Display, FramebufferDisplay};
 use crate::graphics::framebuffer::Color;
@@ -60,6 +61,10 @@ impl FramebufferConsole {
         let width = display.width();
         let height = display.height();
         let stride = display.stride();
+        let pixel_format = display.pixel_format();
+        let pixel_masks = display.pixel_masks();
+        let bytes_per_pixel = display.bytes_per_pixel();
+        let fb_size = display.framebuffer_size();
         let fb = display.framebuffer();
 
         let fg = self.fg.to_u32();
@@ -80,17 +85,100 @@ impl FramebufferConsole {
 
                 let mask = 1u8 << bit;
                 let color = if (row_bits & mask) != 0 { fg } else { bg };
-                let offset = (y * stride + x) * 4;
+                let offset = (y * stride + x) * bytes_per_pixel;
+                if offset + bytes_per_pixel > fb_size {
+                    continue;
+                }
 
                 unsafe {
                     let p = fb.add(offset);
-                    *p = (color & 0xFF) as u8;
-                    *p.add(1) = ((color >> 8) & 0xFF) as u8;
-                    *p.add(2) = ((color >> 16) & 0xFF) as u8;
-                    *p.add(3) = 0;
+                    Self::write_pixel(p, color, pixel_format, pixel_masks, bytes_per_pixel);
                 }
             }
         }
+    }
+
+    #[inline(always)]
+    unsafe fn write_pixel(
+        dst: *mut u8,
+        color: u32,
+        pixel_format: PixelFormat,
+        masks: (u32, u32, u32, u32),
+        bytes_per_pixel: usize,
+    ) {
+        let r = ((color >> 16) & 0xFF) as u8;
+        let g = ((color >> 8) & 0xFF) as u8;
+        let b = (color & 0xFF) as u8;
+
+        match pixel_format {
+            PixelFormat::Rgb => {
+                *dst = r;
+                *dst.add(1) = g;
+                *dst.add(2) = b;
+                // Keep alpha non-zero for framebuffers that use channel 3.
+                if bytes_per_pixel >= 4 {
+                    *dst.add(3) = 0xFF;
+                }
+            }
+            PixelFormat::Bgr => {
+                *dst = b;
+                *dst.add(1) = g;
+                *dst.add(2) = r;
+                // Keep alpha non-zero for framebuffers that use channel 3.
+                if bytes_per_pixel >= 4 {
+                    *dst.add(3) = 0xFF;
+                }
+            }
+            PixelFormat::Bitmask => {
+                let pixel = Self::pack_bitmask(r, g, b, masks);
+                Self::write_packed(dst, pixel, bytes_per_pixel);
+            }
+            PixelFormat::BltOnly => {
+                *dst = b;
+                *dst.add(1) = g;
+                *dst.add(2) = r;
+                if bytes_per_pixel >= 4 {
+                    *dst.add(3) = 0xFF;
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn write_packed(dst: *mut u8, packed: u32, bytes_per_pixel: usize) {
+        let bytes = packed.to_le_bytes();
+        let count = core::cmp::min(bytes_per_pixel, 4);
+        let mut i = 0;
+        while i < count {
+            *dst.add(i) = bytes[i];
+            i += 1;
+        }
+    }
+
+    #[inline(always)]
+    fn pack_channel(value: u8, mask: u32) -> u32 {
+        if mask == 0 {
+            return 0;
+        }
+
+        let shift = mask.trailing_zeros();
+        let width = mask.count_ones();
+        if width == 0 {
+            return 0;
+        }
+
+        let max = (1u32 << width) - 1;
+        let scaled = ((value as u32) * max + 127) / 255;
+        (scaled << shift) & mask
+    }
+
+    #[inline(always)]
+    fn pack_bitmask(r: u8, g: u8, b: u8, masks: (u32, u32, u32, u32)) -> u32 {
+        let (red_mask, green_mask, blue_mask, reserved_mask) = masks;
+        Self::pack_channel(r, red_mask)
+            | Self::pack_channel(g, green_mask)
+            | Self::pack_channel(b, blue_mask)
+            | reserved_mask
     }
 
     fn row_to_scrollback(&self, row: usize, cols: usize) -> String {
@@ -167,21 +255,22 @@ impl FramebufferConsole {
             let width = display.width();
             let height = display.height();
             let stride = display.stride();
+            let pixel_format = display.pixel_format();
+            let pixel_masks = display.pixel_masks();
+            let bytes_per_pixel = display.bytes_per_pixel();
+            let fb_size = display.framebuffer_size();
             let fb = display.framebuffer();
             let color = self.bg.to_u32();
-            let b = (color & 0xFF) as u8;
-            let g = ((color >> 8) & 0xFF) as u8;
-            let r = ((color >> 16) & 0xFF) as u8;
 
             for y in 0..height {
                 for x in 0..width {
-                    let offset = (y * stride + x) * 4;
+                    let offset = (y * stride + x) * bytes_per_pixel;
+                    if offset + bytes_per_pixel > fb_size {
+                        continue;
+                    }
                     unsafe {
                         let p = fb.add(offset);
-                        *p = b;
-                        *p.add(1) = g;
-                        *p.add(2) = r;
-                        *p.add(3) = 0;
+                        Self::write_pixel(p, color, pixel_format, pixel_masks, bytes_per_pixel);
                     }
                 }
             }

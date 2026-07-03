@@ -48,6 +48,20 @@ fn main() -> Status {
     }
     boot_log("uefi init ok");
     let boot_info = efi_main::initialize_boot_info();
+    let _ = println!(
+        "[boot] fb info: base={:#x} size={} {}x{} stride={} bpp={} fmt={:?} masks=({:#x},{:#x},{:#x},{:#x})",
+        boot_info.framebuffer.base,
+        boot_info.framebuffer.size,
+        boot_info.framebuffer.width,
+        boot_info.framebuffer.height,
+        boot_info.framebuffer.stride,
+        boot_info.framebuffer.bpp,
+        boot_info.framebuffer.pixel_format,
+        boot_info.framebuffer.red_mask,
+        boot_info.framebuffer.green_mask,
+        boot_info.framebuffer.blue_mask,
+        boot_info.framebuffer.reserved_mask,
+    );
 
     let seed_path = "\\SAIOS\\seed.elf";
     let loader = match load_seed(seed_path) {

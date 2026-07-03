@@ -69,13 +69,18 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     heap::init();
     hal::arch::x86_64::console::_print(format_args!("kernel: heap init ok\n"));
     hal::arch::x86_64::console::_print(format_args!(
-        "kernel: fb info base={:#x} size={} {}x{} stride={} bpp={}\n",
+        "kernel: fb info base={:#x} size={} {}x{} stride={} bpp={} fmt={:?} masks=({:#x},{:#x},{:#x},{:#x})\n",
         framebuffer_info.base,
         framebuffer_info.size,
         framebuffer_info.width,
         framebuffer_info.height,
         framebuffer_info.stride,
         framebuffer_info.bpp,
+        framebuffer_info.pixel_format,
+        framebuffer_info.red_mask,
+        framebuffer_info.green_mask,
+        framebuffer_info.blue_mask,
+        framebuffer_info.reserved_mask,
     ));
     kernel::timeline::init();
     kernel::timeline::mark("Boot");
