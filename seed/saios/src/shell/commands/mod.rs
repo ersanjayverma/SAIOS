@@ -1,3 +1,4 @@
+pub mod acpi;
 pub mod clear;
 pub mod health;
 pub mod help;
@@ -10,6 +11,7 @@ pub mod version;
 use super::registry::CommandRegistry;
 
 pub fn register(registry: &mut CommandRegistry) {
+    acpi::register(registry);
     clear::register(registry);
     health::register(registry);
     help::register(registry);

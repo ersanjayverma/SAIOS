@@ -1,3 +1,4 @@
+pub mod acpi;
 pub mod device;
 pub mod crt;
 pub mod dynamic_linker;

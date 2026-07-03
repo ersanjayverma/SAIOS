@@ -357,19 +357,22 @@ impl FramebufferConsole {
 
         let clear_start = height - shift_px;
 
-        if bytes_per_pixel == 4 && matches!(pixel_format, PixelFormat::Bgr | PixelFormat::Rgb) {
-            let pack = |color: u32| -> u32 {
-                let r = (color >> 16) & 0xFF;
-                let g = (color >> 8) & 0xFF;
-                let b = color & 0xFF;
-                match pixel_format {
-                    PixelFormat::Bgr => b | (g << 8) | (r << 16) | (0xFF << 24),
-                    PixelFormat::Rgb => r | (g << 8) | (b << 16) | (0xFF << 24),
-                    PixelFormat::Bitmask | PixelFormat::BltOnly => 0,
-                }
-            };
+        let pack_color = |color: u32| -> u32 {
+            let r = ((color >> 16) & 0xFF) as u8;
+            let g = ((color >> 8) & 0xFF) as u8;
+            let b = (color & 0xFF) as u8;
+            match pixel_format {
+                PixelFormat::Bgr => (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | (0xFF << 24),
+                PixelFormat::Rgb => (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | (0xFF << 24),
+                PixelFormat::Bitmask => Self::pack_bitmask(r, g, b, pixel_masks),
+                PixelFormat::BltOnly => (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | (0xFF << 24),
+            }
+        };
 
-            let bg_packed = pack(bg);
+        let bg_packed = pack_color(bg);
+        let bg_bytes = bg_packed.to_le_bytes();
+
+        if bytes_per_pixel == 4 {
             for y in clear_start..height {
                 let row_base = y.saturating_mul(stride);
                 for x in 0..width {
@@ -394,7 +397,11 @@ impl FramebufferConsole {
                 }
                 unsafe {
                     let p = fb.add(offset);
-                    Self::write_pixel(p, bg, pixel_format, pixel_masks, bytes_per_pixel);
+                    let mut i = 0;
+                    while i < bytes_per_pixel {
+                        ptr::write_volatile(p.add(i), bg_bytes[i]);
+                        i += 1;
+                    }
                 }
             }
         }

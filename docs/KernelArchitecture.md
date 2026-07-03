@@ -27,6 +27,7 @@ Frozen kernel core subsystems for SAIOS 0.2:
 - HAL
 - Memory Manager
 - Object Manager
+- ACPI Manager (v0.1 table parsing; AML interpreter deferred)
 - Service Manager
 - Provider Manager
 - Event Bus
@@ -37,12 +38,15 @@ Frozen kernel core subsystems for SAIOS 0.2:
 
 All new subsystem work must integrate through these contracts.
 
+**ACPI Integration**: See ADR-0017 for full architecture decision. ACPI Manager handles hardware discovery (processor enumeration, interrupt routing) and provides foundation for future power management.
+
 ## 1. Managers (Own State)
 
 Managers own resources and enforce lifecycle and integrity for their domain.
 
 Reference manager domains:
 
+- AcpiManager (hardware discovery, processor enumeration, power state info)
 - MemoryManager
 - ObjectManager
 - ProcessManager
@@ -149,6 +153,7 @@ Firmware
 -> SIF
 -> SAIFS
 -> KSF (ServiceManager + service startup)
+-> AcpiManager (hardware discovery)
 -> Scheduler Service Running
 -> Input Service Running
 -> Shell Service Thread Spawned

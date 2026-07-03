@@ -101,6 +101,31 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     ));
     ksf::bootstrap().expect("KSF bootstrap failed");
     kernel::timeline::mark("Services");
+    
+    // Initialize ACPI subsystem
+    if boot_info.acpi.rsdp != 0 {
+        match kernel::acpi::init(boot_info.acpi.rsdp) {
+            Ok(()) => {
+                if let Some(acpi_mgr) = kernel::acpi::get_manager() {
+                    if let Ok((oem_id, revision)) = acpi_mgr.oem_info() {
+                        hal::arch::x86_64::console::_print(format_args!(
+                            "kernel: ACPI v{} initialized, OEM={}, processors={}\n",
+                            revision,
+                            oem_id,
+                            acpi_mgr.processor_count()
+                        ));
+                        kernel::timeline::mark("ACPI");
+                    }
+                }
+            }
+            Err(e) => {
+                hal::arch::x86_64::console::_print(format_args!("kernel: ACPI init failed: {}\n", e));
+            }
+        }
+    } else {
+        hal::arch::x86_64::console::_print(format_args!("kernel: No ACPI RSDP found\n"));
+    }
+    
     interrupt::enable();
     if cfg!(debug_assertions) {
         kernel::testing::boot_self_test();
