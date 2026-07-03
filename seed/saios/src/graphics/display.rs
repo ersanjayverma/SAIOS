@@ -294,7 +294,8 @@ impl FramebufferDisplay {
             unsafe {
                 ptr::copy_nonoverlapping(
                     buf.as_ptr().cast::<u8>(),
-                    self.base.add(dst_offset.saturating_add(written.saturating_mul(4))),
+                    self.base
+                        .add(dst_offset.saturating_add(written.saturating_mul(4))),
                     bytes,
                 );
             }
@@ -445,7 +446,10 @@ impl FramebufferDisplay {
                 }
 
                 unsafe {
-                    self.write_rgb_row(&pixels[src_row_start..src_row_start + copy_pixels], dst_offset);
+                    self.write_rgb_row(
+                        &pixels[src_row_start..src_row_start + copy_pixels],
+                        dst_offset,
+                    );
                 }
             }
             return;
@@ -625,7 +629,10 @@ impl Display for FramebufferDisplay {
                 }
 
                 unsafe {
-                    self.write_rgb_row(&pixels[src_row_start..src_row_start + copy_pixels], dst_offset);
+                    self.write_rgb_row(
+                        &pixels[src_row_start..src_row_start + copy_pixels],
+                        dst_offset,
+                    );
                 }
             }
             return;

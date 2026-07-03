@@ -30,6 +30,8 @@ pub struct FramebufferConsole {
     screen: [[char; MAX_TEXT_COLS]; MAX_TEXT_ROWS],
     view_offset_lines: usize,
     scrollback: Vec<String>,
+    /// Whether the cursor cell is currently inverted (drawn) or normal.
+    cursor_inverted: bool,
 }
 
 impl FramebufferConsole {
@@ -45,6 +47,7 @@ impl FramebufferConsole {
             screen: [[' '; MAX_TEXT_COLS]; MAX_TEXT_ROWS],
             view_offset_lines: 0,
             scrollback: Vec::new(),
+            cursor_inverted: false,
         }
     }
 
@@ -136,8 +139,7 @@ impl FramebufferConsole {
                 if copy_width == 0 {
                     continue;
                 }
-                fb32[dst_start..dst_start + copy_width]
-                    .copy_from_slice(&row_colors[..copy_width]);
+                fb32[dst_start..dst_start + copy_width].copy_from_slice(&row_colors[..copy_width]);
             }
             return;
         }
@@ -503,7 +505,57 @@ impl FramebufferConsole {
 
         self.cursor_x = 0;
         self.cursor_y = 0;
+        self.cursor_inverted = false;
         self.clear();
+    }
+
+    /// Toggle the visible cursor blink state.  Called from the timer tick path.
+    pub fn blink_cursor(&mut self) {
+        let Some((cols, rows)) = self.text_bounds() else {
+            return;
+        };
+        if cols == 0 || rows == 0 {
+            return;
+        }
+
+        let x = self.cursor_x.min(cols.saturating_sub(1));
+        let y = self.cursor_y.min(rows.saturating_sub(1));
+        let ch = self.screen[y][x];
+
+        self.cursor_inverted = !self.cursor_inverted;
+        if self.view_offset_lines == 0 {
+            self.draw_cell_cursor(x, y, ch, self.cursor_inverted);
+        }
+    }
+
+    /// Draw one character cell with optional cursor inversion.  This is a
+    /// specialized variant of [`draw_cell`](Self::draw_cell) that swaps the
+    /// foreground and background colors when `invert` is true.
+    fn draw_cell_cursor(&mut self, cell_x: usize, cell_y: usize, c: char, invert: bool) {
+        let (fg, bg) = if invert {
+            (self.bg.to_u32(), self.fg.to_u32())
+        } else {
+            (self.fg.to_u32(), self.bg.to_u32())
+        };
+
+        // Reuse the fast 32-bit packed path from draw_cell by temporarily
+        // swapping the console colors.  We restore them afterwards so later
+        // output is unaffected.
+        let saved_fg = self.fg;
+        let saved_bg = self.bg;
+        self.fg = Color {
+            r: ((fg >> 16) & 0xFF) as u8,
+            g: ((fg >> 8) & 0xFF) as u8,
+            b: (fg & 0xFF) as u8,
+        };
+        self.bg = Color {
+            r: ((bg >> 16) & 0xFF) as u8,
+            g: ((bg >> 8) & 0xFF) as u8,
+            b: (bg & 0xFF) as u8,
+        };
+        self.draw_cell(cell_x, cell_y, c);
+        self.fg = saved_fg;
+        self.bg = saved_bg;
     }
 
     /// Number of text columns that fit on the attached display, if any.
@@ -519,9 +571,47 @@ impl FramebufferConsole {
             .as_ref()
             .map(|display| display.height() / FONT_HEIGHT)
     }
+
+    /// Number of lines currently stored in scrollback history.
+    pub fn scrollback_lines(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// Current scroll-back view offset in lines (0 means live bottom).
+    pub fn view_offset(&self) -> usize {
+        self.view_offset_lines
+    }
+
+    /// Raw display geometry and pixel layout, if a framebuffer is attached.
+    pub fn display_properties(&self) -> Option<DisplayProperties> {
+        self.display.as_ref().map(|d| DisplayProperties {
+            width: d.width(),
+            height: d.height(),
+            stride: d.stride(),
+            bytes_per_pixel: d.bytes_per_pixel(),
+            pixel_format: d.pixel_format(),
+            framebuffer_size: d.framebuffer_size(),
+        })
+    }
+}
+
+/// Snapshot of the attached framebuffer geometry and pixel layout.
+#[derive(Debug, Copy, Clone)]
+pub struct DisplayProperties {
+    pub width: usize,
+    pub height: usize,
+    pub stride: usize,
+    pub bytes_per_pixel: usize,
+    pub pixel_format: PixelFormat,
+    pub framebuffer_size: usize,
 }
 
 impl ConsoleBackend for FramebufferConsole {
+    /// Advance the visible cursor blink state on timer ticks.
+    fn blink_cursor(&mut self) {
+        FramebufferConsole::blink_cursor(self);
+    }
+
     /// Write one character at the cursor, handling `\n`, `\r` and `\t`
     /// specially, advancing the cursor, and drawing the glyph immediately when
     /// viewing the live output.
@@ -570,11 +660,27 @@ impl ConsoleBackend for FramebufferConsole {
 
         self.cursor_x = 0;
         self.cursor_y = 0;
+        self.cursor_inverted = false;
         self.view_offset_lines = 0;
     }
 
     /// Move the text cursor to cell `(x, y)`.
     fn set_cursor(&mut self, x: usize, y: usize) {
+        // Restore the previous cursor cell to normal before moving.
+        if self.cursor_inverted {
+            if self.view_offset_lines == 0 {
+                let cols = self.text_columns().unwrap_or(0);
+                let rows = self.text_rows().unwrap_or(0);
+                if cols > 0 && rows > 0 {
+                    let old_x = self.cursor_x.min(cols.saturating_sub(1));
+                    let old_y = self.cursor_y.min(rows.saturating_sub(1));
+                    let ch = self.screen[old_y][old_x];
+                    self.draw_cell_cursor(old_x, old_y, ch, false);
+                }
+            }
+            self.cursor_inverted = false;
+        }
+
         self.cursor_x = x;
         self.cursor_y = y;
     }

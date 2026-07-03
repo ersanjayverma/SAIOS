@@ -1,5 +1,7 @@
 pub mod acpi;
 pub mod clear;
+pub mod console;
+pub mod display;
 pub mod health;
 pub mod help;
 pub mod inspect;
@@ -13,6 +15,8 @@ use super::registry::CommandRegistry;
 pub fn register(registry: &mut CommandRegistry) {
     acpi::register(registry);
     clear::register(registry);
+    console::register(registry);
+    display::register(registry);
     health::register(registry);
     help::register(registry);
     inspect::register(registry);

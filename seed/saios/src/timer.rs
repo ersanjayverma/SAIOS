@@ -54,6 +54,7 @@ unsafe extern "C" {
 extern "C" fn saios_timer_tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
     crate::scheduler::on_timer_tick();
+    crate::console::on_timer_tick();
     // PIC EOI for IRQ0.
     outb(0x20, 0x20);
 }

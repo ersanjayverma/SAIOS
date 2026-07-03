@@ -92,6 +92,7 @@ impl<B: ConsoleBackend> Console<B> {
             '\n' => self.newline(),
             '\r' => {
                 self.cursor.x = 0;
+                self.cursor.show();
                 self.backend.set_cursor(self.cursor.x, self.cursor.y);
             }
             '\t' => {
@@ -104,6 +105,7 @@ impl<B: ConsoleBackend> Console<B> {
                 if self.cursor.x > 0 {
                     self.cursor.x -= 1;
                     self.buffer[self.cursor.y][self.cursor.x] = ' ';
+                    self.cursor.show();
                     self.backend.set_cursor(self.cursor.x, self.cursor.y);
                     self.backend.put_char(' ');
                     self.backend.set_cursor(self.cursor.x, self.cursor.y);
@@ -113,6 +115,7 @@ impl<B: ConsoleBackend> Console<B> {
                 self.buffer[self.cursor.y][self.cursor.x] = ch;
                 self.backend.put_char(ch);
                 self.cursor.x += 1;
+                self.cursor.show();
                 if self.cursor.x >= self.cursor.width {
                     self.newline();
                 }
@@ -141,12 +144,14 @@ impl<B: ConsoleBackend> Console<B> {
     fn set_cursor(&mut self, x: usize, y: usize) {
         self.cursor.x = core::cmp::min(x, self.cursor.width.saturating_sub(1));
         self.cursor.y = core::cmp::min(y, self.cursor.height.saturating_sub(1));
+        self.cursor.show();
         self.backend.set_cursor(self.cursor.x, self.cursor.y);
     }
 
     fn move_cursor_left(&mut self) {
         if self.cursor.x > 0 {
             self.cursor.x -= 1;
+            self.cursor.show();
             self.backend.set_cursor(self.cursor.x, self.cursor.y);
         }
     }
@@ -154,6 +159,7 @@ impl<B: ConsoleBackend> Console<B> {
     fn move_cursor_right(&mut self) {
         if self.cursor.x + 1 < self.cursor.width {
             self.cursor.x += 1;
+            self.cursor.show();
             self.backend.set_cursor(self.cursor.x, self.cursor.y);
         }
     }
@@ -169,6 +175,7 @@ impl<B: ConsoleBackend> Console<B> {
             self.cursor.y = self.cursor.height - 1;
         }
 
+        self.cursor.show();
         self.backend.set_cursor(self.cursor.x, self.cursor.y);
     }
 
@@ -284,6 +291,20 @@ fn try_with_console<R>(f: impl FnOnce(&mut Console<DefaultBackend>) -> R) -> Opt
 
 fn emergency_write_str(s: &str) {
     SerialConsole::emergency_write_str(s);
+}
+
+/// Advance the cursor blink state on every timer tick.  This is called from
+/// the timer interrupt handler so the cursor blinks at a regular rate.
+pub fn on_timer_tick() {
+    if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let _changed = try_with_console(|console| {
+        if console.cursor.blink_on() {
+            console.backend.blink_cursor();
+        }
+    });
 }
 
 /// Initializes the serial port, input devices and console state.
@@ -422,6 +443,36 @@ pub fn promote_framebuffer_renderer() -> bool {
     }
 
     try_with_console(|console| console.backend.right_mut().ensure_renderer_ready()).unwrap_or(false)
+}
+
+/// Returns the current console text grid size as `(columns, rows)`.
+pub fn dimensions() -> (usize, usize) {
+    try_with_console(|console| (console.cursor.width, console.cursor.height)).unwrap_or((0, 0))
+}
+
+/// Returns the current cursor position as `(x, y)` text cells.
+pub fn cursor_position() -> (usize, usize) {
+    try_with_console(|console| (console.cursor.x, console.cursor.y)).unwrap_or((0, 0))
+}
+
+/// Returns the number of lines stored in the framebuffer scrollback buffer.
+pub fn scrollback_lines() -> usize {
+    try_with_console(|console| console.backend.right_mut().scrollback_lines()).unwrap_or(0)
+}
+
+/// Returns the current scroll-back view offset in lines (0 means live bottom).
+pub fn scrollback_offset() -> usize {
+    try_with_console(|console| console.backend.right_mut().view_offset()).unwrap_or(0)
+}
+
+/// Returns true when the framebuffer backend is attached and ready.
+pub fn framebuffer_attached() -> bool {
+    try_with_console(|console| console.backend.right_mut().ensure_renderer_ready()).unwrap_or(false)
+}
+
+/// Returns the attached framebuffer properties, if any.
+pub fn framebuffer_properties() -> Option<framebuffer::DisplayProperties> {
+    try_with_console(|console| console.backend.right_mut().display_properties()).flatten()
 }
 
 /// Enables or disables serial output logging.

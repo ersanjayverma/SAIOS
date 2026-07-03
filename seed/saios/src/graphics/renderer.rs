@@ -216,8 +216,7 @@ impl<'a> Renderer<'a> {
             }
 
             let row_start = (y + row_idx) * surface_width + x;
-            pixels[row_start..row_start + draw_width]
-                .copy_from_slice(&row_colors[..draw_width]);
+            pixels[row_start..row_start + draw_width].copy_from_slice(&row_colors[..draw_width]);
         }
     }
 

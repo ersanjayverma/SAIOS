@@ -165,9 +165,15 @@ impl Surface {
         if y0 == y1 && y0 >= 0 && (y0 as usize) < self.height {
             let y = y0 as usize;
             let (x_start, x_end) = if x0 <= x1 {
-                (x0.max(0) as usize, (x1 + 1).min(self.width as isize).max(0) as usize)
+                (
+                    x0.max(0) as usize,
+                    (x1 + 1).min(self.width as isize).max(0) as usize,
+                )
             } else {
-                (x1.max(0) as usize, (x0 + 1).min(self.width as isize).max(0) as usize)
+                (
+                    x1.max(0) as usize,
+                    (x0 + 1).min(self.width as isize).max(0) as usize,
+                )
             };
             if let Some(row) = self.row_mut(y) {
                 row[x_start..x_end].fill(color);
@@ -179,9 +185,15 @@ impl Surface {
         if x0 == x1 && x0 >= 0 && (x0 as usize) < self.width {
             let x = x0 as usize;
             let (y_start, y_end) = if y0 <= y1 {
-                (y0.max(0) as usize, (y1 + 1).min(self.height as isize).max(0) as usize)
+                (
+                    y0.max(0) as usize,
+                    (y1 + 1).min(self.height as isize).max(0) as usize,
+                )
             } else {
-                (y1.max(0) as usize, (y0 + 1).min(self.height as isize).max(0) as usize)
+                (
+                    y1.max(0) as usize,
+                    (y0 + 1).min(self.height as isize).max(0) as usize,
+                )
             };
             let width = self.width;
             let pixels = self.pixels_slice_mut();

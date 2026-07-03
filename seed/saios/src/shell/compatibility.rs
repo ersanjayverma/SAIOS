@@ -8,6 +8,7 @@ use crate::saifs;
 use crate::shell::command::{ShellResult, StaticCommand};
 use crate::shell::registry::CommandRegistry;
 use crate::shell::session::CommandContext;
+use crate::vfs;
 
 pub fn register(registry: &mut CommandRegistry) {
     registry.register(Box::new(StaticCommand {
@@ -44,6 +45,16 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "rm",
         description: "Compatibility: remove object/file",
         handler: cmd_rm,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "cp",
+        description: "Compatibility: copy file",
+        handler: cmd_cp,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "mv",
+        description: "Compatibility: move/rename file",
+        handler: cmd_mv,
     }));
 }
 
@@ -100,6 +111,21 @@ fn cmd_cat(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 fn cmd_rm(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let path = resolve_relative_path(args.first().copied().ok_or("rm: missing path")?);
     saifs::remove(path.as_str()).map_err(|_| "rm failed")
+}
+
+fn cmd_cp(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let src = resolve_relative_path(args.first().copied().ok_or("cp: missing source")?);
+    let dst = resolve_relative_path(args.get(1).copied().ok_or("cp: missing destination")?);
+
+    let data = vfs::read_path(src.as_str()).map_err(|_| "cp: read failed")?;
+    vfs::write_path(dst.as_str(), data.as_slice()).map_err(|_| "cp: write failed")?;
+    Ok(())
+}
+
+fn cmd_mv(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let src = resolve_relative_path(args.first().copied().ok_or("mv: missing source")?);
+    let dst = resolve_relative_path(args.get(1).copied().ok_or("mv: missing destination")?);
+    vfs::rename(src.as_str(), dst.as_str()).map_err(|_| "mv failed")
 }
 
 fn resolve_relative_path(path: &str) -> String {

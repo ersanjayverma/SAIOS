@@ -6,6 +6,11 @@ pub trait ConsoleBackend {
     fn scroll_up(&mut self, _rows: usize) -> bool {
         false
     }
+
+    /// Advance the visible cursor blink state.  Called from the timer tick
+    /// path.  The default implementation is a no-op for backends that do not
+    /// implement a visible cursor.
+    fn blink_cursor(&mut self) {}
 }
 
 pub struct MirrorConsole<A, B> {
@@ -47,5 +52,10 @@ where
         let left_ok = self.left.scroll_up(rows);
         let right_ok = self.right.scroll_up(rows);
         left_ok && right_ok
+    }
+
+    fn blink_cursor(&mut self) {
+        self.left.blink_cursor();
+        self.right.blink_cursor();
     }
 }
