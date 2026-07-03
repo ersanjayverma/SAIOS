@@ -528,10 +528,19 @@ impl ObjectManager {
             return;
         }
 
+        crate::console::println!("[BOOTCHK] object.provider.init {}", name.as_str());
         provider.initialize();
+        crate::console::println!("[BOOTCHK] object.provider.init ok {}", name.as_str());
+        crate::console::println!("[BOOTCHK] object.provider.enumerate {}", name.as_str());
         let objects = provider.enumerate();
+        crate::console::println!(
+            "[BOOTCHK] object.provider.enumerate ok {} count={}",
+            name.as_str(),
+            objects.len()
+        );
 
         self.register_provider_objects(id, &name, objects);
+        crate::console::println!("[BOOTCHK] object.provider.register ok {}", name.as_str());
 
         self.providers.push(ProviderInfo {
             id,
@@ -817,9 +826,14 @@ pub fn init() {
             return;
         }
 
+        crate::console::println!("[BOOTCHK] object.seed.bootstrap");
         manager.seed_bootstrap_objects();
+        crate::console::println!("[BOOTCHK] object.seed.bootstrap ok");
+        crate::console::println!("[BOOTCHK] object.seed.runtime");
         manager.seed_runtime_objects();
+        crate::console::println!("[BOOTCHK] object.seed.runtime ok");
         manager.initialized = true;
+        crate::console::println!("[BOOTCHK] object.init ok");
     });
 }
 

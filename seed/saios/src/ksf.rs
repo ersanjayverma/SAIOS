@@ -151,14 +151,17 @@ impl ServiceManager {
     fn init_at(&mut self, idx: usize) -> Result<(), &'static str> {
         match self.states[idx] {
             ServiceState::Registered | ServiceState::Stopped => {
+                crate::console::println!("[BOOTCHK] init {}", self.services[idx].name());
                 self.states[idx] = ServiceState::Initializing;
                 match self.services[idx].initialize() {
                     Ok(()) => {
                         self.states[idx] = ServiceState::Ready;
+                        crate::console::println!("[BOOTCHK] init ok {}", self.services[idx].name());
                         Ok(())
                     }
                     Err(e) => {
                         self.states[idx] = ServiceState::Failed;
+                        crate::console::println!("[BOOTCHK] init fail {}: {}", self.services[idx].name(), e);
                         Err(e)
                     }
                 }
@@ -183,14 +186,18 @@ impl ServiceManager {
 
         self.init_at(idx)?;
 
+        crate::console::println!("[BOOTCHK] start {}", self.services[idx].name());
+
         match self.services[idx].start() {
             Ok(()) => {
                 self.states[idx] = ServiceState::Running;
                 crate::kernel::timeline::mark_service(self.services[idx].name());
+                crate::console::println!("[BOOTCHK] start ok {}", self.services[idx].name());
                 Ok(())
             }
             Err(e) => {
                 self.states[idx] = ServiceState::Failed;
+                crate::console::println!("[BOOTCHK] start fail {}: {}", self.services[idx].name(), e);
                 Err(e)
             }
         }

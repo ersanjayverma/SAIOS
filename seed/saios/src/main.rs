@@ -35,14 +35,28 @@ pub mod timer;
 pub mod vfs;
 pub mod vmm;
 use efi_main::SaiosBootInfo;
+use graphics::display::FramebufferDisplay;
 use hal::arch::paging;
 use hal::arch::x86_64::{gdt, idt, interrupt};
 use seed::Seed;
 
 const KERNEL_SERIAL_LOGGING_ENABLED: bool = false;
 
+const STAGE_KERNEL_ENTRY: u32 = 0x0030_0000;
+const STAGE_MEMORY_READY: u32 = 0x0030_1800;
+const STAGE_HEAP_READY: u32 = 0x0030_3030;
+const STAGE_FB_ATTACHED: u32 = 0x0000_3040;
+const STAGE_KSF_READY: u32 = 0x0000_2040;
+const STAGE_BOOT_READY: u32 = 0x0000_0030;
+
 #[global_allocator]
 static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
+
+fn mark_boot_stage(framebuffer_info: efi_main::graphics::FramebufferInfo, color: u32) {
+    if let Some(mut display) = FramebufferDisplay::from_info(framebuffer_info) {
+        display.clear_color(color);
+    }
+}
 
 /// # Safety
 ///
@@ -56,6 +70,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     interrupt::disable();
     let boot_info = unsafe { &*boot_info };
     let framebuffer_info = boot_info.framebuffer;
+    mark_boot_stage(framebuffer_info, STAGE_KERNEL_ENTRY);
     hal::arch::x86_64::console::_print(format_args!(
         "kernel: boot_info map_entries={} fb_base={:#x}\n",
         boot_info.memorymap.entry_count, framebuffer_info.base,
@@ -72,6 +87,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     // Initialize PMM with the boot memory map.
     pmm::init(_entries_slice);
     hal::arch::x86_64::console::_print(format_args!("kernel: pmm init ok\n"));
+    mark_boot_stage(framebuffer_info, STAGE_MEMORY_READY);
 
     // Use the active CR3 root as VMM root; do not dereference raw physical pointers here.
     let pml4_phys = paging::read_cr3() & 0x000F_FFFF_FFFF_F000;
@@ -81,6 +97,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
 
     heap::init();
     hal::arch::x86_64::console::_print(format_args!("kernel: heap init ok\n"));
+    mark_boot_stage(framebuffer_info, STAGE_HEAP_READY);
     hal::arch::x86_64::console::_print(format_args!(
         "kernel: fb info base={:#x} size={} {}x{} stride={} bpp={} fmt={:?} masks=({:#x},{:#x},{:#x},{:#x})\n",
         framebuffer_info.base,
@@ -107,7 +124,28 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     kernel::timeline::mark("Heap");
     let fb_ready = console::promote_framebuffer_renderer();
     hal::arch::x86_64::console::_print(format_args!("kernel: fb renderer ready={}\n", fb_ready));
+    if fb_ready {
+        mark_boot_stage(framebuffer_info, STAGE_FB_ATTACHED);
+    }
+    if let Some(props) = console::framebuffer_properties() {
+        hal::arch::x86_64::console::_print(format_args!(
+            "kernel: fb props {}x{} stride={} bpp={} fmt={:?} size={}\n",
+            props.width,
+            props.height,
+            props.stride,
+            props.bytes_per_pixel,
+            props.pixel_format,
+            props.framebuffer_size,
+        ));
+    } else {
+        hal::arch::x86_64::console::_print(format_args!("kernel: fb props unavailable\n"));
+    }
+    if fb_ready {
+        console::println!("SAIOS kernel framebuffer online");
+        console::println!("Starting kernel services...");
+    }
     ksf::bootstrap().expect("KSF bootstrap failed");
+    mark_boot_stage(framebuffer_info, STAGE_KSF_READY);
     kernel::timeline::mark("Services");
 
     // Initialize ACPI subsystem
@@ -144,6 +182,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
 
     let seed = Seed::init(boot_info as *const SaiosBootInfo);
     kernel::timeline::mark("Ready");
+    mark_boot_stage(framebuffer_info, STAGE_BOOT_READY);
     seed.run()
 }
 

@@ -19,6 +19,7 @@ use crate::pci;
 const MBR_SECTOR: usize = 512;
 const FAT_STORE_MAGIC: &[u8; 8] = b"SAFAT32\0";
 const FAT_STORE_VERSION: u32 = 1;
+const SYNTHETIC_DISK_SECTORS: u64 = 4_096;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum FilesystemKind {
@@ -888,7 +889,9 @@ fn discover_disks_from_pci(state: &mut StorageState) {
                 "{} pci {:02x}:{:02x}.{}",
                 controller, dev.bus, dev.device, dev.function
             ),
-            block: RamBlockDevice::new(262_144, 512),
+            // Early boot only needs a tiny synthetic backing store so storage
+            // enumeration does not allocate hundreds of MiB on real hardware.
+            block: RamBlockDevice::new(SYNTHETIC_DISK_SECTORS, 512),
             partitions: Vec::new(),
         };
         detect_partitions_for_disk(&mut disk);
