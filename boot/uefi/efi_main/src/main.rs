@@ -3,8 +3,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::cell::UnsafeCell;
 use core::time::Duration;
+use uefi::mem::memory_map::MemoryMap;
 use uefi::boot::{AllocateType, MemoryType};
 use uefi::println;
 use uefi::proto::loaded_image::LoadedImage;
@@ -33,12 +33,6 @@ fn trace_marker(marker: u8) {
     // Emit a raw byte to COM1 for handoff-stage tracing.
     io_out8(0x3F8, marker);
 }
-
-struct ExitMapBuffer(UnsafeCell<[u8; 256 * 1024]>);
-
-unsafe impl Sync for ExitMapBuffer {}
-
-static EXIT_MAP_BUFFER: ExitMapBuffer = ExitMapBuffer(UnsafeCell::new([0u8; 256 * 1024]));
 
 #[entry]
 fn main() -> Status {
@@ -228,54 +222,11 @@ fn main() -> Status {
     boot::stall(Duration::from_secs(5));
     boot_log("exit boot services begin");
 
-    let st = match table::system_table_raw() {
-        Some(st) => st,
-        None => return Status::ABORTED,
-    };
-    let st = unsafe { st.as_ref() };
-    if st.boot_services.is_null() {
-        return Status::ABORTED;
-    }
-    let bt = unsafe { &*st.boot_services };
-    let image = boot::image_handle().as_ptr();
+    trace_marker(b'1');
+    let final_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
+    trace_marker(b'5');
 
-    let exit_map = unsafe { &mut *EXIT_MAP_BUFFER.0.get() };
-    let mut final_map_size = 0usize;
-    let mut final_desc_size = 0usize;
-    let mut exited = false;
-
-    for _ in 0..2 {
-        let mut map_size = exit_map.len();
-        let mut map_key = 0usize;
-        let mut desc_size = 0usize;
-        let mut desc_version = 0u32;
-
-        let get_map_status = unsafe {
-            (bt.get_memory_map)(
-                &mut map_size,
-                exit_map.as_mut_ptr().cast(),
-                &mut map_key,
-                &mut desc_size,
-                &mut desc_version,
-            )
-        };
-        if !get_map_status.is_success() {
-            return get_map_status;
-        }
-
-        let exit_status = unsafe { (bt.exit_boot_services)(image, map_key) };
-        if exit_status.is_success() {
-            final_map_size = map_size;
-            final_desc_size = desc_size;
-            exited = true;
-            break;
-        }
-    }
-    if !exited || final_desc_size == 0 || final_map_size > exit_map.len() {
-        return Status::ABORTED;
-    }
-
-    let final_entry_count = final_map_size / final_desc_size;
+    let final_entry_count = final_map.len();
     if final_entry_count > MAX_ENTRIES {
         loop {
             core::hint::spin_loop();
@@ -284,15 +235,7 @@ fn main() -> Status {
 
     if final_entry_count != 0 {
         let dst = entries_storage.as_ptr() as *mut efi_main::memorymap::MemoryRegion;
-        for idx in 0..final_entry_count {
-            let offset = idx * final_desc_size;
-            let desc_ptr = unsafe {
-                exit_map
-                    .as_ptr()
-                    .add(offset)
-                    .cast::<uefi::mem::memory_map::MemoryDescriptor>()
-            };
-            let desc = unsafe { core::ptr::read_unaligned(desc_ptr) };
+        for (idx, desc) in final_map.entries().enumerate() {
             let region = efi_main::memorymap::MemoryRegion {
                 base: desc.phys_start,
                 length: desc.page_count * 4096,
@@ -316,6 +259,8 @@ fn main() -> Status {
     unsafe {
         trace_marker(b'D');
         asm!(
+            "cli",
+            "cld",
             "mov rsp, {stack}",
             "jmp {entry}",
             stack = in(reg) kernel_rsp,

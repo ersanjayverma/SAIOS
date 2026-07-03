@@ -42,13 +42,27 @@ use seed::Seed;
 
 const KERNEL_SERIAL_LOGGING_ENABLED: bool = false;
 const BOOT_STAGE_COLOR_DIAGNOSTICS: bool = false;
+const LATE_MICROCODE_PROBE_ENABLED: bool = true;
 
-const STAGE_KERNEL_ENTRY: u32 = 0x0030_0000;
-const STAGE_MEMORY_READY: u32 = 0x0030_1800;
-const STAGE_HEAP_READY: u32 = 0x0030_3030;
-const STAGE_FB_ATTACHED: u32 = 0x0000_3040;
-const STAGE_KSF_READY: u32 = 0x0000_2040;
-const STAGE_BOOT_READY: u32 = 0x0000_0030;
+const STAGE_KERNEL_ENTRY: u32 = 0x00FF_0000;
+const STAGE_BOOTINFO_OK: u32 = 0x00FF_4000;
+const STAGE_GDT_OK: u32 = 0x00FF_A000;
+const STAGE_IDT_OK: u32 = 0x00FF_FF00;
+const STAGE_MICROCODE_OK: u32 = 0x0000_FFFF;
+const STAGE_MAP_SLICE_OK: u32 = 0x00FF_00FF;
+const STAGE_PMM_OK: u32 = 0x0000_FF00;
+const STAGE_VMM_OK: u32 = 0x0000_80FF;
+const STAGE_MEMORY_READY: u32 = 0x0000_FF00;
+const STAGE_HEAP_READY: u32 = 0x0000_00FF;
+const STAGE_FB_ATTACHED: u32 = 0x00FF_FF00;
+const STAGE_KSF_READY: u32 = 0x0000_FFFF;
+const STAGE_BOOT_READY: u32 = 0x00FF_FFFF;
+
+#[inline(always)]
+fn kernel_trace_byte(marker: u8) {
+    // Raw COM1 marker that works even before higher-level console setup.
+    hal::arch::x86_64::io::outb(0x3F8, marker);
+}
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
@@ -90,9 +104,13 @@ fn detect_microcode_revision() -> Result<u32, &'static str> {
 /// with interrupts in a defined state.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
+    // Bring up UART immediately so post-ExitBootServices progress is always visible.
+    hal::arch::x86_64::console::init_serial();
+    kernel_trace_byte(b'K');
     hal::arch::x86_64::console::set_output_enabled(KERNEL_SERIAL_LOGGING_ENABLED);
     hal::arch::x86_64::console::_print(format_args!("kernel: _start enter\n"));
     interrupt::disable();
+    kernel_trace_byte(b'0');
     let boot_info = unsafe { &*boot_info };
     let framebuffer_info = boot_info.framebuffer;
     mark_boot_stage(framebuffer_info, STAGE_KERNEL_ENTRY);
@@ -100,27 +118,22 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
         "kernel: boot_info map_entries={} fb_base={:#x}\n",
         boot_info.memorymap.entry_count, framebuffer_info.base,
     ));
+    mark_boot_stage(framebuffer_info, STAGE_BOOTINFO_OK);
     gdt::init();
+    mark_boot_stage(framebuffer_info, STAGE_GDT_OK);
     idt::init();
+    mark_boot_stage(framebuffer_info, STAGE_IDT_OK);
     hal::arch::x86_64::console::_print(format_args!("kernel: gdt+idt ok\n"));
-    match detect_microcode_revision() {
-        Ok(revision) => hal::arch::x86_64::console::_print(format_args!(
-            "kernel: cpu microcode revision={:#x}\n",
-            revision
-        )),
-        Err(reason) => hal::arch::x86_64::console::_print(format_args!(
-            "kernel: cpu microcode revision unavailable ({})\n",
-            reason
-        )),
-    }
 
     // Convert the raw pointer and count into a temporary Rust slice
     let _entries_slice = unsafe {
         core::slice::from_raw_parts(boot_info.memorymap.entries, boot_info.memorymap.entry_count)
     };
+    mark_boot_stage(framebuffer_info, STAGE_MAP_SLICE_OK);
     hal::arch::x86_64::console::_print(format_args!("kernel: memory slice ok\n"));
     // Initialize PMM with the boot memory map.
     pmm::init(_entries_slice);
+    mark_boot_stage(framebuffer_info, STAGE_PMM_OK);
     hal::arch::x86_64::console::_print(format_args!("kernel: pmm init ok\n"));
     mark_boot_stage(framebuffer_info, STAGE_MEMORY_READY);
 
@@ -128,6 +141,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     let pml4_phys = paging::read_cr3() & 0x000F_FFFF_FFFF_F000;
 
     vmm::init(pml4_phys).expect("VMM: failed to initialize kernel virtual memory manager");
+    mark_boot_stage(framebuffer_info, STAGE_VMM_OK);
     hal::arch::x86_64::console::_print(format_args!("kernel: vmm init ok\n"));
 
     heap::init();
@@ -182,6 +196,20 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     ksf::bootstrap().expect("KSF bootstrap failed");
     mark_boot_stage(framebuffer_info, STAGE_KSF_READY);
     kernel::timeline::mark("Services");
+
+    if LATE_MICROCODE_PROBE_ENABLED {
+        match detect_microcode_revision() {
+            Ok(revision) => hal::arch::x86_64::console::_print(format_args!(
+                "kernel: cpu microcode revision={:#x}\n",
+                revision
+            )),
+            Err(reason) => hal::arch::x86_64::console::_print(format_args!(
+                "kernel: cpu microcode revision unavailable ({})\n",
+                reason
+            )),
+        }
+        mark_boot_stage(framebuffer_info, STAGE_MICROCODE_OK);
+    }
 
     // Initialize ACPI subsystem
     if boot_info.acpi.rsdp != 0 {
