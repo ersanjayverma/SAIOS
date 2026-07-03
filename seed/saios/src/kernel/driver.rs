@@ -166,10 +166,12 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
         pci::init();
         Ok(())
     } else if name.eq_ignore_ascii_case("network") {
+        crate::driver::network::init();
         crate::driver::loopback::init();
         crate::driver::ethernet::init();
         crate::driver::wifi::init();
         crate::driver::dns::init();
+        let _ = crate::driver::network::bind_nic();
         let _ = device::ensure_device(
             "lo",
             "loopback",
@@ -188,6 +190,7 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
         Ok(())
     } else if name.eq_ignore_ascii_case("ethernet") {
         crate::driver::ethernet::rescan();
+        let _ = crate::driver::network::bind_nic();
         let interfaces = crate::driver::ethernet::interfaces();
         for iface in interfaces {
             let _ = device::ensure_device(
@@ -204,6 +207,7 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
         Ok(())
     } else if name.eq_ignore_ascii_case("wifi") {
         crate::driver::wifi::rescan();
+        let _ = crate::driver::network::bind_nic();
         let interfaces = crate::driver::wifi::interfaces();
         for iface in interfaces {
             let _ = device::ensure_device(
@@ -220,6 +224,7 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
         Ok(())
     } else if name.eq_ignore_ascii_case("dhcp") {
         crate::driver::dhcp::renew_all();
+        let _ = crate::driver::network::apply_dhcp();
         Ok(())
     } else if name.eq_ignore_ascii_case("dns") {
         crate::driver::dns::init();

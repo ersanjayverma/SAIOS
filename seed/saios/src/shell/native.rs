@@ -1,8 +1,11 @@
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::console;
+use crate::driver::dhcp;
+use crate::driver::network;
 use crate::driver::storage as disk;
 use crate::heap;
 use crate::kernel::crt;
@@ -404,6 +407,26 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "pci",
         description: "List PCI devices",
         handler: cmd_pci,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "net",
+        description: "Network stack control and status",
+        handler: cmd_net,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "dhcp",
+        description: "Renew DHCP lease and show IPv4 config",
+        handler: cmd_dhcp,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "ping",
+        description: "Send IPv4 ICMP echo requests",
+        handler: cmd_ping,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "wget",
+        description: "HTTP download to local filesystem",
+        handler: cmd_wget,
     }));
     registry.register(Box::new(StaticCommand {
         name: "shutdown",
@@ -1989,6 +2012,180 @@ fn cmd_pci(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
             pci::class_name(dev.class)
         );
     }
+    Ok(())
+}
+
+fn cmd_net(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let action = args.first().copied().unwrap_or("status");
+
+    match action {
+        "up" => {
+            driver::start("network")?;
+            driver::start("loopback")?;
+            driver::start("ethernet")?;
+            driver::start("wifi")?;
+            driver::start("dhcp")?;
+            driver::start("dns")?;
+            let _ = network::bind_nic();
+            let _ = network::apply_dhcp();
+            console::println!("network: up");
+            cmd_net(_ctx, &["status"])
+        }
+        "status" | "st" => {
+            let st = network::status();
+            console::println!("boot->pci.nic.detected={}", st.pci_nic_detected);
+            console::println!("pci->driver.bind={}", st.driver_bound);
+            console::println!("driver->rx.tx={}", st.rx_tx_ready);
+            console::println!("rx.tx->arp={}", st.arp_ready);
+            console::println!("arp->ipv4={}", st.ipv4_ready);
+            console::println!("ipv4->udp={}", st.udp_ready);
+            console::println!("udp->dhcp={}", st.dhcp_ready);
+            console::println!("dhcp->tcp={}", st.tcp_ready);
+            console::println!("tcp->http={}", st.http_ready);
+            console::println!("counters tx={} rx={}", st.tx_packets, st.rx_packets);
+            if let Some(nic) = st.nic {
+                console::println!(
+                    "nic iface={} kind={} backing={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    nic.interface,
+                    nic.kind,
+                    nic.backing,
+                    nic.mac[0],
+                    nic.mac[1],
+                    nic.mac[2],
+                    nic.mac[3],
+                    nic.mac[4],
+                    nic.mac[5]
+                );
+            } else {
+                console::println!("nic: none");
+            }
+            if let Some(ipv4) = st.ipv4 {
+                console::println!(
+                    "ipv4 addr={} mask={} gw={} dns={}",
+                    ipv4.address,
+                    ipv4.subnet_mask,
+                    ipv4.gateway,
+                    ipv4.dns_server
+                );
+            } else {
+                console::println!("ipv4: none");
+            }
+            Ok(())
+        }
+        "reset" => {
+            driver::reload("network")?;
+            driver::reload("ethernet")?;
+            driver::reload("wifi")?;
+            driver::reload("dhcp")?;
+            let _ = network::bind_nic();
+            let _ = network::apply_dhcp();
+            console::println!("network: reset complete");
+            Ok(())
+        }
+        _ => Err("net: expected up|status|reset"),
+    }
+}
+
+fn cmd_dhcp(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    driver::start("dhcp")?;
+    let cfg = network::apply_dhcp()?;
+    console::println!(
+        "dhcp: ipv4={} mask={} gw={} dns={}",
+        cfg.address,
+        cfg.subnet_mask,
+        cfg.gateway,
+        cfg.dns_server
+    );
+
+    for lease in dhcp::leases() {
+        console::println!(
+            "lease iface={} ip={} lease={}s",
+            lease.interface,
+            lease.address,
+            lease.lease_seconds
+        );
+    }
+    Ok(())
+}
+
+fn cmd_ping(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let ip = args.first().copied().ok_or("ping: missing IPv4 target")?;
+    let count = args
+        .get(1)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4)
+        .clamp(1, 16);
+
+    if network::status().ipv4_ready {
+        // Keep existing state if already configured.
+    } else {
+        let _ = network::bind_nic();
+        let _ = network::apply_dhcp();
+    }
+
+    let mut success = 0usize;
+    for seq in 0..count {
+        match network::ping_ipv4(ip) {
+            Ok(rtt) => {
+                success += 1;
+                console::println!(
+                    "{} bytes from {}: icmp_seq={} ttl=64 time={}ms",
+                    64,
+                    ip,
+                    seq,
+                    rtt
+                );
+            }
+            Err(e) => {
+                console::println!("ping: seq={} error={}", seq, e);
+            }
+        }
+    }
+
+    console::println!(
+        "ping stats: tx={} rx={} loss={}%%",
+        count,
+        success,
+        ((count.saturating_sub(success)) * 100) / count
+    );
+    Ok(())
+}
+
+fn default_download_path(url: &str) -> String {
+    if let Some((_, tail)) = url.rsplit_once('/')
+        && !tail.is_empty()
+    {
+        return if tail.starts_with('/') {
+            tail.to_string()
+        } else {
+            format!("/tmp/{}", tail)
+        };
+    }
+    "/tmp/download.bin".to_string()
+}
+
+fn cmd_wget(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let url = args.first().copied().ok_or("wget: missing URL")?;
+    let out = args
+        .get(1)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| default_download_path(url));
+
+    if network::status().ipv4_ready {
+        // Keep existing lease.
+    } else {
+        let _ = network::bind_nic();
+        let _ = network::apply_dhcp();
+    }
+
+    let result = network::http_download(url, out.as_str())?;
+    console::println!(
+        "wget: status={} bytes={} saved={} url={}",
+        result.status_code,
+        result.size,
+        result.path,
+        url
+    );
     Ok(())
 }
 
