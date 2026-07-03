@@ -1,6 +1,5 @@
 use uefi::Identify;
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, SearchType};
-use uefi::println;
 use uefi::proto::console::gop::GraphicsOutput;
 use uefi::proto::console::gop::PixelFormat as UefiPixelFormat;
 
@@ -79,14 +78,11 @@ impl FramebufferInfo {
     }
 }
 pub fn initialize() -> uefi::Result<FramebufferInfo> {
-    let _ = println!("[boot] gop: locate handles");
     let handles = boot::locate_handle_buffer(SearchType::ByProtocol(&GraphicsOutput::GUID))?;
-    let _ = println!("[boot] gop: handles={}", handles.len());
     let handle = *handles
         .first()
         .ok_or(uefi::Status::NOT_FOUND)?;
 
-    let _ = println!("[boot] gop: open protocol get-protocol");
     let mut gop = unsafe {
         boot::open_protocol::<GraphicsOutput>(
             OpenProtocolParams {
@@ -98,21 +94,11 @@ pub fn initialize() -> uefi::Result<FramebufferInfo> {
         )?
     };
 
-    let _ = println!("[boot] gop: query current mode");
     let mode = gop.current_mode_info();
-    let _ = println!(
-        "[boot] gop: mode {}x{} stride={} fmt={:?}",
-        mode.resolution().0,
-        mode.resolution().1,
-        mode.stride(),
-        mode.pixel_format()
-    );
     if mode.pixel_format() == UefiPixelFormat::BltOnly {
         return Err(uefi::Status::UNSUPPORTED.into());
     }
-    let _ = println!("[boot] gop: get framebuffer pointer");
     let mut fb = gop.frame_buffer();
-    let _ = println!("[boot] gop: framebuffer size={}", fb.size());
     let resolution = mode.resolution();
     let stride = mode.stride();
     let pixel_format = mode.pixel_format();

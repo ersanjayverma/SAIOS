@@ -1,5 +1,4 @@
 #![no_std]
-use uefi::println;
 pub const SAIOS_BOOT_MAGIC: u64 = 0x5341_494F_5342_4F4F; // Choose your preferred value
 pub const SAIOS_BOOT_VERSION: u32 = 1;
 pub mod acpi;
@@ -108,35 +107,9 @@ pub struct Elf64Rela {
     pub r_addend: i64,
 }
 pub fn initialize_boot_info() -> SaiosBootInfo {
-    let _ = println!("[boot] boot_info: framebuffer init...");
-    let framebuffer = match graphics::initialize() {
-        Ok(v) => {
-            let _ = println!("[boot] boot_info: framebuffer ok");
-            v
-        }
-        Err(e) => {
-            let _ = println!("[boot] boot_info: framebuffer fail {:?}", e.status());
-            graphics::FramebufferInfo::empty()
-        }
-    };
-
-    let _ = println!("[boot] boot_info: acpi init...");
-    let acpi = match acpi::initialize() {
-        Ok(v) => {
-            let _ = println!("[boot] boot_info: acpi ok");
-            v
-        }
-        Err(e) => {
-            let _ = println!("[boot] boot_info: acpi fail {:?}", e.status());
-            acpi::AcpiInfo::empty()
-        }
-    };
-
-    let _ = println!("[boot] boot_info: smbios init...");
-    let smbios = smbios::initialize().unwrap_or_else(|e| {
-        let _ = println!("[boot] boot_info: smbios fail {:?}", e.status());
-        let _ = println!("[boot] boot_info: smbios fallback");
-        smbios::SmbiosInfo {
+    let framebuffer = graphics::initialize().unwrap_or_else(|_| graphics::FramebufferInfo::empty());
+    let acpi = acpi::initialize().unwrap_or_else(|_| acpi::AcpiInfo::empty());
+    let smbios = smbios::initialize().unwrap_or(smbios::SmbiosInfo {
         entry_point: 0,
         version_major: 0,
         version_minor: 0,
@@ -144,15 +117,8 @@ pub fn initialize_boot_info() -> SaiosBootInfo {
         table_address: 0,
         table_length: 0,
         is_64bit: false,
-    }
     });
-    let _ = println!("[boot] boot_info: smbios ok/fallback");
-
-    let _ = println!("[boot] boot_info: cpu init...");
-    let cpu = cpu::initialize().unwrap_or_else(|e| {
-        let _ = println!("[boot] boot_info: cpu fail {:?}", e.status());
-        let _ = println!("[boot] boot_info: cpu fallback");
-        cpu::CpuInfo {
+    let cpu = cpu::initialize().unwrap_or(cpu::CpuInfo {
         vendor: [0; 13],
         brand: [0; 49],
         features: 0,
@@ -175,21 +141,12 @@ pub fn initialize_boot_info() -> SaiosBootInfo {
             max_basic_cpuid: 0,
             features: 0,
         },
-    }
     });
-    let _ = println!("[boot] boot_info: cpu ok/fallback");
-
-    let _ = println!("[boot] boot_info: firmware init...");
-    let firmware = firmware::initialize().unwrap_or_else(|e| {
-        let _ = println!("[boot] boot_info: firmware fail {:?}", e.status());
-        let _ = println!("[boot] boot_info: firmware fallback");
-        firmware::FirmwareInfo {
+    let firmware = firmware::initialize().unwrap_or(firmware::FirmwareInfo {
         vendor: [0; 32],
         firmware_revision: 0,
         uefi_revision: uefi::table::Revision::new(0, 0),
-    }
     });
-    let _ = println!("[boot] boot_info: firmware ok/fallback");
 
     SaiosBootInfo {
         magic: SAIOS_BOOT_MAGIC,

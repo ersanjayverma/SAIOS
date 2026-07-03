@@ -29,6 +29,26 @@ pub struct FramebufferDisplay {
 
 impl FramebufferDisplay {
     #[inline(always)]
+    fn rgb_to_native_u32(&self, color: u32) -> u32 {
+        match self.pixel_format {
+            PixelFormat::Bgr => color & 0x00FF_FFFF,
+            PixelFormat::Rgb => {
+                let r = (color >> 16) & 0xFF;
+                let g = color & 0x0000_FF00;
+                let b = (color & 0xFF) << 16;
+                r | g | b
+            }
+            PixelFormat::Bitmask => {
+                let r = ((color >> 16) & 0xFF) as u8;
+                let g = ((color >> 8) & 0xFF) as u8;
+                let b = (color & 0xFF) as u8;
+                self.pack_bitmask(r, g, b)
+            }
+            PixelFormat::BltOnly => color & 0x00FF_FFFF,
+        }
+    }
+
+    #[inline(always)]
     fn infer_masks_for_format(format: PixelFormat, bytes_per_pixel: usize) -> (u32, u32, u32, u32) {
         match (format, bytes_per_pixel) {
             (PixelFormat::Rgb, 2) => (0x001F, 0x07E0, 0xF800, 0),
@@ -169,12 +189,121 @@ impl FramebufferDisplay {
     }
 
     #[inline(always)]
+    fn native_pixel_bytes(&self, color: u32) -> [u8; 4] {
+        let r = ((color >> 16) & 0xFF) as u8;
+        let g = ((color >> 8) & 0xFF) as u8;
+        let b = (color & 0xFF) as u8;
+
+        match self.pixel_format {
+            PixelFormat::Rgb => [r, g, b, 0],
+            PixelFormat::Bgr => [b, g, r, 0],
+            PixelFormat::Bitmask => self.pack_bitmask(r, g, b).to_le_bytes(),
+            PixelFormat::BltOnly => [b, g, r, 0],
+        }
+    }
+
+    pub fn clear_color(&mut self, color: u32) {
+        if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Rgb | PixelFormat::Bgr) {
+            let packed = self.rgb_to_native_u32(color);
+            for y in 0..self.height {
+                let row_base = y * self.stride * self.bytes_per_pixel;
+                for x in 0..self.width {
+                    let offset = row_base + x * self.bytes_per_pixel;
+                    if offset + 4 > self.size_bytes {
+                        break;
+                    }
+                    unsafe {
+                        ptr::write_volatile(self.base.add(offset).cast::<u32>(), packed);
+                    }
+                }
+            }
+            return;
+        }
+
+        let packed = self.native_pixel_bytes(color);
+        for y in 0..self.height {
+            let row_base = y * self.stride * self.bytes_per_pixel;
+            for x in 0..self.width {
+                let offset = row_base + x * self.bytes_per_pixel;
+                if offset + self.bytes_per_pixel > self.size_bytes {
+                    break;
+                }
+                let dst = unsafe { self.base.add(offset) };
+                unsafe {
+                    let mut i = 0;
+                    while i < self.bytes_per_pixel {
+                        ptr::write_volatile(dst.add(i), packed[i]);
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn flush_region(
+        &mut self,
+        pixels: &[u32],
+        src_width: usize,
+        src_x: usize,
+        src_y: usize,
+        width: usize,
+        height: usize,
+    ) {
+        let x_end = core::cmp::min(src_x.saturating_add(width), self.width);
+        let y_end = core::cmp::min(src_y.saturating_add(height), self.height);
+
+        if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Rgb | PixelFormat::Bgr) {
+            for y in src_y..y_end {
+                let row_start = y * src_width;
+                for x in src_x..x_end {
+                    let offset = (y * self.stride + x) * 4;
+                    if offset + 4 > self.size_bytes {
+                        continue;
+                    }
+                    let packed = self.rgb_to_native_u32(pixels[row_start + x]);
+                    unsafe {
+                        ptr::write_volatile(self.base.add(offset).cast::<u32>(), packed);
+                    }
+                }
+            }
+            return;
+        }
+
+        for y in src_y..y_end {
+            for x in src_x..x_end {
+                let src = pixels[y * src_width + x];
+                let r = ((src >> 16) & 0xFF) as u8;
+                let g = ((src >> 8) & 0xFF) as u8;
+                let b = (src & 0xFF) as u8;
+
+                let offset = (y * self.stride + x) * self.bytes_per_pixel;
+                if offset + self.bytes_per_pixel > self.size_bytes {
+                    continue;
+                }
+                unsafe {
+                    let p = self.base.add(offset);
+                    match self.pixel_format {
+                        PixelFormat::Rgb => Self::write_rgb_like(p, r, g, b, self.bytes_per_pixel, false),
+                        PixelFormat::Bgr => Self::write_rgb_like(p, r, g, b, self.bytes_per_pixel, true),
+                        PixelFormat::Bitmask => {
+                            Self::write_packed(p, self.pack_bitmask(r, g, b), self.bytes_per_pixel)
+                        }
+                        PixelFormat::BltOnly => {}
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
     unsafe fn write_packed(dst: *mut u8, packed: u32, bytes_per_pixel: usize) {
         let bytes = packed.to_le_bytes();
         let count = core::cmp::min(bytes_per_pixel, 4);
         let mut i = 0;
         while i < count {
-            ptr::write_volatile(dst.add(i), bytes[i]);
+            unsafe {
+                ptr::write_volatile(dst.add(i), bytes[i]);
+            }
             i += 1;
         }
     }
@@ -182,16 +311,22 @@ impl FramebufferDisplay {
     #[inline(always)]
     unsafe fn write_rgb_like(dst: *mut u8, r: u8, g: u8, b: u8, bytes_per_pixel: usize, bgr: bool) {
         if bgr {
-            ptr::write_volatile(dst, b);
-            ptr::write_volatile(dst.add(1), g);
-            ptr::write_volatile(dst.add(2), r);
+            unsafe {
+                ptr::write_volatile(dst, b);
+                ptr::write_volatile(dst.add(1), g);
+                ptr::write_volatile(dst.add(2), r);
+            }
         } else {
-            ptr::write_volatile(dst, r);
-            ptr::write_volatile(dst.add(1), g);
-            ptr::write_volatile(dst.add(2), b);
+            unsafe {
+                ptr::write_volatile(dst, r);
+                ptr::write_volatile(dst.add(1), g);
+                ptr::write_volatile(dst.add(2), b);
+            }
         }
         if bytes_per_pixel >= 4 {
-            ptr::write_volatile(dst.add(3), 0);
+            unsafe {
+                ptr::write_volatile(dst.add(3), 0);
+            }
         }
     }
 }
@@ -232,6 +367,23 @@ impl Display for FramebufferDisplay {
     fn flush(&mut self, pixels: &[u32], src_width: usize, src_height: usize) {
         let width = core::cmp::min(self.width, src_width);
         let height = core::cmp::min(self.height, src_height);
+
+        if self.bytes_per_pixel == 4 && matches!(self.pixel_format, PixelFormat::Rgb | PixelFormat::Bgr) {
+            for y in 0..height {
+                let row_start = y * src_width;
+                for x in 0..width {
+                    let offset = (y * self.stride + x) * 4;
+                    if offset + 4 > self.size_bytes {
+                        continue;
+                    }
+                    let packed = self.rgb_to_native_u32(pixels[row_start + x]);
+                    unsafe {
+                        ptr::write_volatile(self.base.add(offset).cast::<u32>(), packed);
+                    }
+                }
+            }
+            return;
+        }
 
         for y in 0..height {
             for x in 0..width {
