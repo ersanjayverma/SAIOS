@@ -29,7 +29,7 @@ pub mod timer;
 pub mod vmm;
 pub mod vfs;
 use efi_main::SaiosBootInfo;
-use hal::arch::paging::{self, Table};
+use hal::arch::paging;
 use hal::arch::x86_64::{gdt, idt, interrupt};
 use seed::Seed;
 
@@ -56,16 +56,12 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
         core::slice::from_raw_parts(boot_info.memorymap.entries, boot_info.memorymap.entry_count)
     };
     hal::arch::x86_64::console::_print(format_args!("kernel: memory slice ok\n"));
-    // Initialize PMM with the boot memory map and take one page for PML4.
+    // Initialize PMM with the boot memory map.
     pmm::init(_entries_slice);
     hal::arch::x86_64::console::_print(format_args!("kernel: pmm init ok\n"));
-    let pml4_phys = pmm::alloc_page().expect("PMM: no free pages for PML4");
-    let pml4_ptr = pml4_phys as *mut Table;
-    unsafe { (*pml4_ptr).clear() };
-    // Recursive mapping: last PML4 slot points to the PML4 itself.
-    unsafe {
-        (*pml4_ptr).entries[511].set_page(pml4_phys, paging::FLAG_WRITABLE);
-    }
+
+    // Use the active CR3 root as VMM root; do not dereference raw physical pointers here.
+    let pml4_phys = paging::read_cr3() & 0x000F_FFFF_FFFF_F000;
 
     vmm::init(pml4_phys).expect("VMM: failed to initialize kernel virtual memory manager");
     hal::arch::x86_64::console::_print(format_args!("kernel: vmm init ok\n"));
@@ -84,7 +80,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     kernel::timeline::init();
     kernel::timeline::mark("Boot");
     kernel::timeline::mark("Memory");
-    // Attach framebuffer provided by the bootloader so console output is visible on-screen.
+    // Attach framebuffer using bootloader-provided address.
     hal::arch::x86_64::console::_print(format_args!("kernel: fb attach begin\n"));
     console::attach_framebuffer(framebuffer_info);
     hal::arch::x86_64::console::_print(format_args!("kernel: fb attach done\n"));

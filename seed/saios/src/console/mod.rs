@@ -336,23 +336,9 @@ fn framebuffer_scrollback_to_bottom() {
 }
 
 pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
-    let mut mapped_info = FramebufferInfo::empty();
-    if info.base != 0 && info.size != 0 {
-        let phys_base = info.base;
-        let page_base = phys_base & !0xFFFu64;
-        let page_offset = (phys_base - page_base) as usize;
-        let page_count = (page_offset + info.size + 4095) / 4096;
-
-        if let Ok(mapped_base) = crate::vmm::map_physical_anywhere(
-            page_base,
-            page_count,
-            crate::vmm::FLAG_WRITE | crate::vmm::FLAG_DEVICE,
-            "framebuffer",
-        ) {
-            mapped_info = info;
-            mapped_info.base = mapped_base + page_offset as u64;
-        }
-    }
+    // Use framebuffer address as provided by bootloader. The VMM remap path
+    // is temporarily disabled on this hardware due to early page faults.
+    let mapped_info = info;
 
     with_console(|console| {
         console.backend.right_mut().attach(mapped_info);
