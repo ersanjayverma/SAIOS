@@ -39,3 +39,14 @@ pub fn rdtsc() -> u64 {
 
     ((high as u64) << 32) | (low as u64)
 }
+
+#[inline(always)]
+pub fn read_cr2() -> u64 {
+    let value: u64;
+
+    unsafe {
+        asm!("mov {}, cr2", out(reg) value, options(nomem, nostack, preserves_flags));
+    }
+
+    value
+}

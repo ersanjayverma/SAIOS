@@ -70,8 +70,8 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 extern "C" fn saios_timer_tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
-    crate::scheduler::on_timer_tick();
+    let tick = TICKS.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    crate::scheduler::on_timer_tick(tick);
     crate::console::on_timer_tick();
     // PIC EOI for IRQ0.
     outb(PIC_MASTER_COMMAND_PORT, PIC_END_OF_INTERRUPT);
@@ -149,13 +149,8 @@ pub fn uptime() -> Duration {
     Duration::from_millis((ticks() * 1000) / (TICK_HZ as u64))
 }
 
-/// Busy-waits for approximately `ms` milliseconds.
+/// Sleeps for approximately `ms` milliseconds.
 pub fn sleep(ms: u64) {
     let tick_delta = (ms.saturating_mul(TICK_HZ as u64)).div_ceil(1000);
-    let target = ticks().saturating_add(tick_delta);
-
-    while ticks() < target {
-        crate::scheduler::maybe_preempt();
-        core::hint::spin_loop();
-    }
+    crate::scheduler::sleep_ticks(tick_delta);
 }

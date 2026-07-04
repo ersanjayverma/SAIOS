@@ -4,6 +4,7 @@ pub mod device;
 pub mod driver;
 pub mod dynamic_linker;
 pub mod event;
+pub mod fault;
 pub mod object;
 pub mod package_image;
 pub mod process;

@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use hal::arch::x86_64::sync::StaticCell;
 
 use crate::console;
+use crate::kernel::validation;
 
 use self::framework::KernelTestFramework;
 use self::report::{TestReport, VerifyReport};
@@ -63,28 +64,19 @@ pub fn verify_target(target: Option<&str>) -> Result<Vec<VerifyReport>, &'static
     })
 }
 
-pub fn boot_self_test() {
+pub fn boot_self_test(ready: bool) {
     console::println!("SAIOS Self Test");
 
-    for line in [
-        "HAL",
-        "Interrupts",
-        "Timer",
-        "PMM",
-        "Heap",
-        "Scheduler",
-        "Console",
-        "Shell",
-        "Object Manager",
-        "Services",
-    ] {
-        console::println!("[OK] {}", line);
+    if ready {
+        console::println!("Core readiness gates passed.");
+    } else {
+        console::println!("Core readiness gates failed.");
     }
 
     match verify_target(Some("all")) {
         Ok(reports) => {
             let passed = reports.iter().all(|r| r.passed());
-            if passed {
+            if passed && ready {
                 console::println!("All systems operational.");
             } else {
                 console::println!("Self-test completed with verification failures.");
@@ -92,4 +84,27 @@ pub fn boot_self_test() {
         }
         Err(_) => console::println!("Self-test completed with framework error."),
     }
+}
+
+pub fn boot_readiness_gate() -> bool {
+    let options = validation::ValidateOptions {
+        verbose: false,
+        perf: false,
+        stress: false,
+        json: false,
+        ready: true,
+    };
+
+    let report = validation::run(&options);
+    validation::print_report(&report, &options);
+
+    for gate in report.readiness_gate_statuses() {
+        console::println!(
+            "[READY] {:<16} {}",
+            gate.label,
+            if gate.passed { "PASS" } else { "FAIL" }
+        );
+    }
+
+    report.kernel_ready()
 }

@@ -24,6 +24,11 @@ running after individual failures.
 `--ready` runs the v0.3 required kernel-readiness gates only and emits a
 `Kernel READY` or `Kernel NOT READY` status based on those required checks.
 
+Boot policy during v0.3:
+
+- the kernel executes the required readiness gate set during boot
+- if required gates are not all `PASS`, boot does not transition to ready runtime state
+
 ## Subsystems
 
 The suite currently covers:

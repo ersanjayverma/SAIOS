@@ -14,6 +14,12 @@ struct RequiredGate {
     name: &'static str,
 }
 
+#[derive(Copy, Clone)]
+pub struct ReadinessGateStatus {
+    pub label: &'static str,
+    pub passed: bool,
+}
+
 const REQUIRED_GATES: &[RequiredGate] = &[
     RequiredGate {
         label: "Interrupts",
@@ -214,6 +220,18 @@ impl ValidationReport {
             self.find(gate.category, gate.name)
                 .is_some_and(|result| result.status == TestStatus::Pass)
         })
+    }
+
+    pub fn readiness_gate_statuses(&self) -> Vec<ReadinessGateStatus> {
+        REQUIRED_GATES
+            .iter()
+            .map(|gate| ReadinessGateStatus {
+                label: gate.label,
+                passed: self
+                    .find(gate.category, gate.name)
+                    .is_some_and(|result| result.status == TestStatus::Pass),
+            })
+            .collect()
     }
 }
 
@@ -675,11 +693,40 @@ fn test_memory_set() -> Result<(), &'static str> {
 }
 
 fn test_page_faults() -> Result<(), &'static str> {
-    Err("skip: page fault tests require fault containment")
+    if !crate::kernel::fault::policy_ready() {
+        return Err("fault policy is not initialized");
+    }
+
+    // Error code without the user bit is kernel-domain.
+    if crate::kernel::fault::domain_from_page_fault_error(0)
+        != crate::kernel::fault::FaultDomain::Kernel
+    {
+        return Err("kernel page-fault classification mismatch");
+    }
+
+    Ok(())
 }
 
 fn test_invalid_pointer() -> Result<(), &'static str> {
-    Err("skip: invalid pointer probing requires user fault recovery")
+    if !crate::kernel::fault::policy_ready() {
+        return Err("fault policy is not initialized");
+    }
+
+    // Error code with user bit set must classify as user-domain.
+    if crate::kernel::fault::domain_from_page_fault_error(1 << 2)
+        != crate::kernel::fault::FaultDomain::User
+    {
+        return Err("user page-fault classification mismatch");
+    }
+
+    // Record and inspect a synthetic fault snapshot to validate observability.
+    crate::kernel::fault::record_page_fault(0, 1 << 2);
+    let snapshot = crate::kernel::fault::last_fault().ok_or("fault snapshot missing")?;
+    if snapshot.address != 0 || snapshot.domain != crate::kernel::fault::FaultDomain::User {
+        return Err("fault snapshot contents mismatch");
+    }
+
+    Ok(())
 }
 
 fn test_yield() -> Result<(), &'static str> {
@@ -775,7 +822,19 @@ fn test_console_stdout() -> Result<(), &'static str> {
 }
 
 fn test_console_stderr() -> Result<(), &'static str> {
-    Err("skip: stderr is not exposed separately from console output")
+    console::begin_output_capture(true);
+    console::print("stdout-probe");
+    console::stderr_write_str("stderr-probe");
+    let captured = console::end_output_capture();
+
+    if !captured.contains("stdout-probe") {
+        return Err("stdout capture missing");
+    }
+    if !captured.contains("[stderr] stderr-probe") {
+        return Err("stderr stream marker missing");
+    }
+
+    Ok(())
 }
 
 fn test_console_ansi() -> Result<(), &'static str> {

@@ -81,6 +81,7 @@ struct Scheduler {
     initialized: bool,
     threads: Vec<ThreadRecord>,
     run_queue: VecDeque<usize>,
+    sleep_queue: Vec<(u64, usize)>,
     current: usize,
     idle: usize,
     next_id: ThreadId,
@@ -95,6 +96,7 @@ impl Scheduler {
             initialized: false,
             threads: Vec::new(),
             run_queue: VecDeque::new(),
+            sleep_queue: Vec::new(),
             current: 0,
             idle: 0,
             next_id: 0,
@@ -140,6 +142,32 @@ impl Scheduler {
         let idx = self.threads.len() - 1;
         self.run_queue.push_back(idx);
         thread.id
+    }
+
+    fn queue_sleep(&mut self, idx: usize, wake_tick: u64) {
+        self.sleep_queue.retain(|(_, queued_idx)| *queued_idx != idx);
+
+        let pos = self
+            .sleep_queue
+            .iter()
+            .position(|(tick, _)| *tick > wake_tick)
+            .unwrap_or(self.sleep_queue.len());
+        self.sleep_queue.insert(pos, (wake_tick, idx));
+    }
+
+    fn wake_due(&mut self, current_tick: u64) {
+        while let Some((wake_tick, idx)) = self.sleep_queue.first().copied() {
+            if wake_tick > current_tick {
+                break;
+            }
+
+            self.sleep_queue.remove(0);
+
+            if self.threads[idx].thread.state == ThreadState::Sleeping {
+                self.threads[idx].thread.state = ThreadState::Ready;
+                self.run_queue.push_back(idx);
+            }
+        }
     }
 }
 
@@ -309,12 +337,14 @@ pub fn spawn(entry: ThreadEntry) -> ThreadId {
 }
 
 /// Called by the timer interrupt handler to advance scheduling state.
-pub fn on_timer_tick() {
+pub fn on_timer_tick(current_tick: u64) {
     interrupt::without_interrupts(|| {
         let scheduler = match scheduler_mut() {
             Some(s) if s.initialized => s,
             _ => return,
         };
+
+        scheduler.wake_due(current_tick);
 
         scheduler.ticks_since_switch = scheduler.ticks_since_switch.saturating_add(1);
         if scheduler.ticks_since_switch >= scheduler.quantum_ticks {
@@ -341,6 +371,67 @@ pub fn maybe_preempt() {
 /// Voluntarily yields the CPU to the next runnable thread.
 pub fn yield_now() {
     interrupt::without_interrupts(do_schedule);
+}
+
+/// Blocks the current thread until `target_tick` is reached.
+pub fn yield_until_tick(target_tick: u64) {
+    loop {
+        let should_block = interrupt::without_interrupts(|| {
+            let scheduler = match scheduler_mut() {
+                Some(s) if s.initialized => s,
+                _ => return false,
+            };
+
+            if scheduler.current == scheduler.idle {
+                return false;
+            }
+
+            if crate::timer::ticks() >= target_tick {
+                return false;
+            }
+
+            let current_idx = scheduler.current;
+            if scheduler.threads[current_idx].thread.state != ThreadState::Running {
+                return false;
+            }
+
+            scheduler.threads[current_idx].thread.state = ThreadState::Sleeping;
+            scheduler.queue_sleep(current_idx, target_tick);
+            true
+        });
+
+        if !should_block {
+            break;
+        }
+
+        yield_now();
+
+        if crate::timer::ticks() >= target_tick {
+            break;
+        }
+    }
+}
+
+/// Sleeps the current thread for `tick_delta` scheduler ticks.
+pub fn sleep_ticks(tick_delta: u64) {
+    if tick_delta == 0 {
+        return;
+    }
+
+    let target = crate::timer::ticks().saturating_add(tick_delta);
+
+    let initialized = interrupt::without_interrupts(|| {
+        matches!(scheduler_ref(), Some(s) if s.initialized)
+    });
+
+    if !initialized {
+        while crate::timer::ticks() < target {
+            core::hint::spin_loop();
+        }
+        return;
+    }
+
+    yield_until_tick(target);
 }
 
 /// Returns a snapshot of all threads known to the scheduler.

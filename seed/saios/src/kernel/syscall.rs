@@ -295,8 +295,23 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             // args[0] = fd, args[1] = data selector.
             let fd = req.args[0] as vfs::VfsFd;
             let data = selector_to_data(req.args[1]).ok_or(SyscallError::InvalidArgument)?;
-            let written = vfs::write(fd, data).map_err(|_| SyscallError::InvalidArgument)?;
-            Ok(written as u64)
+            match fd {
+                // Conventional stdio descriptors for process/runtime output channels.
+                1 => {
+                    let text = core::str::from_utf8(data).unwrap_or("<binary>");
+                    console::print(text);
+                    Ok(data.len() as u64)
+                }
+                2 => {
+                    let text = core::str::from_utf8(data).unwrap_or("<binary>");
+                    console::stderr_write_str(text);
+                    Ok(data.len() as u64)
+                }
+                _ => {
+                    let written = vfs::write(fd, data).map_err(|_| SyscallError::InvalidArgument)?;
+                    Ok(written as u64)
+                }
+            }
         }
         SyscallNumber::Close => {
             // args[0] = fd.

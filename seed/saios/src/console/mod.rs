@@ -684,6 +684,21 @@ pub fn print(s: &str) {
     write_str(s);
 }
 
+/// Writes a string to the stderr stream.
+///
+/// The current implementation keeps stderr visible on the same physical
+/// console devices but marks output distinctly for stream separation.
+pub fn stderr_write_str(s: &str) {
+    write_str("[stderr] ");
+    write_str(s);
+}
+
+/// Writes a line to the stderr stream.
+pub fn stderr_println(s: &str) {
+    stderr_write_str(s);
+    newline();
+}
+
 /// Writes formatted arguments to the console.
 pub fn print_fmt(args: fmt::Arguments) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {

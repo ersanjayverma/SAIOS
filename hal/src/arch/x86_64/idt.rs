@@ -218,5 +218,9 @@ extern "C" fn general_protection(error_code: usize) -> ! {
 
 #[unsafe(no_mangle)]
 extern "C" fn page_fault(error_code: usize) -> ! {
-    panic!("Page Fault (error={:#x})", error_code);
+    let fault_addr = crate::arch::x86_64::cpu::read_cr2();
+    panic!(
+        "Page Fault (error={:#x}, cr2={:#x})",
+        error_code, fault_addr
+    );
 }
