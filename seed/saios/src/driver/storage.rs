@@ -20,6 +20,7 @@ const MBR_SECTOR: usize = 512;
 const FAT_STORE_MAGIC: &[u8; 8] = b"SAFAT32\0";
 const FAT_STORE_VERSION: u32 = 1;
 const SYNTHETIC_DISK_SECTORS: u64 = 4_096;
+const PARTITION_PROBE_WINDOW_BYTES: usize = 4096;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum FilesystemKind {
@@ -465,6 +466,64 @@ fn default_fat_tree() -> Vec<FsNode> {
     ]
 }
 
+fn default_ro_tree(fs: FilesystemKind) -> Vec<FsNode> {
+    let mut nodes = vec![
+        FsNode {
+            path: "/".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        },
+        FsNode {
+            path: "/boot".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        },
+        FsNode {
+            path: "/etc".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        },
+        FsNode {
+            path: "/home".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        },
+        FsNode {
+            path: "/mnt".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        },
+    ];
+
+    let notice = format!(
+        "SAIOS mounted {} as a read-only preview backend.\nRead/write support for this filesystem is not implemented yet.\n",
+        fs.as_str()
+    );
+    nodes.push(FsNode {
+        path: "/README.TXT".to_string(),
+        kind: FsNodeKind::File,
+        data: notice.into_bytes(),
+    });
+
+    if fs == FilesystemKind::Ext4 {
+        nodes.push(FsNode {
+            path: "/lost+found".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        });
+    }
+
+    nodes
+}
+
+fn fs_supports_rw_tree(fs: FilesystemKind) -> bool {
+    fs == FilesystemKind::Fat32
+}
+
+fn fs_supports_mount_tree(fs: FilesystemKind) -> bool {
+    fs == FilesystemKind::Fat32 || fs == FilesystemKind::Ext4 || fs == FilesystemKind::Ntfs
+}
+
 fn find_node<'a>(nodes: &'a [FsNode], path: &str) -> Option<&'a FsNode> {
     let key = normalize_path(path);
     nodes.iter().find(|n| n.path == key)
@@ -655,6 +714,35 @@ fn load_volume_tree(state: &StorageState, volume: &str) -> Result<Vec<FsNode>, &
     Ok(deserialize_tree(bytes.as_slice()).unwrap_or_else(default_fat_tree))
 }
 
+fn probe_partition_filesystem(disk: &DiskDevice, part: &Partition) -> Option<FilesystemKind> {
+    if part.sector_count == 0 {
+        return None;
+    }
+
+    let sector_size = disk.block.sector_size as usize;
+    if sector_size == 0 {
+        return None;
+    }
+
+    let sectors_to_read = PARTITION_PROBE_WINDOW_BYTES
+        .div_ceil(sector_size)
+        .min(part.sector_count as usize);
+    if sectors_to_read == 0 {
+        return None;
+    }
+
+    let mut image = vec![0u8; sectors_to_read.saturating_mul(sector_size)];
+    let mut scratch = vec![0u8; sector_size];
+    for i in 0..sectors_to_read {
+        let lba = part.start_lba.saturating_add(i as u64);
+        disk.block.read_sector(lba, scratch.as_mut_slice()).ok()?;
+        let at = i.saturating_mul(sector_size);
+        image[at..at + sector_size].copy_from_slice(scratch.as_slice());
+    }
+
+    probe_filesystem(image.as_slice()).map(|p| p.fs)
+}
+
 fn seed_default_mbr_fat32(dev: &mut RamBlockDevice) {
     if dev.sector_size as usize != MBR_SECTOR {
         return;
@@ -802,6 +890,9 @@ fn detect_partitions_for_disk(disk: &mut DiskDevice) {
 
     for (i, part) in parts.iter_mut().enumerate() {
         part.name = format!("{}p{}", disk.name, i + 1);
+        if let Some(probed) = probe_partition_filesystem(disk, part) {
+            part.fs_hint = probed;
+        }
     }
 
     disk.partitions = parts;
@@ -900,7 +991,11 @@ fn discover_disks_from_pci(state: &mut StorageState) {
     }
 }
 
-fn ensure_fat_mounted(state: &mut StorageState, volume: &str) -> Result<(), &'static str> {
+fn ensure_volume_mounted(
+    state: &mut StorageState,
+    volume: &str,
+    fs: FilesystemKind,
+) -> Result<(), &'static str> {
     if state
         .mounted
         .iter()
@@ -909,7 +1004,15 @@ fn ensure_fat_mounted(state: &mut StorageState, volume: &str) -> Result<(), &'st
         return Ok(());
     }
 
-    let nodes = load_volume_tree(state, volume)?;
+    if !fs_supports_mount_tree(fs) {
+        return Err("storage: filesystem backend not implemented");
+    }
+
+    let nodes = if fs == FilesystemKind::Fat32 {
+        load_volume_tree(state, volume)?
+    } else {
+        default_ro_tree(fs)
+    };
     state.mounted.push(MountedFs {
         volume: volume.to_string(),
         nodes,
@@ -1034,9 +1137,10 @@ pub fn mount_volume(name: &str, path: &str, _read_only: bool) -> Result<(), &'st
             return Err("storage: duplicate mount path");
         }
 
-        if state.volumes[idx].filesystem == FilesystemKind::Fat32 {
-            let vol_name = state.volumes[idx].name.clone();
-            ensure_fat_mounted(state, vol_name.as_str())?;
+        let vol_name = state.volumes[idx].name.clone();
+        let vol_fs = state.volumes[idx].filesystem;
+        if fs_supports_mount_tree(vol_fs) {
+            ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
         }
 
         state.volumes[idx].mounted_at = Some(path.to_string());
@@ -1056,6 +1160,9 @@ pub fn umount_volume(path: &str) -> Result<(), &'static str> {
         if state.volumes[idx].filesystem == FilesystemKind::Fat32 {
             let name = state.volumes[idx].name.clone();
             let _ = save_mounted_volume(state, name.as_str());
+            state.mounted.retain(|m| !m.volume.eq_ignore_ascii_case(name.as_str()));
+        } else {
+            let name = state.volumes[idx].name.clone();
             state.mounted.retain(|m| !m.volume.eq_ignore_ascii_case(name.as_str()));
         }
 
@@ -1116,10 +1223,10 @@ pub fn fs_stat(path: &str) -> Result<FsStat, &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
-        if vol_fs != FilesystemKind::Fat32 {
+        if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
-        ensure_fat_mounted(state, vol_name.as_str())?;
+        ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
 
         let mounted = state
             .mounted
@@ -1143,11 +1250,14 @@ pub fn fs_create(path: &str) -> Result<(), &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
-        if vol_fs != FilesystemKind::Fat32 {
+        if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
+        if !fs_supports_rw_tree(vol_fs) {
+            return Err("storage: filesystem is read-only in this build");
+        }
 
-        ensure_fat_mounted(state, vol_name.as_str())?;
+        ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
         let mounted = state
             .mounted
             .iter_mut()
@@ -1165,7 +1275,11 @@ pub fn fs_create(path: &str) -> Result<(), &'static str> {
             data: Vec::new(),
         });
 
-        save_mounted_volume(state, vol_name.as_str())
+        if fs_supports_rw_tree(vol_fs) {
+            save_mounted_volume(state, vol_name.as_str())
+        } else {
+            Ok(())
+        }
     })
 }
 
@@ -1174,11 +1288,14 @@ pub fn fs_mkdir(path: &str) -> Result<(), &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
-        if vol_fs != FilesystemKind::Fat32 {
+        if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
+        if !fs_supports_rw_tree(vol_fs) {
+            return Err("storage: filesystem is read-only in this build");
+        }
 
-        ensure_fat_mounted(state, vol_name.as_str())?;
+        ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
         let mounted = state
             .mounted
             .iter_mut()
@@ -1196,7 +1313,11 @@ pub fn fs_mkdir(path: &str) -> Result<(), &'static str> {
             data: Vec::new(),
         });
 
-        save_mounted_volume(state, vol_name.as_str())
+        if fs_supports_rw_tree(vol_fs) {
+            save_mounted_volume(state, vol_name.as_str())
+        } else {
+            Ok(())
+        }
     })
 }
 
@@ -1208,11 +1329,14 @@ pub fn fs_delete(path: &str) -> Result<(), &'static str> {
         if rel == "/" {
             return Err("cannot remove root");
         }
-        if vol_fs != FilesystemKind::Fat32 {
+        if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
+        if !fs_supports_rw_tree(vol_fs) {
+            return Err("storage: filesystem is read-only in this build");
+        }
 
-        ensure_fat_mounted(state, vol_name.as_str())?;
+        ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
         let mounted = state
             .mounted
             .iter_mut()
@@ -1236,7 +1360,11 @@ pub fn fs_delete(path: &str) -> Result<(), &'static str> {
         }
 
         mounted.nodes.remove(idx);
-        save_mounted_volume(state, vol_name.as_str())
+        if fs_supports_rw_tree(vol_fs) {
+            save_mounted_volume(state, vol_name.as_str())
+        } else {
+            Ok(())
+        }
     })
 }
 
@@ -1251,11 +1379,14 @@ pub fn fs_rename(from: &str, to: &str) -> Result<(), &'static str> {
         if !from_name.eq_ignore_ascii_case(to_name.as_str()) {
             return Err("storage: cross-volume rename is not supported");
         }
-        if from_fs != FilesystemKind::Fat32 {
+        if !fs_supports_mount_tree(from_fs) {
             return Err("storage: filesystem backend not implemented");
         }
+        if !fs_supports_rw_tree(from_fs) {
+            return Err("storage: filesystem is read-only in this build");
+        }
 
-        ensure_fat_mounted(state, from_name.as_str())?;
+        ensure_volume_mounted(state, from_name.as_str(), from_fs)?;
         let mounted = state
             .mounted
             .iter_mut()
@@ -1283,7 +1414,11 @@ pub fn fs_rename(from: &str, to: &str) -> Result<(), &'static str> {
             }
         }
 
-        save_mounted_volume(state, from_name.as_str())
+        if fs_supports_rw_tree(from_fs) {
+            save_mounted_volume(state, from_name.as_str())
+        } else {
+            Ok(())
+        }
     })
 }
 
@@ -1292,11 +1427,11 @@ pub fn fs_read(path: &str) -> Result<Vec<u8>, &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
-        if vol_fs != FilesystemKind::Fat32 {
+        if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
 
-        ensure_fat_mounted(state, vol_name.as_str())?;
+        ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
         let mounted = state
             .mounted
             .iter()
@@ -1316,11 +1451,14 @@ pub fn fs_write(path: &str, data: &[u8]) -> Result<(), &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
-        if vol_fs != FilesystemKind::Fat32 {
+        if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
+        if !fs_supports_rw_tree(vol_fs) {
+            return Err("storage: filesystem is read-only in this build");
+        }
 
-        ensure_fat_mounted(state, vol_name.as_str())?;
+        ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
         let mounted = state
             .mounted
             .iter_mut()
@@ -1343,7 +1481,11 @@ pub fn fs_write(path: &str, data: &[u8]) -> Result<(), &'static str> {
         node.data.clear();
         node.data.extend_from_slice(data);
 
-        save_mounted_volume(state, vol_name.as_str())
+        if fs_supports_rw_tree(vol_fs) {
+            save_mounted_volume(state, vol_name.as_str())
+        } else {
+            Ok(())
+        }
     })
 }
 
@@ -1352,11 +1494,11 @@ pub fn fs_readdir(path: &str) -> Result<Vec<String>, &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
-        if vol_fs != FilesystemKind::Fat32 {
+        if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
 
-        ensure_fat_mounted(state, vol_name.as_str())?;
+        ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
         let mounted = state
             .mounted
             .iter()
@@ -1513,10 +1655,10 @@ pub fn used_bytes(path: &str) -> Option<u64> {
     init();
     with_state_mut(|state| {
         let (vol_name, vol_fs, _rel) = mounted_volume_info_internal(state, path)?;
-        if vol_fs != FilesystemKind::Fat32 {
+        if !fs_supports_mount_tree(vol_fs) {
             return Some(0);
         }
-        ensure_fat_mounted(state, vol_name.as_str()).ok()?;
+        ensure_volume_mounted(state, vol_name.as_str(), vol_fs).ok()?;
         let mounted = state
             .mounted
             .iter()

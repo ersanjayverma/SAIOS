@@ -650,8 +650,7 @@ fn is_sys_path(path: &str) -> bool {
 }
 
 fn is_storage_backed(path: &str) -> bool {
-    storage::mounted_volume_for_path(path)
-        .is_some_and(|v| v.filesystem == storage::FilesystemKind::Fat32 && v.name != "tmpfs")
+    storage::mounted_volume_for_path(path).is_some_and(|v| v.name != "tmpfs")
 }
 
 fn storage_node_name(path: &str) -> String {

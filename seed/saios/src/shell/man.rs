@@ -105,14 +105,19 @@ static MANUALS: &[ManualEntry] = &[
     manual!(
         "grep",
         aliases: [],
-        summary: "Filter pipeline input by substring",
-        synopsis: ["grep <needle>"],
+        summary: "Filter pipeline input by regex",
+        synopsis: ["grep <pattern>", "grep -F <literal>"],
         description: [
             "Reads text from pipeline stdin and prints matching lines.",
-            "Current implementation performs simple substring filtering.",
+            "Supports a lightweight regex syntax: ^ $ . * + ? [] and \\ escapes.",
+            "Use -F to force literal substring matching.",
             "Use with commands that emit line-oriented text."
         ],
-        examples: ["events | grep BOOTCHK", "help | grep mount"],
+        examples: [
+            "events | grep '^BOOT'",
+            "events | grep 'IRQ[0-9]+'",
+            "help | grep -F mount"
+        ],
         see_also: ["echo", "wc", "events"]
     ),
     manual!(

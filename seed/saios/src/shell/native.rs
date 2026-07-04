@@ -28,6 +28,7 @@ use crate::pmm;
 use crate::saifs;
 use crate::scheduler;
 use crate::shell::command::{ShellResult, StaticCommand};
+use crate::shell::regex as shell_regex;
 use crate::shell::registry::CommandRegistry;
 use crate::shell::session::CommandContext;
 use crate::timer;
@@ -51,7 +52,7 @@ pub fn register(registry: &mut CommandRegistry) {
     }));
     registry.register(Box::new(StaticCommand {
         name: "grep",
-        description: "Filter stdin by substring",
+        description: "Filter stdin by regex",
         handler: cmd_grep,
     }));
     registry.register(Box::new(StaticCommand {
@@ -538,10 +539,20 @@ fn cmd_echo(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_grep(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let needle = args.first().copied().ok_or("grep: missing pattern")?;
+    let (literal, pattern) = match args {
+        ["-F", pat, ..] => (true, *pat),
+        [pat, ..] => (false, *pat),
+        _ => return Err("grep: missing pattern"),
+    };
+
     let input = ctx.env_get("SISH_STDIN").ok_or("grep: no stdin")?;
     for line in input.lines() {
-        if line.contains(needle) {
+        let matched = if literal {
+            line.contains(pattern)
+        } else {
+            shell_regex::is_match(pattern, line)?
+        };
+        if matched {
             console::println!("{}", line);
         }
     }

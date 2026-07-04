@@ -6,6 +6,7 @@ mod engine;
 mod man;
 mod native;
 mod parser;
+mod regex;
 pub mod programs;
 mod prompt;
 mod registry;
