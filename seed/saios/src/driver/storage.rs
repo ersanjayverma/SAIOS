@@ -596,11 +596,11 @@ fn default_rw_tree(fs: FilesystemKind) -> Vec<FsNode> {
 }
 
 fn fs_supports_rw_tree(fs: FilesystemKind) -> bool {
-    fs == FilesystemKind::Fat32 || fs == FilesystemKind::Ext4
+    fs == FilesystemKind::Fat32
 }
 
 fn fs_supports_mount_tree(fs: FilesystemKind) -> bool {
-    fs == FilesystemKind::Fat32 || fs == FilesystemKind::Ext4 || fs == FilesystemKind::Ntfs
+    fs == FilesystemKind::Fat32 || fs == FilesystemKind::Ext4
 }
 
 fn find_node<'a>(nodes: &'a [FsNode], path: &str) -> Option<&'a FsNode> {
@@ -792,6 +792,10 @@ fn load_volume_tree(
     volume: &str,
     fs: FilesystemKind,
 ) -> Result<Vec<FsNode>, &'static str> {
+    if fs != FilesystemKind::Fat32 {
+        return Err("storage: native filesystem reader not implemented for this volume");
+    }
+
     let (disk_name, part_name) = resolve_volume_owner(state, volume)?;
     let disk = state
         .disks
@@ -807,10 +811,6 @@ fn load_volume_tree(
     let bytes = read_partition_bytes(disk, part)?;
     if let Some(nodes) = deserialize_tree(bytes.as_slice()) {
         return Ok(nodes);
-    }
-
-    if fs == FilesystemKind::Ext4 || fs == FilesystemKind::Ntfs {
-        return Err("storage: native filesystem parsing for this volume is not implemented yet");
     }
 
     Ok(default_rw_tree(fs))
@@ -1115,6 +1115,10 @@ fn ensure_volume_mounted(
     volume: &str,
     fs: FilesystemKind,
 ) -> Result<(), &'static str> {
+    if fs == FilesystemKind::Ext4 {
+        return Ok(());
+    }
+
     if state
         .mounted
         .iter()
@@ -1172,6 +1176,367 @@ fn mounted_volume_for_path_internal<'a>(
     };
 
     Some((vol, normalize_path(rel.as_str())))
+}
+
+#[derive(Copy, Clone)]
+struct Ext4Superblock {
+    block_size: u64,
+    inodes_per_group: u32,
+    inode_size: u16,
+    desc_size: u16,
+}
+
+#[derive(Copy, Clone)]
+struct Ext4Inode {
+    mode: u16,
+    size: u64,
+    flags: u32,
+    block: [u8; 60],
+}
+
+#[derive(Clone)]
+struct Ext4DirEntry {
+    inode: u32,
+    file_type: u8,
+    name: String,
+}
+
+const EXT4_S_IFDIR: u16 = 0x4000;
+const EXT4_S_IFREG: u16 = 0x8000;
+const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
+
+fn read_partition_at(
+    disk: &DiskDevice,
+    part: &Partition,
+    byte_offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, &'static str> {
+    let sector_size = disk.block.sector_size() as usize;
+    if sector_size == 0 {
+        return Err("storage: invalid sector size");
+    }
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let first_sector = (byte_offset / sector_size as u64) as usize;
+    let last_byte = byte_offset.saturating_add(len as u64).saturating_sub(1);
+    let last_sector = (last_byte / sector_size as u64) as usize;
+
+    let sectors_to_read = last_sector.saturating_sub(first_sector).saturating_add(1);
+    if (first_sector as u64) >= part.sector_count
+        || (last_sector as u64) >= part.sector_count
+    {
+        return Err("storage: ext4 read beyond partition");
+    }
+
+    let mut raw = vec![0u8; sectors_to_read.saturating_mul(sector_size)];
+    let mut scratch = vec![0u8; sector_size];
+    for i in 0..sectors_to_read {
+        let lba = part
+            .start_lba
+            .saturating_add(first_sector as u64)
+            .saturating_add(i as u64);
+        disk.block.read_sector(lba, scratch.as_mut_slice())?;
+        let at = i.saturating_mul(sector_size);
+        raw[at..at + sector_size].copy_from_slice(scratch.as_slice());
+    }
+
+    let in_sector = (byte_offset % sector_size as u64) as usize;
+    let end = in_sector.saturating_add(len);
+    if end > raw.len() {
+        return Err("storage: ext4 read window overflow");
+    }
+    Ok(raw[in_sector..end].to_vec())
+}
+
+fn ext4_load_superblock(disk: &DiskDevice, part: &Partition) -> Result<Ext4Superblock, &'static str> {
+    let sb = read_partition_at(disk, part, 1024, 1024)?;
+    let magic = le_u16(sb.as_slice(), 56).ok_or("storage: ext4 superblock truncated")?;
+    if magic != 0xEF53 {
+        return Err("storage: ext4 superblock magic missing");
+    }
+
+    let log_block_size = le_u32(sb.as_slice(), 24).ok_or("storage: ext4 sb truncated")?;
+    let block_size = 1024u64.checked_shl(log_block_size).ok_or("storage: ext4 block size invalid")?;
+    let _blocks_per_group = le_u32(sb.as_slice(), 32).ok_or("storage: ext4 sb truncated")?;
+    let inodes_per_group = le_u32(sb.as_slice(), 40).ok_or("storage: ext4 sb truncated")?;
+    let inode_size = le_u16(sb.as_slice(), 88).unwrap_or(128).max(128);
+    let desc_size = le_u16(sb.as_slice(), 0xFE).unwrap_or(32).max(32);
+
+    Ok(Ext4Superblock {
+        block_size,
+        inodes_per_group,
+        inode_size,
+        desc_size,
+    })
+}
+
+fn ext4_read_block(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    block_no: u64,
+) -> Result<Vec<u8>, &'static str> {
+    let offset = block_no.saturating_mul(sb.block_size);
+    read_partition_at(disk, part, offset, sb.block_size as usize)
+}
+
+fn ext4_read_group_desc(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    group: u32,
+) -> Result<Vec<u8>, &'static str> {
+    let gdt_block = if sb.block_size == 1024 { 2 } else { 1 };
+    let gdt_offset = (gdt_block as u64)
+        .saturating_mul(sb.block_size)
+        .saturating_add((group as u64).saturating_mul(sb.desc_size as u64));
+    read_partition_at(disk, part, gdt_offset, sb.desc_size as usize)
+}
+
+fn ext4_load_inode(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode_no: u32,
+) -> Result<Ext4Inode, &'static str> {
+    if inode_no == 0 {
+        return Err("storage: ext4 inode 0 invalid");
+    }
+
+    let ino_index = inode_no - 1;
+    let group = ino_index / sb.inodes_per_group;
+    let index = ino_index % sb.inodes_per_group;
+
+    let gd = ext4_read_group_desc(disk, part, sb, group)?;
+    let inode_table_lo = le_u32(gd.as_slice(), 8).ok_or("storage: ext4 group desc truncated")?;
+    let inode_table_hi = if sb.desc_size >= 64 {
+        le_u32(gd.as_slice(), 40).unwrap_or(0)
+    } else {
+        0
+    };
+    let inode_table_block = ((inode_table_hi as u64) << 32) | (inode_table_lo as u64);
+    let inode_offset = inode_table_block
+        .saturating_mul(sb.block_size)
+        .saturating_add((index as u64).saturating_mul(sb.inode_size as u64));
+    let raw = read_partition_at(disk, part, inode_offset, sb.inode_size as usize)?;
+    if raw.len() < 128 {
+        return Err("storage: ext4 inode truncated");
+    }
+
+    let mode = le_u16(raw.as_slice(), 0).ok_or("storage: ext4 inode mode missing")?;
+    let size_lo = le_u32(raw.as_slice(), 4).unwrap_or(0) as u64;
+    let size_high = le_u32(raw.as_slice(), 108).unwrap_or(0) as u64;
+    let flags = le_u32(raw.as_slice(), 32).unwrap_or(0);
+
+    let mut block = [0u8; 60];
+    block.copy_from_slice(raw.get(40..100).ok_or("storage: ext4 inode block map missing")?);
+
+    Ok(Ext4Inode {
+        mode,
+        size: size_lo | (size_high << 32),
+        flags,
+        block,
+    })
+}
+
+fn ext4_extent_lookup_in_node(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    node: &[u8],
+    logical: u32,
+) -> Result<Option<u64>, &'static str> {
+    let magic = le_u16(node, 0).ok_or("storage: ext4 extent header truncated")?;
+    if magic != 0xF30A {
+        return Err("storage: ext4 extent header magic invalid");
+    }
+    let entries = le_u16(node, 2).unwrap_or(0) as usize;
+    let depth = le_u16(node, 6).unwrap_or(0);
+    let header_size = 12usize;
+
+    if depth == 0 {
+        for i in 0..entries {
+            let at = header_size + i.saturating_mul(12);
+            if at + 12 > node.len() {
+                break;
+            }
+            let ee_block = le_u32(node, at).unwrap_or(0);
+            let ee_len_raw = le_u16(node, at + 4).unwrap_or(0);
+            let ee_len = (ee_len_raw & 0x7FFF) as u32;
+            let ee_start_hi = le_u16(node, at + 6).unwrap_or(0) as u64;
+            let ee_start_lo = le_u32(node, at + 8).unwrap_or(0) as u64;
+            if ee_len == 0 {
+                continue;
+            }
+            if logical >= ee_block && logical < ee_block.saturating_add(ee_len) {
+                let delta = logical.saturating_sub(ee_block) as u64;
+                let phys = ((ee_start_hi << 32) | ee_start_lo).saturating_add(delta);
+                return Ok(Some(phys));
+            }
+        }
+        return Ok(None);
+    }
+
+    let mut chosen: Option<(u32, u64)> = None;
+    for i in 0..entries {
+        let at = header_size + i.saturating_mul(12);
+        if at + 12 > node.len() {
+            break;
+        }
+        let ei_block = le_u32(node, at).unwrap_or(0);
+        let ei_leaf_lo = le_u32(node, at + 4).unwrap_or(0) as u64;
+        let ei_leaf_hi = le_u16(node, at + 8).unwrap_or(0) as u64;
+        if logical >= ei_block {
+            chosen = Some((ei_block, (ei_leaf_hi << 32) | ei_leaf_lo));
+        } else {
+            break;
+        }
+    }
+
+    let Some((_lb, child_block)) = chosen else {
+        return Ok(None);
+    };
+    let child = ext4_read_block(disk, part, sb, child_block)?;
+    ext4_extent_lookup_in_node(disk, part, sb, child.as_slice(), logical)
+}
+
+fn ext4_resolve_file_block(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode: &Ext4Inode,
+    logical_block: u32,
+) -> Result<Option<u64>, &'static str> {
+    if (inode.flags & EXT4_EXTENTS_FL) != 0 {
+        return ext4_extent_lookup_in_node(disk, part, sb, inode.block.as_slice(), logical_block);
+    }
+
+    // Fallback: direct blocks only.
+    if logical_block < 12 {
+        let at = (logical_block as usize).saturating_mul(4);
+        let phys = le_u32(inode.block.as_slice(), at).unwrap_or(0) as u64;
+        if phys == 0 {
+            return Ok(None);
+        }
+        return Ok(Some(phys));
+    }
+
+    Ok(None)
+}
+
+fn ext4_read_inode_data(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode: &Ext4Inode,
+) -> Result<Vec<u8>, &'static str> {
+    let mut out = Vec::new();
+    if inode.size == 0 {
+        return Ok(out);
+    }
+
+    let total_blocks = (inode.size.saturating_add(sb.block_size - 1) / sb.block_size) as u32;
+    for lb in 0..total_blocks {
+        let Some(pb) = ext4_resolve_file_block(disk, part, sb, inode, lb)? else {
+            break;
+        };
+        let block = ext4_read_block(disk, part, sb, pb)?;
+        out.extend_from_slice(block.as_slice());
+        if out.len() >= inode.size as usize {
+            break;
+        }
+    }
+
+    out.truncate(inode.size as usize);
+    Ok(out)
+}
+
+fn ext4_list_dir(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode: &Ext4Inode,
+) -> Result<Vec<Ext4DirEntry>, &'static str> {
+    if (inode.mode & EXT4_S_IFDIR) == 0 {
+        return Err("not a directory");
+    }
+
+    let data = ext4_read_inode_data(disk, part, sb, inode)?;
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at + 8 <= data.len() {
+        let ino = le_u32(data.as_slice(), at).unwrap_or(0);
+        let rec_len = le_u16(data.as_slice(), at + 4).unwrap_or(0) as usize;
+        let name_len = *data.get(at + 6).unwrap_or(&0) as usize;
+        let file_type = *data.get(at + 7).unwrap_or(&0);
+        if rec_len == 0 {
+            break;
+        }
+        if ino != 0 && at + rec_len <= data.len() && name_len <= rec_len.saturating_sub(8) {
+            let name_bytes = &data[at + 8..at + 8 + name_len];
+            if let Ok(name) = core::str::from_utf8(name_bytes) {
+                out.push(Ext4DirEntry {
+                    inode: ino,
+                    file_type,
+                    name: name.to_string(),
+                });
+            }
+        }
+        at = at.saturating_add(rec_len);
+    }
+
+    Ok(out)
+}
+
+fn ext4_lookup_path(
+    disk: &DiskDevice,
+    part: &Partition,
+    rel: &str,
+) -> Result<(Ext4Superblock, u32, Ext4Inode), &'static str> {
+    let sb = ext4_load_superblock(disk, part)?;
+    let path = normalize_path(rel);
+    let mut inode_no = 2u32;
+    let mut inode = ext4_load_inode(disk, part, &sb, inode_no)?;
+
+    for seg in path.split('/').filter(|s| !s.is_empty()) {
+        if (inode.mode & EXT4_S_IFDIR) == 0 {
+            return Err("not a directory");
+        }
+        let entries = ext4_list_dir(disk, part, &sb, &inode)?;
+        let mut found = None;
+        for ent in entries {
+            if ent.name == seg {
+                found = Some(ent.inode);
+                break;
+            }
+        }
+        let next = found.ok_or("path not found")?;
+        inode_no = next;
+        inode = ext4_load_inode(disk, part, &sb, inode_no)?;
+    }
+
+    Ok((sb, inode_no, inode))
+}
+
+fn ext4_with_volume<R>(
+    state: &StorageState,
+    volume: &str,
+    f: impl FnOnce(&DiskDevice, &Partition) -> Result<R, &'static str>,
+) -> Result<R, &'static str> {
+    let (disk_name, part_name) = resolve_volume_owner(state, volume)?;
+    let disk = state
+        .disks
+        .iter()
+        .find(|d| d.name.eq_ignore_ascii_case(disk_name.as_str()))
+        .ok_or("storage: disk missing")?;
+    let part = disk
+        .partitions
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(part_name.as_str()))
+        .ok_or("storage: partition missing")?;
+    f(disk, part)
 }
 
 fn mounted_volume_info_internal(
@@ -1403,8 +1768,11 @@ pub fn mount_volume(name: &str, path: &str, _read_only: bool) -> Result<(), &'st
 
         let vol_name = state.volumes[idx].name.clone();
         let vol_fs = state.volumes[idx].filesystem;
-        if !fs_supports_mount_tree(vol_fs) || vol_name == "tmpfs" {
+        if vol_name == "tmpfs" {
             return Err("storage: volume is not mountable");
+        }
+        if !fs_supports_mount_tree(vol_fs) {
+            return Err("storage: native filesystem reader not implemented for this volume");
         }
         if fs_supports_mount_tree(vol_fs) {
             ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
@@ -1459,30 +1827,32 @@ pub fn format_volume(name: &str, fs: FilesystemKind) -> Result<(), &'static str>
             .position(|v| v.name.eq_ignore_ascii_case(name))
             .ok_or("storage: volume not found")?;
 
+        if !fs_supports_rw_tree(fs) {
+            return Err("storage: formatter not implemented for requested filesystem");
+        }
+
         if state.volumes[idx].mounted_at.is_some() {
             return Err("storage: volume is currently mounted; unmount before formatting");
         }
 
         state.volumes[idx].filesystem = fs;
-        if fs_supports_rw_tree(fs) {
-            let (disk_name, part_name) = resolve_volume_owner(state, name)?;
-            let disk = state
-                .disks
-                .iter_mut()
-                .find(|d| d.name.eq_ignore_ascii_case(disk_name.as_str()))
-                .ok_or("storage: disk missing")?;
-            let part = disk
-                .partitions
-                .iter()
-                .find(|p| p.name.eq_ignore_ascii_case(part_name.as_str()))
-                .ok_or("storage: partition missing")?
-                .clone();
+        let (disk_name, part_name) = resolve_volume_owner(state, name)?;
+        let disk = state
+            .disks
+            .iter_mut()
+            .find(|d| d.name.eq_ignore_ascii_case(disk_name.as_str()))
+            .ok_or("storage: disk missing")?;
+        let part = disk
+            .partitions
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(part_name.as_str()))
+            .ok_or("storage: partition missing")?
+            .clone();
 
-            let tree = default_rw_tree(fs);
-            let bytes = serialize_tree(tree.as_slice());
-            write_partition_bytes(disk, &part, bytes.as_slice())?;
-            disk.block.flush();
-        }
+        let tree = default_rw_tree(fs);
+        let bytes = serialize_tree(tree.as_slice());
+        write_partition_bytes(disk, &part, bytes.as_slice())?;
+        disk.block.flush();
 
         Ok(())
     });
@@ -1511,6 +1881,20 @@ pub fn fs_stat(path: &str) -> Result<FsStat, &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
+        if vol_fs == FilesystemKind::Ext4 {
+            return ext4_with_volume(state, vol_name.as_str(), |disk, part| {
+                let (_sb, _ino, inode) = ext4_lookup_path(disk, part, rel.as_str())?;
+                let kind = if (inode.mode & EXT4_S_IFDIR) != 0 {
+                    FsNodeKind::Directory
+                } else {
+                    FsNodeKind::File
+                };
+                Ok(FsStat {
+                    kind,
+                    size: inode.size as usize,
+                })
+            });
+        }
         if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
@@ -1715,6 +2099,15 @@ pub fn fs_read(path: &str) -> Result<Vec<u8>, &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
+        if vol_fs == FilesystemKind::Ext4 {
+            return ext4_with_volume(state, vol_name.as_str(), |disk, part| {
+                let (sb, _ino, inode) = ext4_lookup_path(disk, part, rel.as_str())?;
+                if (inode.mode & EXT4_S_IFREG) == 0 {
+                    return Err("not a file");
+                }
+                ext4_read_inode_data(disk, part, &sb, &inode)
+            });
+        }
         if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
@@ -1783,6 +2176,23 @@ pub fn fs_readdir(path: &str) -> Result<Vec<String>, &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
+        if vol_fs == FilesystemKind::Ext4 {
+            return ext4_with_volume(state, vol_name.as_str(), |disk, part| {
+                let (sb, _ino, inode) = ext4_lookup_path(disk, part, rel.as_str())?;
+                let entries = ext4_list_dir(disk, part, &sb, &inode)?;
+                let mut out = Vec::new();
+                for ent in entries {
+                    if ent.name == "." || ent.name == ".." {
+                        continue;
+                    }
+                    let _ = ent.file_type;
+                    out.push(ent.name);
+                }
+                out.sort();
+                out.dedup();
+                Ok(out)
+            });
+        }
         if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }

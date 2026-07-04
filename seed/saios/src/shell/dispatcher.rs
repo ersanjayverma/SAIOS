@@ -302,7 +302,7 @@ impl CommandDispatcher {
 
     fn write_redirect(&self, path: &str, data: &str, append: bool) -> ShellResult {
         let path = self.resolve_shell_path(path);
-        let text = normalize_lf_text(data);
+        let text = sanitize_redirect_text(data);
 
         if append {
             let fd = vfs::open(path.as_str(), vfs::OpenOptions::append_create())
@@ -347,6 +347,52 @@ fn normalize_lf_text(input: &str) -> String {
         } else {
             out.push(ch);
         }
+    }
+
+    out
+}
+
+fn sanitize_redirect_text(input: &str) -> String {
+    let normalized = normalize_lf_text(input);
+    let chars: Vec<char> = normalized.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // Strip ANSI CSI and two-byte escape sequences so redirected logs keep
+        // stable plain-text content instead of terminal cursor effects.
+        if ch == '\u{1b}' {
+            if i + 1 < chars.len() && chars[i + 1] == '[' {
+                i += 2;
+                while i < chars.len() {
+                    let c = chars[i];
+                    let end = c.is_ascii_alphabetic() || c == '@' || c == '~';
+                    i += 1;
+                    if end {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            // Skip simple two-char escape forms as well.
+            i = core::cmp::min(i + 2, chars.len());
+            continue;
+        }
+
+        if ch == '\r' {
+            out.push('\n');
+            i += 1;
+            continue;
+        }
+
+        if ch == '\n' || ch == '\t' || !ch.is_control() {
+            out.push(ch);
+        }
+
+        i += 1;
     }
 
     out
