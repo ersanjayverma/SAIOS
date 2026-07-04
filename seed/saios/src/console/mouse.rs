@@ -209,7 +209,11 @@ impl MouseDriver {
         let _ = Ps2Mouse::set_sample_rate(80);
 
         if let Some(device_id) = Ps2Mouse::read_device_id() {
-            self.packet_size.set(if device_id == 3 || device_id == 4 { 4 } else { 3 });
+            self.packet_size.set(if device_id == 3 || device_id == 4 {
+                4
+            } else {
+                3
+            });
         }
 
         let _ = Ps2Mouse::mouse_write(Ps2Mouse::MOUSE_ENABLE_DATA_REPORTING);

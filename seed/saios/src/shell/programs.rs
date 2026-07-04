@@ -1,3 +1,11 @@
+//! Built-in shell programs and program execution helpers.
+//!
+//! This module implements the user-space commands available in the SAIOS
+//! shell. The `cc` command is currently a stub: it parses a tiny subset of C
+//! source, extracts a string literal and writes a `SAIOS_CC_STUB` marker file
+//! that [`execute_compiled_stub`] can later "run". Real compilation and
+//! dynamic linking are not yet implemented.
+
 use crate::console;
 use crate::kernel::process;
 use crate::kernel::telemetry;
@@ -9,6 +17,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+/// Result type returned by built-in programs.
 type ProgramResult = Result<i32, &'static str>;
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -23,15 +32,23 @@ const DT_NULL: i64 = 0;
 const DT_NEEDED: i64 = 1;
 const DT_STRTAB: i64 = 5;
 const DT_STRSZ: i64 = 10;
+const DEFAULT_USER_PROGRAM_BASE: u64 = 0x0040_0000;
 
 #[derive(Clone, Debug)]
 pub struct BinaryMetadata {
+    /// Entry point name used to dispatch the binary.
     pub entry: String,
+    /// True if the binary is position-independent.
     pub pie: bool,
+    /// Preferred load address.
     pub preferred_base: u64,
+    /// True if the binary has a dynamic segment.
     pub dynamic: bool,
+    /// Path to the interpreter, if any.
     pub interpreter: Option<String>,
+    /// Names of libraries recorded as DT_NEEDED.
     pub needed_libraries: Vec<String>,
+    /// Symbols required by the binary.
     pub required_symbols: Vec<String>,
 }
 
@@ -77,11 +94,7 @@ fn infer_output_from_source(src: &str) -> String {
     };
 
     let dir = if let Some((d, _)) = src.rsplit_once('/') {
-        if d.is_empty() {
-            "/"
-        } else {
-            d
-        }
+        if d.is_empty() { "/" } else { d }
     } else {
         "."
     };
@@ -114,6 +127,8 @@ fn extract_first_string_literal(source: &str) -> Option<String> {
     None
 }
 
+/// Stub C compiler: extracts a string literal from the source file and
+/// writes a `SAIOS_CC_STUB` marker file at the requested output path.
 fn cc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let src_arg = args.first().copied().ok_or("cc: missing source file")?;
     let src = resolve_relative_path(src_arg);
@@ -125,8 +140,8 @@ fn cc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
         resolve_relative_path(infer_output_from_source(src.as_str()).as_str())
     };
 
-    let message = extract_first_string_literal(source.as_str())
-        .unwrap_or_else(|| "Hello World".to_string());
+    let message =
+        extract_first_string_literal(source.as_str()).unwrap_or_else(|| "Hello World".to_string());
 
     let payload = format!(
         "SAIOS_CC_STUB\nsource={}\nmessage={}\n",
@@ -144,6 +159,7 @@ fn cc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     Ok(0)
 }
 
+/// Reads the message embedded in a `SAIOS_CC_STUB` file, if any.
 fn compiled_stub_message(path: &str) -> Option<String> {
     let text = saifs::read_text(path).ok()?;
     if !text.starts_with("SAIOS_CC_STUB") {
@@ -159,6 +175,7 @@ fn compiled_stub_message(path: &str) -> Option<String> {
     Some("Hello World".to_string())
 }
 
+/// "Executes" a `SAIOS_CC_STUB` file by printing its embedded message.
 fn execute_compiled_stub(path: &str, args: &[&str]) -> ProgramResult {
     let Some(msg) = compiled_stub_message(path) else {
         return Err("program not found");
@@ -182,7 +199,8 @@ fn ls_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
 
 fn cat_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let path = resolve_relative_path(args.first().copied().ok_or("cat: missing path")?);
-    let fd = vfs::open(path.as_str(), vfs::OpenOptions::read_only()).map_err(|_| "cat: open failed")?;
+    let fd =
+        vfs::open(path.as_str(), vfs::OpenOptions::read_only()).map_err(|_| "cat: open failed")?;
     let read_result = vfs::read(fd, usize::MAX);
     let close_result = vfs::close(fd);
     let data = read_result.map_err(|_| "cat: read failed")?;
@@ -280,7 +298,11 @@ fn uname_program(_args: &[&str], _env: &[(String, String)]) -> i32 {
 }
 
 fn calc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
-    let expr = args.first().copied().ok_or("calc: missing expression")?.trim();
+    let expr = args
+        .first()
+        .copied()
+        .ok_or("calc: missing expression")?
+        .trim();
 
     let mut op_pos = None;
     let mut op = '\0';
@@ -527,23 +549,25 @@ fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Option<BinaryMetadata> {
                 }
             }
 
-            if let (Some(strtab_addr), Some(size)) = (strtab_vaddr, strtab_size) {
-                if let Some(strtab_off) = vaddr_to_file_offset(program_headers.as_slice(), strtab_addr) {
-                    let strtab_end = strtab_off.saturating_add(size).min(bytes.len());
-                    for needed in needed_offsets {
-                        let rel = usize::try_from(needed).ok()?;
-                        let start = strtab_off.checked_add(rel)?;
-                        if start >= strtab_end {
-                            continue;
-                        }
+            if let (Some(strtab_addr), Some(size)) = (strtab_vaddr, strtab_size)
+                && let Some(strtab_off) =
+                    vaddr_to_file_offset(program_headers.as_slice(), strtab_addr)
+            {
+                let strtab_end = strtab_off.saturating_add(size).min(bytes.len());
+                for needed in needed_offsets {
+                    let rel = usize::try_from(needed).ok()?;
+                    let start = strtab_off.checked_add(rel)?;
+                    if start >= strtab_end {
+                        continue;
+                    }
 
-                        let mut end = start;
-                        while end < strtab_end && bytes[end] != 0 {
-                            end += 1;
-                        }
-                        if end > start {
-                            needed_libraries.push(String::from_utf8_lossy(&bytes[start..end]).into_owned());
-                        }
+                    let mut end = start;
+                    while end < strtab_end && bytes[end] != 0 {
+                        end += 1;
+                    }
+                    if end > start {
+                        needed_libraries
+                            .push(String::from_utf8_lossy(&bytes[start..end]).into_owned());
                     }
                 }
             }
@@ -551,7 +575,7 @@ fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Option<BinaryMetadata> {
     }
 
     let preferred_base = if e_type == ET_DYN {
-        0x0040_0000
+        DEFAULT_USER_PROGRAM_BASE
     } else {
         entry_addr & !0xFFF
     };
@@ -572,7 +596,7 @@ pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
     if text.starts_with("SAIOS_BIN_V1") {
         let mut entry: Option<String> = None;
         let mut pie = false;
-        let mut preferred_base = 0x0040_0000u64;
+        let mut preferred_base = DEFAULT_USER_PROGRAM_BASE;
         let mut dynamic = false;
         let mut interpreter: Option<String> = None;
         let mut needed_libraries: Vec<String> = Vec::new();
@@ -617,10 +641,10 @@ pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
                 continue;
             }
 
-            if let Some(raw) = line.strip_prefix("preferred_base=") {
-                if let Some(base) = parse_u64_value(raw) {
-                    preferred_base = base;
-                }
+            if let Some(raw) = line.strip_prefix("preferred_base=")
+                && let Some(base) = parse_u64_value(raw)
+            {
+                preferred_base = base;
             }
         }
 
@@ -660,11 +684,21 @@ fn execute_entry(entry: &str, args: &[&str], env: &[(String, String)]) -> Progra
         n if n.eq_ignore_ascii_case("cc") => cc_program(args, env),
         n if n.eq_ignore_ascii_case("stress") => Ok(stress_program(args, env)),
         n if n.eq_ignore_ascii_case("taskman") => crate::taskman::run(args, env),
+        n if n.eq_ignore_ascii_case("diskpart") => crate::diskpart::run(args, env),
         _ => Err("program not found"),
     }
 }
 
-pub fn execute_path(path: &str, name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
+/// Executes the program at `path`.
+///
+/// If `path` is a compiled stub, it is executed as a stub. Otherwise the
+/// binary metadata is read and the named entry point is dispatched.
+pub fn execute_path(
+    path: &str,
+    name: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> ProgramResult {
     if compiled_stub_message(path).is_some() {
         return execute_compiled_stub(path, args);
     }
@@ -675,23 +709,27 @@ pub fn execute_path(path: &str, name: &str, args: &[&str], env: &[(String, Strin
     execute_entry(entry.as_str(), args, env)
 }
 
+/// Spawns a built-in program by name.
 pub fn spawn(name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
     execute_entry(name, args, env)
 }
 
+/// Returns the given exit code.
 pub fn exit(code: i32) -> ProgramResult {
     Ok(code)
 }
 
+/// Returns the given wait code.
 pub fn wait(code: i32) -> ProgramResult {
     Ok(code)
 }
 
+/// Replaces the current program with the named built-in program.
 pub fn exec(name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
     execute_entry(name, args, env)
 }
 
+/// Returns true if `path` refers to a recognized binary or compiled stub.
 pub fn supports_binary(path: &str) -> bool {
     binary_metadata(path).is_some() || compiled_stub_message(path).is_some()
 }
-

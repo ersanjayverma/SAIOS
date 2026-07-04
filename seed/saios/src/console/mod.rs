@@ -1,3 +1,9 @@
+//! Kernel console subsystem.
+//!
+//! The console multiplexes output between a serial port and an optional
+//! framebuffer renderer. It also handles keyboard/mouse input events and
+//! provides the `println!` style output used by the rest of the kernel.
+
 mod backend;
 mod cursor;
 mod framebuffer;
@@ -7,25 +13,29 @@ mod mouse;
 mod serial;
 pub mod tests;
 
-use core::fmt::{self, Write};
 use alloc::string::String as AllocString;
 use alloc::vec::Vec;
+use core::fmt::{self, Write};
 
-use backend::{ConsoleBackend, MirrorConsole};
-use cursor::Cursor;
-use framebuffer::FramebufferConsole;
-use hal::arch::x86_64::sync::StaticCell;
-use input::InputBuffer;
+use crate::driver::usb;
 use crate::kernel::device;
 use crate::kernel::driver;
-use keyboard::{KeyEvent, KeyboardDriver};
-use mouse::{MouseDriver, MouseEvent};
-use serial::{poll_input_event as poll_serial_input_event, SerialConsole};
+use backend::{ConsoleBackend, MirrorConsole};
 use core::sync::atomic::{AtomicBool, Ordering};
+use cursor::Cursor;
 use efi_main::graphics::FramebufferInfo;
+use framebuffer::FramebufferConsole;
+use hal::arch::x86_64::sync::StaticCell;
 use heapless::String;
+use input::InputBuffer;
+use keyboard::KeyboardDriver;
+use mouse::MouseDriver;
+use serial::{SerialConsole, poll_input_event as poll_serial_input_event};
 use static_assertions::const_assert;
 use unicode_width::UnicodeWidthChar;
+
+pub use keyboard::KeyEvent;
+pub use mouse::{MouseButtons, MouseEvent};
 
 const DEFAULT_WIDTH: usize = 80;
 const DEFAULT_HEIGHT: usize = 25;
@@ -77,49 +87,73 @@ impl<B: ConsoleBackend> Console<B> {
         self.clear();
     }
 
-    fn put_char(&mut self, c: char) {
-        if capture_char(c) {
-            if should_suppress_output() {
-                return;
-            }
-        }
+    fn sync_cursor(&mut self) {
+        self.cursor.show();
+        self.backend.set_cursor(self.cursor.x, self.cursor.y);
+    }
 
+    fn put_char_inner(&mut self, c: char, sync_cursor: bool, emit_backend: bool) {
         match c {
             '\n' => self.newline(),
             '\r' => {
                 self.cursor.x = 0;
-                self.backend.set_cursor(self.cursor.x, self.cursor.y);
+                if sync_cursor {
+                    self.sync_cursor();
+                }
             }
             '\t' => {
                 let spaces = TAB_WIDTH - (self.cursor.x % TAB_WIDTH);
                 for _ in 0..spaces {
-                    self.put_char(' ');
+                    self.put_char_inner(' ', sync_cursor, emit_backend);
                 }
             }
             '\x08' => {
                 if self.cursor.x > 0 {
                     self.cursor.x -= 1;
                     self.buffer[self.cursor.y][self.cursor.x] = ' ';
-                    self.backend.set_cursor(self.cursor.x, self.cursor.y);
-                    self.backend.put_char(' ');
-                    self.backend.set_cursor(self.cursor.x, self.cursor.y);
+                    if emit_backend {
+                        self.backend.put_char(' ');
+                    }
+                    if sync_cursor {
+                        self.sync_cursor();
+                    }
                 }
             }
             ch => {
                 self.buffer[self.cursor.y][self.cursor.x] = ch;
-                self.backend.put_char(ch);
+                if emit_backend {
+                    self.backend.put_char(ch);
+                }
                 self.cursor.x += 1;
                 if self.cursor.x >= self.cursor.width {
                     self.newline();
+                } else if sync_cursor {
+                    self.sync_cursor();
                 }
             }
         }
     }
 
-    fn write_str(&mut self, s: &str) {
-        for c in s.chars() {
-            self.put_char(c);
+    fn put_char(&mut self, c: char) {
+        if capture_char(c) && should_suppress_output() {
+            return;
         }
+
+        self.put_char_inner(c, true, true);
+    }
+
+    fn write_str(&mut self, s: &str) {
+        if capture_str(s) && should_suppress_output() {
+            return;
+        }
+
+        for c in s.chars() {
+            self.put_char_inner(c, false, false);
+        }
+
+        self.backend.put_str(s);
+
+        self.sync_cursor();
     }
 
     fn clear(&mut self) {
@@ -137,20 +171,20 @@ impl<B: ConsoleBackend> Console<B> {
     fn set_cursor(&mut self, x: usize, y: usize) {
         self.cursor.x = core::cmp::min(x, self.cursor.width.saturating_sub(1));
         self.cursor.y = core::cmp::min(y, self.cursor.height.saturating_sub(1));
-        self.backend.set_cursor(self.cursor.x, self.cursor.y);
+        self.sync_cursor();
     }
 
     fn move_cursor_left(&mut self) {
         if self.cursor.x > 0 {
             self.cursor.x -= 1;
-            self.backend.set_cursor(self.cursor.x, self.cursor.y);
+            self.sync_cursor();
         }
     }
 
     fn move_cursor_right(&mut self) {
         if self.cursor.x + 1 < self.cursor.width {
             self.cursor.x += 1;
-            self.backend.set_cursor(self.cursor.x, self.cursor.y);
+            self.sync_cursor();
         }
     }
 
@@ -165,26 +199,16 @@ impl<B: ConsoleBackend> Console<B> {
             self.cursor.y = self.cursor.height - 1;
         }
 
-        self.backend.set_cursor(self.cursor.x, self.cursor.y);
+        self.sync_cursor();
     }
 
     fn scroll(&mut self) {
-        for y in 1..self.cursor.height {
-            for x in 0..self.cursor.width {
-                self.buffer[y - 1][x] = self.buffer[y][x];
-            }
-        }
+        self.buffer[..self.cursor.height].copy_within(1..self.cursor.height, 0);
 
         let last = self.cursor.height - 1;
-        for x in 0..self.cursor.width {
-            self.buffer[last][x] = ' ';
-        }
+        self.buffer[last][..self.cursor.width].fill(' ');
 
         if self.backend.scroll_up(1) {
-            self.backend.set_cursor(0, last);
-            for x in 0..self.cursor.width {
-                self.backend.put_char(self.buffer[last][x]);
-            }
             self.backend.set_cursor(self.cursor.x, self.cursor.y);
         } else {
             self.redraw();
@@ -213,12 +237,11 @@ impl<B: ConsoleBackend> Write for Console<B> {
 
 type DefaultBackend = MirrorConsole<SerialConsole, FramebufferConsole>;
 
-static CONSOLE: StaticCell<Console<DefaultBackend>> =
-    StaticCell::new(Console::new(
-        MirrorConsole::new(SerialConsole::new(), FramebufferConsole::new()),
-        DEFAULT_WIDTH,
-        DEFAULT_HEIGHT,
-    ));
+static CONSOLE: StaticCell<Console<DefaultBackend>> = StaticCell::new(Console::new(
+    MirrorConsole::new(SerialConsole::new(), FramebufferConsole::new()),
+    DEFAULT_WIDTH,
+    DEFAULT_HEIGHT,
+));
 
 static CONSOLE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static CONSOLE_LOCKED: AtomicBool = AtomicBool::new(false);
@@ -249,6 +272,18 @@ fn capture_char(c: char) -> bool {
     let active = capture.active;
     if active {
         capture.buffer.push(c);
+    }
+    capture_unlock();
+    active
+}
+
+fn capture_str(s: &str) -> bool {
+    capture_lock();
+    // SAFETY: guarded by capture lock.
+    let capture = unsafe { &mut *OUTPUT_CAPTURE.get() };
+    let active = capture.active;
+    if active {
+        capture.buffer.push_str(s);
     }
     capture_unlock();
     active
@@ -287,21 +322,97 @@ fn emergency_write_str(s: &str) {
     SerialConsole::emergency_write_str(s);
 }
 
+/// Advance the cursor blink state on every timer tick.  This is called from
+/// the timer interrupt handler so the cursor blinks at a regular rate.
+pub fn on_timer_tick() {
+    if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let _changed = try_with_console(|console| {
+        if console.cursor.blink_on() {
+            console.backend.blink_cursor();
+        }
+    });
+}
+
+/// Initializes the serial port, input devices and console state, and only
+/// starts USB input probing when the PS/2 keyboard path fails.
 pub fn init() {
     SerialConsole::init();
+    let keyboard_ready = unsafe { (*KEYBOARD.get()).init() };
     unsafe {
         (*MOUSE.get()).init();
     }
-    let _ = driver::ensure_driver("serial", "0.1.0", "SAIOS", &[], driver::DriverStatus::Running);
-    let _ = driver::ensure_driver("input", "0.1.0", "SAIOS", &["serial"], driver::DriverStatus::Running);
-    let _ = driver::ensure_driver("hid", "0.1.0", "SAIOS", &["input"], driver::DriverStatus::Running);
-    let _ = driver::ensure_driver("hid-keyboard", "0.1.0", "SAIOS", &["hid"], driver::DriverStatus::Running);
-    let _ = driver::ensure_driver("hid-mouse", "0.1.0", "SAIOS", &["hid"], driver::DriverStatus::Running);
+    if !keyboard_ready {
+        hal::arch::x86_64::console::_print(format_args!(
+            "console: PS/2 keyboard unavailable; USB probing deferred until explicit usb/rescan command\n"
+        ));
+    }
+    let _ = driver::ensure_driver(
+        "serial",
+        "0.1.0",
+        "SAIOS",
+        &[],
+        driver::DriverStatus::Running,
+    );
+    let _ = driver::ensure_driver(
+        "input",
+        "0.1.0",
+        "SAIOS",
+        &["serial"],
+        driver::DriverStatus::Running,
+    );
+    let _ = driver::ensure_driver(
+        "hid",
+        "0.1.0",
+        "SAIOS",
+        &["input"],
+        driver::DriverStatus::Running,
+    );
+    let _ = driver::ensure_driver(
+        "hid-keyboard",
+        "0.1.0",
+        "SAIOS",
+        &["hid"],
+        if keyboard_ready {
+            driver::DriverStatus::Running
+        } else {
+            driver::DriverStatus::Stopped
+        },
+    );
+    let _ = driver::ensure_driver(
+        "hid-mouse",
+        "0.1.0",
+        "SAIOS",
+        &["hid"],
+        driver::DriverStatus::Running,
+    );
     // Keep legacy logical names for compatibility with existing scripts/tools.
-    let _ = driver::ensure_driver("mouse", "0.1.0", "SAIOS", &["hid-mouse"], driver::DriverStatus::Running);
+    let _ = driver::ensure_driver(
+        "mouse",
+        "0.1.0",
+        "SAIOS",
+        &["hid-mouse"],
+        driver::DriverStatus::Running,
+    );
     let _ = device::ensure_device("COM1", "serial", "uart", device::DeviceStatus::Online);
-    let _ = device::ensure_device("keyboard0", "hid-keyboard", "hid-keyboard", device::DeviceStatus::Online);
-    let _ = device::ensure_device("mouse0", "hid-mouse", "hid-pointer", device::DeviceStatus::Online);
+    let _ = device::ensure_device(
+        "keyboard0",
+        "hid-keyboard",
+        "hid-keyboard",
+        if keyboard_ready {
+            device::DeviceStatus::Online
+        } else {
+            device::DeviceStatus::Offline
+        },
+    );
+    let _ = device::ensure_device(
+        "mouse0",
+        "hid-mouse",
+        "hid-pointer",
+        device::DeviceStatus::Online,
+    );
     with_console(|console| console.init());
     unsafe {
         (*INPUT_BUFFER.get()).clear();
@@ -335,11 +446,29 @@ fn framebuffer_scrollback_to_bottom() {
     });
 }
 
+/// Attaches a framebuffer as an additional console output backend.
+///
+/// The framebuffer address is used as provided by the bootloader.
 pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
+    let mapped_info = info;
+
     with_console(|console| {
-        console.backend.right_mut().attach(info);
-        let _ = driver::ensure_driver("framebuffer", "0.1.0", "SAIOS", &["serial"], driver::DriverStatus::Running);
-        let _ = device::ensure_device("fb0", "framebuffer", "display", device::DeviceStatus::Online);
+        console.backend.right_mut().attach(mapped_info);
+        if mapped_info.base != 0 {
+            let _ = driver::ensure_driver(
+                "framebuffer",
+                "0.1.0",
+                "SAIOS",
+                &["serial"],
+                driver::DriverStatus::Running,
+            );
+            let _ = device::ensure_device(
+                "fb0",
+                "framebuffer",
+                "display",
+                device::DeviceStatus::Online,
+            );
+        }
         if let (Some(columns), Some(rows)) = (
             console.backend.right_mut().text_columns(),
             console.backend.right_mut().text_rows(),
@@ -349,6 +478,34 @@ pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
     });
 }
 
+pub(crate) fn attach_framebuffer_direct(info: FramebufferInfo) {
+    with_console(|console| {
+        console.backend.right_mut().attach_direct(info);
+        if info.base != 0 {
+            let _ = driver::ensure_driver(
+                "framebuffer",
+                "0.1.0",
+                "SAIOS",
+                &["serial"],
+                driver::DriverStatus::Running,
+            );
+            let _ = device::ensure_device(
+                "fb0",
+                "framebuffer",
+                "display",
+                device::DeviceStatus::Online,
+            );
+        }
+        if let (Some(columns), Some(rows)) = (
+            console.backend.right_mut().text_columns(),
+            console.backend.right_mut().text_rows(),
+        ) {
+            console.resize(columns, rows);
+        }
+    });
+}
+
+/// Ensures the framebuffer renderer is ready and returns true on success.
 pub fn promote_framebuffer_renderer() -> bool {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         return false;
@@ -357,6 +514,66 @@ pub fn promote_framebuffer_renderer() -> bool {
     try_with_console(|console| console.backend.right_mut().ensure_renderer_ready()).unwrap_or(false)
 }
 
+/// Returns the current console text grid size as `(columns, rows)`.
+pub fn dimensions() -> (usize, usize) {
+    try_with_console(|console| (console.cursor.width, console.cursor.height)).unwrap_or((0, 0))
+}
+
+/// Returns the current cursor position as `(x, y)` text cells.
+pub fn cursor_position() -> (usize, usize) {
+    try_with_console(|console| (console.cursor.x, console.cursor.y)).unwrap_or((0, 0))
+}
+
+/// Returns the number of lines stored in the framebuffer scrollback buffer.
+pub fn scrollback_lines() -> usize {
+    try_with_console(|console| console.backend.right_mut().scrollback_lines()).unwrap_or(0)
+}
+
+/// Returns the current scroll-back view offset in lines (0 means live bottom).
+pub fn scrollback_offset() -> usize {
+    try_with_console(|console| console.backend.right_mut().view_offset()).unwrap_or(0)
+}
+
+/// Returns true when the framebuffer backend is attached and ready.
+pub fn framebuffer_attached() -> bool {
+    try_with_console(|console| console.backend.right_mut().ensure_renderer_ready()).unwrap_or(false)
+}
+
+/// Returns the attached framebuffer properties, if any.
+pub fn framebuffer_properties() -> Option<framebuffer::DisplayProperties> {
+    try_with_console(|console| console.backend.right_mut().display_properties()).flatten()
+}
+
+/// Snapshot result for the `fbbench` command.
+#[derive(Debug, Copy, Clone)]
+pub struct FramebufferBenchResult {
+    pub passes: usize,
+    pub bytes_written: usize,
+    pub elapsed_ticks: u64,
+    pub elapsed_ms: u64,
+    pub mib_per_sec: u64,
+}
+
+/// Benchmarks framebuffer full-screen clear throughput.
+pub fn benchmark_framebuffer_clears(passes: usize) -> Option<FramebufferBenchResult> {
+    if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
+        return None;
+    }
+
+    try_with_console(|console| console.backend.right_mut().benchmark_clears(passes)).flatten()
+}
+
+/// Enables or disables serial output logging.
+pub fn set_serial_logging(enabled: bool) {
+    SerialConsole::set_output_enabled(enabled);
+}
+
+/// Returns true if serial output logging is enabled.
+pub fn serial_logging_enabled() -> bool {
+    SerialConsole::output_enabled()
+}
+
+/// Writes a single character to the console.
 pub fn put_char(c: char) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         SerialConsole::emergency_put_char(c);
@@ -368,6 +585,7 @@ pub fn put_char(c: char) {
     }
 }
 
+/// Writes a string to the console.
 pub fn write_str(s: &str) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         emergency_write_str(s);
@@ -379,6 +597,7 @@ pub fn write_str(s: &str) {
     }
 }
 
+/// Clears the console screen.
 pub fn clear() {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         return;
@@ -387,6 +606,7 @@ pub fn clear() {
     let _ = try_with_console(|console| console.clear());
 }
 
+/// Sets the prompt displayed before read-line input.
 pub fn set_input_prompt(prompt: &str) {
     // SAFETY: single-core early kernel context.
     unsafe {
@@ -400,6 +620,7 @@ pub fn set_input_prompt(prompt: &str) {
     }
 }
 
+/// Begins capturing console output to an internal buffer.
 pub fn begin_output_capture(suppress_console: bool) {
     capture_lock();
     // SAFETY: guarded by capture lock.
@@ -412,6 +633,7 @@ pub fn begin_output_capture(suppress_console: bool) {
     capture_unlock();
 }
 
+/// Ends output capture and returns the captured text.
 pub fn end_output_capture() -> AllocString {
     capture_lock();
     // SAFETY: guarded by capture lock.
@@ -425,6 +647,7 @@ pub fn end_output_capture() -> AllocString {
     out
 }
 
+/// Moves the text cursor to `(x, y)`.
 pub fn set_cursor(x: usize, y: usize) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         return;
@@ -433,6 +656,7 @@ pub fn set_cursor(x: usize, y: usize) {
     let _ = try_with_console(|console| console.set_cursor(x, y));
 }
 
+/// Moves the text cursor one cell to the left.
 pub fn move_cursor_left() {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         return;
@@ -441,6 +665,7 @@ pub fn move_cursor_left() {
     let _ = try_with_console(|console| console.move_cursor_left());
 }
 
+/// Moves the text cursor one cell to the right.
 pub fn move_cursor_right() {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
         return;
@@ -449,17 +674,20 @@ pub fn move_cursor_right() {
     let _ = try_with_console(|console| console.move_cursor_right());
 }
 
+/// Writes a newline to the console.
 pub fn newline() {
     put_char('\n');
 }
 
+/// Writes a string to the console.
 pub fn print(s: &str) {
     write_str(s);
 }
 
+/// Writes formatted arguments to the console.
 pub fn print_fmt(args: fmt::Arguments) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
-        let _ = hal::arch::x86_64::console::_print(args);
+        hal::arch::x86_64::console::_print(args);
         return;
     }
 
@@ -468,19 +696,23 @@ pub fn print_fmt(args: fmt::Arguments) {
     })
     .is_none()
     {
-        let _ = hal::arch::x86_64::console::_print(args);
+        hal::arch::x86_64::console::_print(args);
     }
 }
 
+/// Emergency string output used during panics.
 pub fn panic_write_str(s: &str) {
     emergency_write_str(s);
 }
 
+/// Emergency line output used during panics.
 pub fn panic_println(s: &str) {
     panic_write_str(s);
     panic_write_str("\n");
 }
 
+/// Polls for keyboard/mouse input and returns a processed input line if
+/// available.
 pub fn poll_input() -> Option<String<256>> {
     fn cell_width(ch: char) -> usize {
         UnicodeWidthChar::width(ch).unwrap_or(1).max(1)
@@ -519,22 +751,23 @@ pub fn poll_input() -> Option<String<256>> {
     }
 
     // SAFETY: single-core early kernel context.
-    if let Some(mouse_event) = unsafe { (*MOUSE.get()).poll_event() } {
+    if let Some(mouse_event) = unsafe { (*MOUSE.get()).poll_event() }.or_else(usb::poll_mouse_event)
+    {
         match mouse_event {
             MouseEvent::Wheel { delta, .. } => {
                 if delta > 0 {
-                    framebuffer_scrollback_up((delta as usize).saturating_mul(3));
+                    framebuffer_scrollback_up((delta as usize).saturating_mul(8));
                 } else if delta < 0 {
-                    framebuffer_scrollback_down(((-delta) as usize).saturating_mul(3));
+                    framebuffer_scrollback_down(((-delta) as usize).saturating_mul(8));
                 }
             }
             MouseEvent::Move { dy, buttons, .. } => {
                 // Fallback gesture when wheel is unavailable: hold middle button and move.
                 if buttons.middle {
                     if dy > 0 {
-                        framebuffer_scrollback_up((dy as usize).saturating_div(2).max(1));
+                        framebuffer_scrollback_up((dy as usize).max(2));
                     } else if dy < 0 {
-                        framebuffer_scrollback_down(((-dy) as usize).saturating_div(2).max(1));
+                        framebuffer_scrollback_down(((-dy) as usize).max(2));
                     }
                 }
             }
@@ -542,7 +775,9 @@ pub fn poll_input() -> Option<String<256>> {
     }
 
     // SAFETY: single-core early kernel context.
-    let key_event = unsafe { (*KEYBOARD.get()).poll_event() }.or_else(poll_serial_input_event)?;
+    let key_event = unsafe { (*KEYBOARD.get()).poll_event() }
+        .or_else(usb::poll_key_event)
+        .or_else(poll_serial_input_event)?;
     framebuffer_scrollback_to_bottom();
 
     // SAFETY: single-core early kernel context.
@@ -804,6 +1039,7 @@ pub fn poll_input() -> Option<String<256>> {
     }
 }
 
+/// Blocks until a complete input line is available and returns it.
 pub fn read_line() -> String<256> {
     loop {
         if let Some(line) = poll_input() {

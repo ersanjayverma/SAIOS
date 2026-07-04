@@ -1,4 +1,4 @@
-use super::font::{glyph_row, FONT_HEIGHT, FONT_WIDTH};
+use super::font::{glyph_bitmap, FONT_HEIGHT, FONT_WIDTH};
 use super::framebuffer::{Color, Framebuffer};
 
 pub fn draw_glyph(
@@ -9,8 +9,9 @@ pub fn draw_glyph(
     fg: Color,
     bg: Color,
 ) {
+    let glyph = glyph_bitmap(ch);
     for row_idx in 0..FONT_HEIGHT {
-        let row_bits = glyph_row(ch, row_idx);
+        let row_bits = glyph[row_idx / 2];
         for bit in 0..FONT_WIDTH {
             // font8x8 stores glyph rows in LSB-first order.
             let mask = 1u8 << bit;

@@ -1,3 +1,9 @@
+//! Virtual memory manager (VMM).
+//!
+//! Manages the kernel page tables, tracking virtual-to-physical mappings and
+//! allocating kernel virtual address space. All operations are serialized with
+//! a simple spinlock.
+
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::asm;
@@ -9,36 +15,75 @@ use hal::arch::x86_64::sync::StaticCell;
 use crate::kernel::testing::report::{VerifyCheck, VerifyReport};
 use crate::pmm;
 
+/// Virtual address type.
 pub type VirtAddr = u64;
+/// Physical address type.
 pub type PhysAddr = u64;
 
+/// Size of a page in bytes.
 pub const PAGE_SIZE: u64 = 4096;
+/// Base of the kernel's higher-half virtual address space.
 pub const KERNEL_VIRT_BASE: VirtAddr = 0xFFFF_8000_0000_0000;
+/// Page-table slot used for recursive mapping.
 const RECURSIVE_SLOT: u64 = 511;
+const EARLY_TABLE_MAX_PHYS: u64 = 0x4000_0000; // 1 GiB
 
+/// Page-table flag: readable.
 pub const FLAG_READ: u64 = 1 << 0;
+/// Page-table flag: writable.
 pub const FLAG_WRITE: u64 = 1 << 1;
+/// Page-table flag: executable.
 pub const FLAG_EXEC: u64 = 1 << 2;
+/// Page-table flag: user-accessible.
 pub const FLAG_USER: u64 = 1 << 3;
+/// Page-table flag: global (not flushed on TLB switch).
 pub const FLAG_GLOBAL: u64 = 1 << 4;
+/// Page-table flag: device memory (uncached).
 pub const FLAG_DEVICE: u64 = 1 << 5;
+/// Page-table flag: write-combining memory.
+pub const FLAG_WRITE_COMBINE: u64 = 1 << 6;
 
+/// High-level memory types that the VMM can apply to a mapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemoryType {
+    /// Default write-back caching.
+    WriteBack,
+    /// Write-combining cacheability; enabled conservatively until PAT is wired up.
+    WriteCombining,
+    /// Device/un-cacheable mapping for MMIO.
+    Device,
+}
+
+/// A recorded virtual-to-physical mapping.
 #[derive(Clone, Debug)]
 pub struct Mapping {
+    /// Start of the virtual range.
     pub virt_start: VirtAddr,
+    /// Start of the physical range.
     pub phys_start: PhysAddr,
+    /// Number of pages in the mapping.
     pub pages: usize,
+    /// Page-table flags for the mapping.
     pub flags: u64,
+    /// Human-readable owner/description.
     pub owner: String,
+    /// True if the physical pages were allocated by the VMM and should be
+    /// freed on unmap.
     pub owned_physical: bool,
 }
 
+/// Snapshot of VMM state.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct VmmStats {
+    /// True if the VMM has been initialized.
     pub initialized: bool,
+    /// Physical address of the current PML4.
     pub cr3: u64,
+    /// Number of recorded mappings.
     pub mappings: usize,
+    /// Total number of mapped pages.
     pub mapped_pages: usize,
+    /// Next free kernel virtual address.
     pub next_kernel_virt: VirtAddr,
 }
 
@@ -112,6 +157,14 @@ fn is_page_aligned(value: u64) -> bool {
     (value & (PAGE_SIZE - 1)) == 0
 }
 
+fn align_down(value: u64, align: u64) -> u64 {
+    value & !(align - 1)
+}
+
+fn align_up(value: u64, align: u64) -> u64 {
+    (value + align - 1) & !(align - 1)
+}
+
 fn checked_range_end(start: u64, pages: usize) -> Option<u64> {
     let bytes = (pages as u64).checked_mul(PAGE_SIZE)?;
     start.checked_add(bytes)
@@ -166,20 +219,14 @@ fn pdpt_table_ptr(l4: usize) -> *mut paging::Table {
 
 fn pd_table_ptr(l4: usize, l3: usize) -> *mut paging::Table {
     let va = canonicalize_48(
-        (RECURSIVE_SLOT << 39)
-            | (RECURSIVE_SLOT << 30)
-            | ((l4 as u64) << 21)
-            | ((l3 as u64) << 12),
+        (RECURSIVE_SLOT << 39) | (RECURSIVE_SLOT << 30) | ((l4 as u64) << 21) | ((l3 as u64) << 12),
     );
     va as *mut paging::Table
 }
 
 fn pt_table_ptr(l4: usize, l3: usize, l2: usize) -> *mut paging::Table {
     let va = canonicalize_48(
-        (RECURSIVE_SLOT << 39)
-            | ((l4 as u64) << 30)
-            | ((l3 as u64) << 21)
-            | ((l2 as u64) << 12),
+        (RECURSIVE_SLOT << 39) | ((l4 as u64) << 30) | ((l3 as u64) << 21) | ((l2 as u64) << 12),
     );
     va as *mut paging::Table
 }
@@ -196,7 +243,18 @@ fn nonleaf_flags(vmm_flags: u64) -> u64 {
     f
 }
 
+fn memory_type_from_flags(vmm_flags: u64) -> MemoryType {
+    if (vmm_flags & FLAG_DEVICE) != 0 {
+        MemoryType::Device
+    } else if (vmm_flags & FLAG_WRITE_COMBINE) != 0 {
+        MemoryType::WriteCombining
+    } else {
+        MemoryType::WriteBack
+    }
+}
+
 fn leaf_flags(vmm_flags: u64) -> u64 {
+    // Translate high-level VMM memory flags into leaf page-table bits.
     let mut f = 0u64;
     if (vmm_flags & FLAG_WRITE) != 0 {
         f |= paging::FLAG_WRITABLE;
@@ -207,8 +265,15 @@ fn leaf_flags(vmm_flags: u64) -> u64 {
     if (vmm_flags & FLAG_GLOBAL) != 0 {
         f |= paging::FLAG_GLOBAL;
     }
-    if (vmm_flags & FLAG_DEVICE) != 0 {
-        f |= paging::FLAG_PCD;
+    match memory_type_from_flags(vmm_flags) {
+        MemoryType::WriteBack => {}
+        MemoryType::WriteCombining => {
+            // Keep the initial mapping conservative until PAT is enabled.
+            f |= paging::FLAG_PWT;
+        }
+        MemoryType::Device => {
+            f |= paging::FLAG_PCD | paging::FLAG_PWT;
+        }
     }
     if (vmm_flags & FLAG_EXEC) == 0 {
         f |= paging::FLAG_NX;
@@ -321,6 +386,181 @@ fn translate_hw(virt: VirtAddr) -> Option<PhysAddr> {
     pt.entries[l1].address().checked_add(off)
 }
 
+fn alloc_zeroed_table() -> Result<PhysAddr, &'static str> {
+    // Before we switch CR3, only low physical memory is guaranteed to be
+    // identity-mapped on all firmware implementations.
+    let mut phys = None;
+    for _ in 0..4096usize {
+        let candidate = pmm::alloc_page().ok_or("vmm: out of memory allocating page table")?;
+        if candidate < EARLY_TABLE_MAX_PHYS {
+            phys = Some(candidate);
+            break;
+        }
+        pmm::free_page(candidate);
+    }
+
+    let phys = phys.ok_or("vmm: no low-memory page available for page table")?;
+    let table = unsafe { &mut *(phys as *mut paging::Table) };
+    table.clear();
+    Ok(phys)
+}
+
+fn map_kernel_page(
+    root: &mut paging::Table,
+    virt: u64,
+    phys: u64,
+    flags: u64,
+) -> Result<bool, &'static str> {
+    let (l4, l3, l2, l1, _) = level_indices(virt);
+
+    if !root.entries[l4].is_present() {
+        let pdpt_phys = alloc_zeroed_table()?;
+        root.entries[l4].set_page(pdpt_phys, paging::FLAG_WRITABLE);
+    }
+
+    let pdpt = unsafe { &mut *(root.entries[l4].address() as *mut paging::Table) };
+    if !pdpt.entries[l3].is_present() {
+        let pd_phys = alloc_zeroed_table()?;
+        pdpt.entries[l3].set_page(pd_phys, paging::FLAG_WRITABLE);
+    }
+
+    let pd = unsafe { &mut *(pdpt.entries[l3].address() as *mut paging::Table) };
+    if !pd.entries[l2].is_present() {
+        let pt_phys = alloc_zeroed_table()?;
+        pd.entries[l2].set_page(pt_phys, paging::FLAG_WRITABLE);
+    }
+
+    if (pd.entries[l2].0 & paging::FLAG_HUGE) != 0 {
+        let huge_phys = pd.entries[l2].address().saturating_add(virt & 0x1f_ffff);
+        if huge_phys == phys {
+            return Ok(false);
+        }
+        return Err("vmm: page already mapped");
+    }
+
+    let pt = unsafe { &mut *(pd.entries[l2].address() as *mut paging::Table) };
+    if pt.entries[l1].is_present() {
+        if pt.entries[l1].address() == phys {
+            return Ok(false);
+        }
+        return Err("vmm: page already mapped");
+    }
+
+    pt.entries[l1].set_page(phys, leaf_flags(flags) | paging::FLAG_PRESENT);
+    Ok(true)
+}
+
+fn map_identity_low_mem(root: &mut paging::Table) -> Result<(), &'static str> {
+    let pml4_entry = &mut root.entries[0];
+    let pdpt_phys = alloc_zeroed_table()?;
+    pml4_entry.set_page(pdpt_phys, paging::FLAG_WRITABLE);
+
+    let pdpt = unsafe { &mut *(pdpt_phys as *mut paging::Table) };
+    let pd_phys = alloc_zeroed_table()?;
+    pdpt.entries[0].set_page(pd_phys, paging::FLAG_WRITABLE);
+
+    let pd = unsafe { &mut *(pd_phys as *mut paging::Table) };
+    for index in 0..512usize {
+        let phys = (index as u64) * 0x200000;
+        pd.entries[index].set_page(
+            phys,
+            paging::FLAG_WRITABLE | paging::FLAG_PRESENT | paging::FLAG_GLOBAL | paging::FLAG_HUGE,
+        );
+    }
+
+    Ok(())
+}
+
+fn map_boot_stack(root: &mut paging::Table) -> Result<(), &'static str> {
+    let rsp: u64;
+    unsafe {
+        asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
+    }
+    // The stack grows downward on x86_64; ensure pages below current RSP are mapped.
+    let below_pages = PAGE_SIZE.saturating_mul(16);
+    let start = align_down(rsp.saturating_sub(below_pages), PAGE_SIZE as u64);
+    let end = align_up(rsp.saturating_add(PAGE_SIZE), PAGE_SIZE as u64);
+    map_range_identity(root, start, end, FLAG_WRITE | FLAG_GLOBAL)
+}
+
+fn map_range_identity(
+    root: &mut paging::Table,
+    start: u64,
+    end: u64,
+    flags: u64,
+) -> Result<(), &'static str> {
+    let mut current = align_down(start, PAGE_SIZE as u64);
+    let limit = align_up(end, PAGE_SIZE as u64);
+    while current < limit {
+        match map_kernel_page(root, current, current, flags) {
+            Ok(_) => {}
+            Err("vmm: page already mapped") => {
+                // Reuse existing mapping; early firmware mappings can already
+                // cover parts of these ranges and should not be fatal.
+            }
+            Err(e) => return Err(e),
+        }
+        current = current.saturating_add(PAGE_SIZE);
+    }
+    Ok(())
+}
+
+pub fn bootstrap_kernel_page_tables(
+    framebuffer_base: u64,
+    framebuffer_size: usize,
+    boot_info_ptr: u64,
+    boot_info_size: usize,
+    kernel_start: u64,
+    kernel_end: u64,
+) -> Result<PhysAddr, &'static str> {
+    let root_phys = alloc_zeroed_table()?;
+    let root = unsafe { &mut *(root_phys as *mut paging::Table) };
+
+    map_identity_low_mem(root)?;
+
+    let ram_flags = FLAG_WRITE | FLAG_GLOBAL;
+    let framebuffer_flags = FLAG_WRITE | FLAG_GLOBAL | FLAG_WRITE_COMBINE;
+    let boot_info_flags = FLAG_WRITE | FLAG_GLOBAL;
+
+    if kernel_end > kernel_start {
+        map_range_identity(root, kernel_start, kernel_end, ram_flags)?;
+    }
+    if boot_info_size > 0 {
+        let start = align_down(boot_info_ptr, PAGE_SIZE as u64);
+        let end = align_up(
+            boot_info_ptr.saturating_add(boot_info_size as u64),
+            PAGE_SIZE as u64,
+        );
+        map_range_identity(root, start, end, boot_info_flags)?;
+    }
+    if framebuffer_size > 0 {
+        let start = align_down(framebuffer_base, PAGE_SIZE as u64);
+        let end = align_up(
+            framebuffer_base.saturating_add(framebuffer_size as u64),
+            PAGE_SIZE as u64,
+        );
+        map_range_identity(root, start, end, framebuffer_flags)?;
+    }
+    map_boot_stack(root)?;
+
+    root.entries[511].set_page(root_phys, paging::FLAG_WRITABLE);
+
+    Ok(root_phys)
+}
+
+/// Activates a prepared PML4 by loading CR3.
+pub fn activate_kernel_page_tables(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
+    if !is_page_aligned(kernel_pml4_phys) {
+        return Err("vmm: cr3 physical address must be page aligned");
+    }
+
+    unsafe {
+        paging::write_cr3(kernel_pml4_phys);
+    }
+    Ok(())
+}
+
+/// Initializes the VMM with the given physical PML4 address.
 pub fn init(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
     if !is_page_aligned(kernel_pml4_phys) {
         return Err("vmm: cr3 physical address must be page aligned");
@@ -338,6 +578,7 @@ pub fn init(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
     })
 }
 
+/// Maps `pages` pages from `phys_start` to `virt_start` with the given flags.
 pub fn map(
     virt_start: VirtAddr,
     phys_start: PhysAddr,
@@ -400,6 +641,8 @@ pub fn map(
     })
 }
 
+/// Maps `pages` pages from `phys_start` to `virt_start` and records the VMM
+/// as the owner of the physical pages.
 pub fn map_owned(
     virt_start: VirtAddr,
     phys_start: PhysAddr,
@@ -409,15 +652,18 @@ pub fn map_owned(
 ) -> Result<(), &'static str> {
     map(virt_start, phys_start, pages, flags, owner)?;
     with_state_mut(|state| {
-        if let Some(last) = state.mappings.last_mut() {
-            if last.virt_start == virt_start && last.phys_start == phys_start && last.pages == pages {
-                last.owned_physical = true;
-            }
+        if let Some(last) = state.mappings.last_mut()
+            && last.virt_start == virt_start
+            && last.phys_start == phys_start
+            && last.pages == pages
+        {
+            last.owned_physical = true;
         }
     });
     Ok(())
 }
 
+/// Allocates physical pages and maps them into kernel virtual address space.
 pub fn alloc_and_map(pages: usize, flags: u64, owner: &str) -> Result<VirtAddr, &'static str> {
     if pages == 0 {
         return Err("vmm: pages must be > 0");
@@ -443,6 +689,46 @@ pub fn alloc_and_map(pages: usize, flags: u64, owner: &str) -> Result<VirtAddr, 
     Ok(virt)
 }
 
+/// Maps physical pages at the next available kernel virtual address.
+pub fn map_physical_anywhere(
+    phys_start: PhysAddr,
+    pages: usize,
+    flags: u64,
+    owner: &str,
+) -> Result<VirtAddr, &'static str> {
+    if pages == 0 {
+        return Err("vmm: pages must be > 0");
+    }
+    if !is_page_aligned(phys_start) {
+        return Err("vmm: physical address must be page aligned");
+    }
+
+    let virt = with_state_mut(|state| {
+        if !state.initialized {
+            return Err("vmm: not initialized");
+        }
+
+        let start = state.next_kernel_virt;
+        let end = checked_range_end(start, pages).ok_or("vmm: virtual range overflow")?;
+        state.next_kernel_virt = end;
+        Ok(start)
+    })?;
+
+    if let Err(e) = map(virt, phys_start, pages, flags, owner) {
+        with_state_mut(|state| {
+            if state.next_kernel_virt
+                >= virt.saturating_add((pages as u64).saturating_mul(PAGE_SIZE))
+            {
+                state.next_kernel_virt = virt;
+            }
+        });
+        return Err(e);
+    }
+
+    Ok(virt)
+}
+
+/// Removes the mapping starting at `virt_start` and frees owned physical pages.
 pub fn unmap(virt_start: VirtAddr) -> Result<(), &'static str> {
     if !is_page_aligned(virt_start) {
         return Err("vmm: virtual address must be page aligned");
@@ -476,14 +762,23 @@ pub fn unmap(virt_start: VirtAddr) -> Result<(), &'static str> {
     })
 }
 
+/// Returns the physical address mapped at `virt`, if any.
 pub fn translate(virt: VirtAddr) -> Option<PhysAddr> {
-    with_state(|state| if state.initialized { translate_hw(virt) } else { None })
+    with_state(|state| {
+        if state.initialized {
+            translate_hw(virt)
+        } else {
+            None
+        }
+    })
 }
 
+/// Returns a snapshot of all recorded mappings.
 pub fn mappings() -> Vec<Mapping> {
     with_state(|state| state.mappings.clone())
 }
 
+/// Returns a snapshot of VMM statistics.
 pub fn stats() -> VmmStats {
     with_state(|state| {
         let mapped_pages = state

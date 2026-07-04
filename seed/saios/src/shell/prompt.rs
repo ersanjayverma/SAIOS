@@ -22,7 +22,7 @@ impl PromptProvider for SessionPromptProvider<'_> {
         if let Some(user) = &self.session.current_user {
             format!("{}@SAIOS:{}>", user, self.session.current_working_directory)
         } else {
-            self.session.prompt.clone()
+            format!("SAIOS:{}>", self.session.current_working_directory)
         }
     }
 }

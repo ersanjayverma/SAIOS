@@ -1,14 +1,27 @@
+//! Kernel provider subsystem.
+//!
+//! A provider exposes a slice of the kernel's object namespace as a collection
+//! of [`ProviderObject`] entries. Each provider is identified by a
+//! [`ProviderId`] and a namespace path (for example `/storage` or `/network`).
+//! Providers are registered during KSF bootstrap and are queried by the shell
+//! and object manager to present a unified view of hardware, services and
+//! runtime state.
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::driver::storage;
 use crate::driver::{dhcp, ethernet, loopback, wifi};
 use crate::object_manager::{Health, ObjectStatus, ObjectType, Property, PropertyMap};
 use crate::som::{ObjectId, ProviderId};
 use crate::{pci, scheduler};
-use crate::driver::storage;
 
+/// Broad category of a kernel provider.
+///
+/// The variant is exposed as a property on provider objects and is used by the
+/// object manager to route queries to the correct subsystem.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProviderType {
     Core,
@@ -29,37 +42,74 @@ pub enum ProviderType {
     AI,
 }
 
+/// A single object exposed by a provider.
+///
+/// Provider objects are lightweight snapshots of kernel state. They carry a
+/// human-readable path, type, status and a flat map of properties that the
+/// shell and object manager can render without knowing provider-specific
+/// details.
 #[derive(Clone)]
 pub struct ProviderObject {
+    /// Namespace path of the object, relative to the provider root.
     pub path: String,
+    /// Short display name of the object.
     pub name: String,
+    /// SAIOS object type classification.
     pub object_type: ObjectType,
+    /// Current operational status.
     pub status: ObjectStatus,
+    /// Health assessment derived from status and subsystem state.
     pub health: Health,
+    /// Path of the parent object, if any.
     pub parent_path: Option<String>,
+    /// Key/value property bag exposed to user-space.
     pub properties: PropertyMap,
 }
 
+/// Interface implemented by every kernel provider.
+///
+/// Providers are the kernel's abstraction for browsing hardware and runtime
+/// objects. The default implementations of [`Provider::initialize`],
+/// [`Provider::shutdown`] and [`Provider::lookup`] are no-ops so simple
+/// providers only need to implement identity and enumeration methods.
 pub trait Provider {
+    /// Returns the provider's unique identifier.
     fn id(&self) -> ProviderId;
+    /// Returns the provider's short name (e.g. `"storage"`).
     fn name(&self) -> &str;
+    /// Returns the provider's category.
     fn provider_type(&self) -> ProviderType;
+    /// Returns the provider's namespace path (e.g. `"/storage"`).
     fn namespace(&self) -> &str;
 
+    /// Called once when the provider is registered.
+    ///
+    /// The default implementation does nothing; providers that need to probe
+    /// hardware or allocate state should override this.
     fn initialize(&mut self) {}
+    /// Called when the provider is unregistered or the system shuts down.
+    ///
+    /// The default implementation does nothing.
     fn shutdown(&mut self) {}
 
+    /// Returns all objects currently exposed by this provider.
     fn enumerate(&self) -> Vec<ProviderObject>;
+    /// Looks up a single object by its object identifier.
+    ///
+    /// The default implementation returns `None`. Providers that maintain a
+    /// stable object-id-to-object mapping should override this.
     fn lookup(&self, _id: ObjectId) -> Option<ProviderObject> {
         None
     }
 }
 
+/// Provider that enumerates detected storage volumes.
 pub struct StorageProvider {
     id: ProviderId,
 }
 
 impl StorageProvider {
+    /// Creates a new storage provider with the given identifier.
     pub const fn new(id: ProviderId) -> Self {
         Self { id }
     }
@@ -82,6 +132,8 @@ impl Provider for StorageProvider {
         "/storage"
     }
 
+    /// Enumerates all detected storage volumes, including the in-memory tmpfs
+    /// root and any probed filesystem images.
     fn enumerate(&self) -> Vec<ProviderObject> {
         let mut out = Vec::new();
         for volume in storage::volumes() {
@@ -135,11 +187,13 @@ impl Provider for StorageProvider {
     }
 }
 
+/// Provider that enumerates discovered hardware devices.
 pub struct DeviceProvider {
     id: ProviderId,
 }
 
 impl DeviceProvider {
+    /// Creates a new device provider with the given identifier.
     pub const fn new(id: ProviderId) -> Self {
         Self { id }
     }
@@ -162,13 +216,13 @@ impl Provider for DeviceProvider {
         "/devices"
     }
 
-    fn initialize(&mut self) {
-        pci::init();
-    }
+    /// Hardware probing is deferred until an explicit driver or shell command.
+    fn initialize(&mut self) {}
 
+    /// Enumerates PCI devices already known to the kernel without probing.
     fn enumerate(&self) -> Vec<ProviderObject> {
         let mut out = Vec::new();
-        for (idx, dev) in pci::devices().into_iter().enumerate() {
+        for (idx, dev) in pci::devices_snapshot().into_iter().enumerate() {
             out.push(ProviderObject {
                 path: format!("devices/pci{}", idx),
                 name: format!("pci{}", idx),
@@ -200,11 +254,13 @@ impl Provider for DeviceProvider {
     }
 }
 
+/// Provider that enumerates running threads/processes.
 pub struct ProcessProvider {
     id: ProviderId,
 }
 
 impl ProcessProvider {
+    /// Creates a new process provider with the given identifier.
     pub const fn new(id: ProviderId) -> Self {
         Self { id }
     }
@@ -227,6 +283,7 @@ impl Provider for ProcessProvider {
         "/processes"
     }
 
+    /// Enumerates scheduler threads as process objects.
     fn enumerate(&self) -> Vec<ProviderObject> {
         let mut out = Vec::new();
         for thread in scheduler::threads() {
@@ -255,11 +312,13 @@ impl Provider for ProcessProvider {
     }
 }
 
+/// Provider that enumerates network interfaces.
 pub struct NetworkProvider {
     id: ProviderId,
 }
 
 impl NetworkProvider {
+    /// Creates a new network provider with the given identifier.
     pub const fn new(id: ProviderId) -> Self {
         Self { id }
     }
@@ -282,6 +341,7 @@ impl Provider for NetworkProvider {
         "/network"
     }
 
+    /// Enumerates loopback, ethernet and wireless network interfaces.
     fn enumerate(&self) -> Vec<ProviderObject> {
         let mut out = Vec::new();
 
@@ -348,7 +408,12 @@ impl Provider for NetworkProvider {
                         key: "MAC".to_string(),
                         value: format!(
                             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                            iface.mac[0], iface.mac[1], iface.mac[2], iface.mac[3], iface.mac[4], iface.mac[5]
+                            iface.mac[0],
+                            iface.mac[1],
+                            iface.mac[2],
+                            iface.mac[3],
+                            iface.mac[4],
+                            iface.mac[5]
                         ),
                     },
                     Property {
@@ -416,7 +481,12 @@ impl Provider for NetworkProvider {
                         key: "MAC".to_string(),
                         value: format!(
                             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                            iface.mac[0], iface.mac[1], iface.mac[2], iface.mac[3], iface.mac[4], iface.mac[5]
+                            iface.mac[0],
+                            iface.mac[1],
+                            iface.mac[2],
+                            iface.mac[3],
+                            iface.mac[4],
+                            iface.mac[5]
                         ),
                     },
                     Property {

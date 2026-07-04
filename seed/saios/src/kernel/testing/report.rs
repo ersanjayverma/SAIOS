@@ -14,6 +14,12 @@ pub struct TestReport {
     pub failures: Vec<TestFailure>,
 }
 
+impl Default for TestReport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestReport {
     pub fn new() -> Self {
         Self {

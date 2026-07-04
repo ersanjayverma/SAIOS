@@ -1,8 +1,13 @@
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::console;
+use crate::driver::dhcp;
+use crate::driver::network;
+use crate::driver::storage as disk;
+use crate::driver::usb;
 use crate::heap;
 use crate::kernel::crt;
 use crate::kernel::device;
@@ -13,8 +18,8 @@ use crate::kernel::package_image;
 use crate::kernel::process;
 use crate::kernel::sairu;
 use crate::kernel::syscall;
-use crate::kernel::testing;
 use crate::kernel::telemetry;
+use crate::kernel::testing;
 use crate::kernel::timeline;
 use crate::ksf;
 use crate::object_manager;
@@ -23,9 +28,11 @@ use crate::pmm;
 use crate::saifs;
 use crate::scheduler;
 use crate::shell::command::{ShellResult, StaticCommand};
+use crate::shell::regex as shell_regex;
 use crate::shell::registry::CommandRegistry;
 use crate::shell::session::CommandContext;
 use crate::timer;
+use crate::vfs;
 
 pub fn register(registry: &mut CommandRegistry) {
     registry.register(Box::new(StaticCommand {
@@ -45,7 +52,7 @@ pub fn register(registry: &mut CommandRegistry) {
     }));
     registry.register(Box::new(StaticCommand {
         name: "grep",
-        description: "Filter stdin by substring",
+        description: "Filter stdin by regex",
         handler: cmd_grep,
     }));
     registry.register(Box::new(StaticCommand {
@@ -284,6 +291,11 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_verify,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "validate",
+        description: "Run kernel validation suite",
+        handler: cmd_validate,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "services",
         description: "List service objects",
         handler: cmd_services,
@@ -340,8 +352,18 @@ pub fn register(registry: &mut CommandRegistry) {
     }));
     registry.register(Box::new(StaticCommand {
         name: "mount",
-        description: "List current mounts",
-        handler: cmd_mounts,
+        description: "Mount storage volume or list mounts; see 'mount help'",
+        handler: cmd_mount,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "umount",
+        description: "Unmount a mounted path",
+        handler: cmd_umount,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "df",
+        description: "Show mounted filesystem usage",
+        handler: cmd_df,
     }));
     registry.register(Box::new(StaticCommand {
         name: "graph",
@@ -399,6 +421,31 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_pci,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "usb",
+        description: "List or rescan USB host controllers",
+        handler: cmd_usb,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "net",
+        description: "Network stack control and status",
+        handler: cmd_net,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "dhcp",
+        description: "Renew DHCP lease and show IPv4 config",
+        handler: cmd_dhcp,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "ping",
+        description: "Send IPv4 ICMP echo requests",
+        handler: cmd_ping,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "wget",
+        description: "HTTP download to local filesystem",
+        handler: cmd_wget,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "shutdown",
         description: "Shutdown kernel (halt)",
         handler: cmd_shutdown,
@@ -431,17 +478,35 @@ fn cmd_help(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         ctx.session.current_namespace,
         ctx.session.environment.len()
     );
-    for item in &ctx.command_catalog {
-        console::println!("{} - {}", item.name, item.description);
-    }
+    print_command_table(ctx);
     Ok(())
 }
 
 fn cmd_registry(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
-    for item in &ctx.command_catalog {
-        console::println!("{} - {}", item.name, item.description);
-    }
+    print_command_table(ctx);
     Ok(())
+}
+
+fn print_command_table(ctx: &CommandContext) {
+    let name_width = ctx
+        .command_catalog
+        .iter()
+        .map(|item| item.name.len())
+        .max()
+        .unwrap_or(7)
+        .max(7);
+
+    console::println!("{:<width$}  DESCRIPTION", "COMMAND", width = name_width);
+    console::println!("{:-<width$}  {:-<11}", "", "", width = name_width);
+
+    for item in &ctx.command_catalog {
+        console::println!(
+            "{:<width$}  {}",
+            item.name,
+            item.description,
+            width = name_width
+        );
+    }
 }
 
 fn cmd_version(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
@@ -470,10 +535,20 @@ fn cmd_echo(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_grep(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let needle = args.first().copied().ok_or("grep: missing pattern")?;
+    let (literal, pattern) = match args {
+        ["-F", pat, ..] => (true, *pat),
+        [pat, ..] => (false, *pat),
+        _ => return Err("grep: missing pattern"),
+    };
+
     let input = ctx.env_get("SISH_STDIN").ok_or("grep: no stdin")?;
     for line in input.lines() {
-        if line.contains(needle) {
+        let matched = if literal {
+            line.contains(pattern)
+        } else {
+            shell_regex::is_match(pattern, line)?
+        };
+        if matched {
             console::println!("{}", line);
         }
     }
@@ -484,7 +559,7 @@ fn cmd_wc(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     let input = ctx.env_get("SISH_STDIN").ok_or("wc: no stdin")?;
     let lines = input.lines().count();
     let words = input.split_whitespace().count();
-    let bytes = input.as_bytes().len();
+    let bytes = input.len();
     console::println!("{} {} {}", lines, words, bytes);
     Ok(())
 }
@@ -678,7 +753,9 @@ fn cmd_exec(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let mut overlays: Vec<(String, String)> = Vec::new();
 
     while idx < args.len() && is_env_assignment(args[idx]) {
-        let (key, value) = args[idx].split_once('=').ok_or("exec: invalid env assignment")?;
+        let (key, value) = args[idx]
+            .split_once('=')
+            .ok_or("exec: invalid env assignment")?;
         overlays.push((key.to_string(), value.to_string()));
         idx += 1;
     }
@@ -793,17 +870,17 @@ fn cmd_syscall(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     if args.first().copied() == Some("invoke") {
-        let sel = args.get(1).copied().ok_or("syscall invoke: missing name or id")?;
+        let sel = args
+            .get(1)
+            .copied()
+            .ok_or("syscall invoke: missing name or id")?;
         let number = if let Ok(raw) = sel.parse::<u64>() {
             syscall::SyscallNumber::from_raw(raw).ok_or("syscall invoke: unknown id")?
         } else {
             syscall::SyscallNumber::from_name(sel).ok_or("syscall invoke: unknown name")?
         };
 
-        let arg0 = args
-            .get(2)
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
+        let arg0 = args.get(2).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
 
         let req = syscall::SyscallRequest {
             number,
@@ -838,7 +915,8 @@ fn cmd_crt(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
     if args.first().copied() == Some("probe") {
         let program = args.get(1).copied().unwrap_or("hello");
-        let startup = crt::prepare_startup_block(program, &args[2..], ctx.session.environment.as_slice());
+        let startup =
+            crt::prepare_startup_block(program, &args[2..], ctx.session.environment.as_slice());
         console::println!("program={}", startup.program);
         console::println!("argc={}", startup.argc);
         for (i, a) in startup.argv.iter().enumerate() {
@@ -922,18 +1000,71 @@ fn cmd_dashboard(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!("SAIOS SYSTEM DASHBOARD");
     console::println!("========================================");
     console::println!("Boot            {}", if kom_ready { "OK" } else { "FAIL" });
-    console::println!("Memory          {}", if telemetry.ram_mb > 0 { "OK" } else { "FAIL" });
-    console::println!("Scheduler       {}", if telemetry.scheduler_threads > 0 { "OK" } else { "FAIL" });
-    console::println!("Processes       {} running", jobs.iter().filter(|p| matches!(p.state, process::ProcessState::Running)).count());
-    console::println!("Drivers         {}/{} healthy", drivers.len().saturating_sub(driver_faulted), drivers.len());
-    console::println!("Devices         {} online", devices.iter().filter(|d| matches!(d.status, device::DeviceStatus::Online)).count());
-    console::println!("Filesystem      {}", if telemetry.mount_count > 0 { "Mounted" } else { "Not Mounted" });
-    console::println!("Event Bus       {}", if event_bus_ready { "Active" } else { "Inactive" });
-    console::println!("Telemetry       {}", if telemetry.event_total > 0 { "Active" } else { "Warmup" });
-    console::println!("SAIRU           {}", if sairu_ready { "Healthy" } else { "Degraded" });
+    console::println!(
+        "Memory          {}",
+        if telemetry.ram_mb > 0 { "OK" } else { "FAIL" }
+    );
+    console::println!(
+        "Scheduler       {}",
+        if telemetry.scheduler_threads > 0 {
+            "OK"
+        } else {
+            "FAIL"
+        }
+    );
+    console::println!(
+        "Processes       {} running",
+        jobs.iter()
+            .filter(|p| matches!(p.state, process::ProcessState::Running))
+            .count()
+    );
+    console::println!(
+        "Drivers         {}/{} healthy",
+        drivers.len().saturating_sub(driver_faulted),
+        drivers.len()
+    );
+    console::println!(
+        "Devices         {} online",
+        devices
+            .iter()
+            .filter(|d| matches!(d.status, device::DeviceStatus::Online))
+            .count()
+    );
+    console::println!(
+        "Filesystem      {}",
+        if telemetry.mount_count > 0 {
+            "Mounted"
+        } else {
+            "Not Mounted"
+        }
+    );
+    console::println!(
+        "Event Bus       {}",
+        if event_bus_ready {
+            "Active"
+        } else {
+            "Inactive"
+        }
+    );
+    console::println!(
+        "Telemetry       {}",
+        if telemetry.event_total > 0 {
+            "Active"
+        } else {
+            "Warmup"
+        }
+    );
+    console::println!(
+        "SAIRU           {}",
+        if sairu_ready { "Healthy" } else { "Degraded" }
+    );
     console::println!("CPU             {} logical", telemetry.cpu_logical);
     console::println!("RAM             {} MiB", telemetry.ram_mb);
-    console::println!("Heap            {:.1} MiB / {:.1} MiB", (telemetry.heap_used_kb as f64) / 1024.0, (telemetry.heap_total_kb as f64) / 1024.0);
+    console::println!(
+        "Heap            {:.1} MiB / {:.1} MiB",
+        (telemetry.heap_used_kb as f64) / 1024.0,
+        (telemetry.heap_total_kb as f64) / 1024.0
+    );
     console::println!("Events          {}", telemetry.event_total);
     console::println!("Objects         {}", kom_stats.total);
     console::println!("Services        {}", services.len());
@@ -949,7 +1080,8 @@ fn cmd_dashboard(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         }
     }
     console::println!("----------------------------------------");
-    console::println!("READY  KOM={} KSM={} DEV={} DRV={} PROC={} EVT={} SAIRU={}",
+    console::println!(
+        "READY  KOM={} KSM={} DEV={} DRV={} PROC={} EVT={} SAIRU={}",
         kom_ready,
         ksm_ready,
         device_mgr_ready,
@@ -1007,11 +1139,15 @@ fn cmd_graph(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
     console::println!("Kernel");
 
-    fn print_children(parent_id: Option<ksf::ServiceId>, all: &[ksf::ServiceSnapshot], depth: usize) {
+    fn print_children(
+        parent_id: Option<ksf::ServiceId>,
+        all: &[ksf::ServiceSnapshot],
+        depth: usize,
+    ) {
         for svc in all {
             let is_child = match parent_id {
                 None => svc.dependencies.is_empty(),
-                Some(pid) => svc.dependencies.iter().any(|d| *d == pid),
+                Some(pid) => svc.dependencies.contains(&pid),
             };
             if !is_child {
                 continue;
@@ -1086,7 +1222,12 @@ fn cmd_objects(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
     console::println!("ID   TYPE      NAME");
     for obj in records {
-        console::println!("{}    {}    {}", obj.id.0, obj.object_type.as_str(), obj.name);
+        console::println!(
+            "{}    {}    {}",
+            obj.id.0,
+            obj.object_type.as_str(),
+            obj.name
+        );
     }
     Ok(())
 }
@@ -1316,7 +1457,10 @@ fn cmd_service(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             ksf::stop(name)
         }
         "restart" => {
-            let name = args.get(1).copied().ok_or("service restart: missing name")?;
+            let name = args
+                .get(1)
+                .copied()
+                .ok_or("service restart: missing name")?;
             ksf::restart(name)
         }
         "health" => {
@@ -1366,7 +1510,10 @@ fn cmd_service(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_restart(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let name = args.first().copied().ok_or("restart: missing service name")?;
+    let name = args
+        .first()
+        .copied()
+        .ok_or("restart: missing service name")?;
     ksf::restart(name)
 }
 
@@ -1381,7 +1528,12 @@ fn cmd_test(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
     console::println!("Running {} tests...", report.total);
     for failure in &report.failures {
-        console::println!("FAIL {}::{} - {}", failure.suite, failure.test, failure.reason);
+        console::println!(
+            "FAIL {}::{} - {}",
+            failure.suite,
+            failure.test,
+            failure.reason
+        );
     }
 
     if report.failed == 0 {
@@ -1416,6 +1568,24 @@ fn cmd_verify(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     Ok(())
+}
+
+fn cmd_validate(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    match crate::kernel::validation::ValidateOptions::parse(args) {
+        Ok(options) => {
+            let report = crate::kernel::validation::run(&options);
+            crate::kernel::validation::print_report(&report, &options);
+            Ok(())
+        }
+        Err("help") => {
+            crate::kernel::validation::print_help();
+            Ok(())
+        }
+        Err(e) => {
+            crate::kernel::validation::print_help();
+            Err(e)
+        }
+    }
 }
 
 fn cmd_services(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
@@ -1511,7 +1681,10 @@ fn cmd_query(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_inspect(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let target = args.first().copied().ok_or("inspect: missing object id or path")?;
+    let target = args
+        .first()
+        .copied()
+        .ok_or("inspect: missing object id or path")?;
 
     if let Ok(id) = target.parse::<u64>() {
         if let Some(lines) = kom::inspect(kom::ObjectId(id)) {
@@ -1546,13 +1719,13 @@ fn cmd_inspect(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     let by_name = kom::find_by_name(target);
-    if let Some(obj) = by_name.first() {
-        if let Some(lines) = kom::inspect(obj.id) {
-            for line in lines {
-                console::println!("{}", line);
-            }
-            return Ok(());
+    if let Some(obj) = by_name.first()
+        && let Some(lines) = kom::inspect(obj.id)
+    {
+        for line in lines {
+            console::println!("{}", line);
         }
+        return Ok(());
     }
 
     for line in object_manager::inspect(target)? {
@@ -1562,7 +1735,10 @@ fn cmd_inspect(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_describe(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("describe: missing object path")?;
+    let path = args
+        .first()
+        .copied()
+        .ok_or("describe: missing object path")?;
     let handle = saifs::open(path).map_err(|_| "describe: open failed")?;
 
     console::println!("Path : {}", handle.path());
@@ -1577,7 +1753,8 @@ fn cmd_describe(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
         console::println!("Provider Name : {}", meta.provider_name);
     }
 
-    let props = crate::saifs::Handle::properties(&handle).map_err(|_| "describe: properties failed")?;
+    let props =
+        crate::saifs::Handle::properties(&handle).map_err(|_| "describe: properties failed")?;
     for p in props {
         console::println!("{} : {}", p.key, p.value);
     }
@@ -1601,7 +1778,10 @@ fn cmd_health(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
 }
 
 fn cmd_diagnose(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("diagnose: missing object path")?;
+    let path = args
+        .first()
+        .copied()
+        .ok_or("diagnose: missing object path")?;
     for line in object_manager::diagnose(path)? {
         console::println!("{}", line);
     }
@@ -1609,14 +1789,13 @@ fn cmd_diagnose(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_explain(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let path = args.first().copied().ok_or("explain: missing object path")?;
+    let path = args
+        .first()
+        .copied()
+        .ok_or("explain: missing object path")?;
     if path.eq_ignore_ascii_case("heap") || path.eq_ignore_ascii_case("memory") {
         let h = heap::stats();
-        let used_pct = if h.total == 0 {
-            0
-        } else {
-            (h.used.saturating_mul(100) / h.total) as u64
-        };
+        let used_pct = h.used.saturating_mul(100).checked_div(h.total).unwrap_or(0) as u64;
         console::println!("Heap uses a grow-on-demand policy with guarded expansion.");
         console::println!(
             "Current Usage: {} MiB / {} MiB ({}%)",
@@ -1624,7 +1803,9 @@ fn cmd_explain(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             h.total / (1024 * 1024),
             used_pct
         );
-        console::println!("Growth: starts at 32 MiB, expands in 2 MiB/4 MiB chunks, capped at 1 GiB.");
+        console::println!(
+            "Growth: starts at 32 MiB, expands in 2 MiB/4 MiB chunks, capped at 1 GiB."
+        );
         if used_pct >= 85 {
             console::println!("Recommendation: run recover and inspect heavy services/drivers.");
         } else if used_pct >= 70 {
@@ -1666,25 +1847,175 @@ fn cmd_events(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     for e in records {
-        if let Some(source) = source_filter {
-            if !e.source.contains(source) {
-                continue;
-            }
+        if let Some(source) = source_filter
+            && !e.source.contains(source)
+        {
+            continue;
         }
-        console::println!("bus#{} {} {} {}", e.seq, e.kind.as_str(), e.source, e.detail);
+        console::println!(
+            "bus#{} {} {} {}",
+            e.seq,
+            e.kind.as_str(),
+            e.source,
+            e.detail
+        );
     }
     Ok(())
 }
 
-fn cmd_mounts(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
-    for mount in saifs::mounts() {
-        console::println!(
-            "{} -> provider={} readonly={}",
-            mount.path,
-            mount.provider.0,
-            mount.read_only
-        );
+fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let sub = args.first().copied().unwrap_or("list");
+
+    match sub {
+        // ── mount list (default) ────────────────────────────────────────────
+        "list" | "ls" => {
+            // Show VFS-level mounts first
+            let vfs_mounts = vfs::mounts();
+            console::println!("── VFS Mounts ──────────────────────────────────────────────────");
+            console::println!("  {:<20}  {:<10}  {}", "PATH", "FS", "FLAGS");
+            for m in &vfs_mounts {
+                let flags = if m.read_only { "ro" } else { "rw" };
+                console::println!("  {:<20}  {:<10}  {}", m.path, m.fs_name, flags);
+            }
+            if vfs_mounts.is_empty() {
+                console::println!("  (none)");
+            }
+
+            // Show all storage volumes and their mount state
+            let volumes = disk::volumes();
+            console::println!("── Storage Volumes ─────────────────────────────────────────────");
+            console::println!(
+                "  {:<10}  {:<8}  {:>8}  {:<10}  {}",
+                "NAME",
+                "FS",
+                "SIZE(MB)",
+                "BACKING",
+                "MOUNTED AT"
+            );
+            for v in &volumes {
+                let size_mb = v.total_bytes / (1024 * 1024);
+                let mounted = v.mounted_at.as_deref().unwrap_or("—");
+                console::println!(
+                    "  {:<10}  {:<8}  {:>8}  {:<10}  {}",
+                    v.name,
+                    v.filesystem.as_str(),
+                    size_mb,
+                    v.backing,
+                    mounted
+                );
+            }
+            if volumes.is_empty() {
+                console::println!("  (no volumes detected)");
+            }
+            Ok(())
+        }
+
+        // ── mount scan ──────────────────────────────────────────────────────
+        "scan" => {
+            disk::rescan();
+            let count = disk::volumes().len();
+            console::println!("mount: rescan complete — {} volume(s) detected", count);
+            Ok(())
+        }
+
+        // ── mount help ──────────────────────────────────────────────────────
+        "help" => {
+            console::println!("mount                         List mounts and storage volumes");
+            console::println!("mount list                    Same as above");
+            console::println!("mount scan                    Rescan PCI storage devices");
+            console::println!("mount <device> <path> [ro]    Mount a storage volume");
+            console::println!("umount <path>                 Unmount a mounted path");
+            console::println!("");
+            console::println!("Devices are shown by 'mount list'. Common names: disk0, disk1, ...");
+            console::println!("Mount points must exist as directories (e.g. /mnt/disk0).");
+            Ok(())
+        }
+
+        // ── mount <device> <mountpoint> [ro] ────────────────────────────────
+        device => {
+            let mountpoint = args
+                .get(1)
+                .copied()
+                .ok_or("mount: usage: mount <device> <path> [ro]")?;
+
+            // Reject paths that could escape or corrupt critical dirs
+            if mountpoint == "/" || mountpoint == "/boot" || mountpoint == "/bin" {
+                return Err("mount: cannot mount over a system directory");
+            }
+
+            let read_only = args.get(2).is_some_and(|f| f.eq_ignore_ascii_case("ro"));
+
+            // Confirm the volume exists and get its fs type
+            let vol = disk::find_volume(device)
+                .ok_or("mount: volume not found (run 'mount scan' to refresh)")?;
+
+            let fs_name = vol.filesystem.as_str();
+
+            // Auto-create the mount-point directory if it doesn't exist
+            let _ = vfs::mkdir(mountpoint);
+
+            // Register in VFS
+            vfs::mount(mountpoint, fs_name, read_only)?;
+
+            // Update storage driver's mounted_at marker
+            disk::mount_volume(device, mountpoint, read_only)?;
+
+            console::println!(
+                "mount: {} ({}) mounted at {} [{}]",
+                device,
+                fs_name,
+                mountpoint,
+                if read_only { "ro" } else { "rw" }
+            );
+            Ok(())
+        }
     }
+}
+
+fn cmd_umount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let mountpoint = args
+        .first()
+        .copied()
+        .ok_or("umount: usage: umount <path>")?;
+
+    // Remove from VFS (validates path and protects root)
+    vfs::umount(mountpoint)?;
+
+    // Clear the storage driver's mounted_at marker (best-effort)
+    let _ = disk::umount_volume(mountpoint);
+
+    console::println!("umount: {} unmounted", mountpoint);
+    Ok(())
+}
+
+fn cmd_df(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let target = args.first().copied().unwrap_or("/");
+    let path = if target.starts_with('/') {
+        target.to_string()
+    } else {
+        let cwd = saifs::pwd();
+        if cwd == "/" {
+            format!("/{}", target)
+        } else {
+            format!("{}/{}", cwd, target)
+        }
+    };
+
+    let volume = disk::mounted_volume_for_path(path.as_str())
+        .ok_or("df: path is not on a mounted volume")?;
+    let total = disk::total_bytes(path.as_str()).unwrap_or(0);
+    let used = disk::used_bytes(path.as_str()).unwrap_or(0);
+    let free = total.saturating_sub(used);
+
+    console::println!("Filesystem  Mounted on  Total(MB)  Used(MB)  Free(MB)");
+    console::println!(
+        "{:<10}  {:<10}  {:>9}  {:>8}  {:>8}",
+        volume.name,
+        volume.mounted_at.unwrap_or_else(|| "-".to_string()),
+        total / (1024 * 1024),
+        used / (1024 * 1024),
+        free / (1024 * 1024)
+    );
     Ok(())
 }
 
@@ -1778,6 +2109,240 @@ fn cmd_pci(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
+fn cmd_usb(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let action = args.first().copied().unwrap_or("status");
+
+    match action {
+        "scan" | "rescan" | "up" => {
+            driver::start("usb")?;
+            console::println!("usb: {} controller(s) detected", usb::controller_count());
+            cmd_usb(_ctx, &["status"])
+        }
+        "status" | "ls" => {
+            let controllers = usb::controllers();
+            if controllers.is_empty() {
+                console::println!("usb: no host controllers detected");
+                console::println!("usb: no USB HID keyboard/mouse path is available yet");
+                return Ok(());
+            }
+
+            console::println!("Name  Type  State  Ver  Ports  Vendor Device  Resource");
+            for controller in controllers {
+                let resource = if let Some(mmio) = controller.mmio_base {
+                    format!("mmio@0x{:x}", mmio)
+                } else if let Some(io) = controller.io_base {
+                    format!("io@0x{:x}", io)
+                } else {
+                    "unmapped".to_string()
+                };
+                let state = match controller.state {
+                    usb::UsbControllerState::Discovered => "disc",
+                    usb::UsbControllerState::Initialized => "init",
+                    usb::UsbControllerState::Faulted => "fail",
+                };
+                let version = controller
+                    .version
+                    .map(|v| format!("{:x}.{:02x}", v >> 8, v & 0xFF))
+                    .unwrap_or_else(|| "--".to_string());
+                console::println!(
+                    "{}  {}  {}  {}  {}/{}  {:04x} {:04x}  {}",
+                    controller.name,
+                    controller.kind,
+                    state,
+                    version,
+                    controller.connected_ports,
+                    controller.port_count,
+                    controller.vendor_id,
+                    controller.device_id,
+                    resource,
+                );
+                if let Some(err) = controller.last_error.as_ref() {
+                    console::println!("  note: {}", err);
+                }
+            }
+            console::println!(
+                "usb: xHCI init/probe is present; HID keyboard/mouse still needs device enumeration, transfer rings, and report parsing"
+            );
+            Ok(())
+        }
+        _ => Err("usb: usage: usb [status|scan|rescan|up]"),
+    }
+}
+
+fn cmd_net(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let action = args.first().copied().unwrap_or("status");
+
+    match action {
+        "up" => {
+            driver::start("network")?;
+            driver::start("loopback")?;
+            driver::start("ethernet")?;
+            driver::start("wifi")?;
+            driver::start("dhcp")?;
+            driver::start("dns")?;
+            let _ = network::bind_nic();
+            let _ = network::apply_dhcp();
+            console::println!("network: up");
+            cmd_net(_ctx, &["status"])
+        }
+        "status" | "st" => {
+            let st = network::status();
+            console::println!("boot->pci.nic.detected={}", st.pci_nic_detected);
+            console::println!("pci->driver.bind={}", st.driver_bound);
+            console::println!("driver->rx.tx={}", st.rx_tx_ready);
+            console::println!("rx.tx->arp={}", st.arp_ready);
+            console::println!("arp->ipv4={}", st.ipv4_ready);
+            console::println!("ipv4->udp={}", st.udp_ready);
+            console::println!("udp->dhcp={}", st.dhcp_ready);
+            console::println!("dhcp->tcp={}", st.tcp_ready);
+            console::println!("tcp->http={}", st.http_ready);
+            console::println!("counters tx={} rx={}", st.tx_packets, st.rx_packets);
+            if let Some(nic) = st.nic {
+                console::println!(
+                    "nic iface={} kind={} backing={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    nic.interface,
+                    nic.kind,
+                    nic.backing,
+                    nic.mac[0],
+                    nic.mac[1],
+                    nic.mac[2],
+                    nic.mac[3],
+                    nic.mac[4],
+                    nic.mac[5]
+                );
+            } else {
+                console::println!("nic: none");
+            }
+            if let Some(ipv4) = st.ipv4 {
+                console::println!(
+                    "ipv4 addr={} mask={} gw={} dns={}",
+                    ipv4.address,
+                    ipv4.subnet_mask,
+                    ipv4.gateway,
+                    ipv4.dns_server
+                );
+            } else {
+                console::println!("ipv4: none");
+            }
+            Ok(())
+        }
+        "reset" => {
+            driver::reload("network")?;
+            driver::reload("ethernet")?;
+            driver::reload("wifi")?;
+            driver::reload("dhcp")?;
+            let _ = network::bind_nic();
+            let _ = network::apply_dhcp();
+            console::println!("network: reset complete");
+            Ok(())
+        }
+        _ => Err("net: expected up|status|reset"),
+    }
+}
+
+fn cmd_dhcp(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    driver::start("dhcp")?;
+    let cfg = network::apply_dhcp()?;
+    console::println!(
+        "dhcp: ipv4={} mask={} gw={} dns={}",
+        cfg.address,
+        cfg.subnet_mask,
+        cfg.gateway,
+        cfg.dns_server
+    );
+
+    for lease in dhcp::leases() {
+        console::println!(
+            "lease iface={} ip={} lease={}s",
+            lease.interface,
+            lease.address,
+            lease.lease_seconds
+        );
+    }
+    Ok(())
+}
+
+fn cmd_ping(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let ip = args.first().copied().ok_or("ping: missing IPv4 target")?;
+    let count = args
+        .get(1)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4)
+        .clamp(1, 16);
+
+    if network::status().ipv4_ready {
+        // Keep existing state if already configured.
+    } else {
+        let _ = network::bind_nic();
+        let _ = network::apply_dhcp();
+    }
+
+    let mut success = 0usize;
+    for seq in 0..count {
+        match network::ping_ipv4(ip) {
+            Ok(rtt) => {
+                success += 1;
+                console::println!(
+                    "{} bytes from {}: icmp_seq={} ttl=64 time={}ms",
+                    64,
+                    ip,
+                    seq,
+                    rtt
+                );
+            }
+            Err(e) => {
+                console::println!("ping: seq={} error={}", seq, e);
+            }
+        }
+    }
+
+    console::println!(
+        "ping stats: tx={} rx={} loss={}%%",
+        count,
+        success,
+        ((count.saturating_sub(success)) * 100) / count
+    );
+    Ok(())
+}
+
+fn default_download_path(url: &str) -> String {
+    if let Some((_, tail)) = url.rsplit_once('/')
+        && !tail.is_empty()
+    {
+        return if tail.starts_with('/') {
+            tail.to_string()
+        } else {
+            format!("/tmp/{}", tail)
+        };
+    }
+    "/tmp/download.bin".to_string()
+}
+
+fn cmd_wget(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let url = args.first().copied().ok_or("wget: missing URL")?;
+    let out = args
+        .get(1)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| default_download_path(url));
+
+    if network::status().ipv4_ready {
+        // Keep existing lease.
+    } else {
+        let _ = network::bind_nic();
+        let _ = network::apply_dhcp();
+    }
+
+    let result = network::http_download(url, out.as_str())?;
+    console::println!(
+        "wget: status={} bytes={} saved={} url={}",
+        result.status_code,
+        result.size,
+        result.path,
+        url
+    );
+    Ok(())
+}
+
 fn cmd_shutdown(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     console::println!("Shutdown requested");
     halt_forever()
@@ -1807,7 +2372,10 @@ fn cmd_sairu(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             Ok(())
         }
         "explain" => {
-            let target = args.get(1).copied().ok_or("sairu explain: missing target")?;
+            let target = args
+                .get(1)
+                .copied()
+                .ok_or("sairu explain: missing target")?;
             for line in sairu::explain(target) {
                 console::println!("{}", line);
             }

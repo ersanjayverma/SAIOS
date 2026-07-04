@@ -1,6 +1,12 @@
+//! Simple shell command parser.
+//!
+//! Splits an input line into statements, pipelines and individual commands,
+//! respecting single and double quotes and recognizing basic I/O redirections.
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// Direction of an I/O redirection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RedirectKind {
     Read,
@@ -10,51 +16,110 @@ pub enum RedirectKind {
 
 #[derive(Clone, Debug)]
 pub struct Redirection {
+    /// Direction of the redirection.
     pub kind: RedirectKind,
+    /// Target file path.
     pub path: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct ParsedCommand {
+    /// Command name or path.
     pub command: String,
+    /// Command arguments.
     pub args: Vec<String>,
+    /// I/O redirections attached to the command.
     pub redirections: Vec<Redirection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlOperator {
+    Sequential,
+    AndAnd,
+    OrOr,
+    Background,
 }
 
 #[derive(Clone, Debug)]
 pub struct ParsedPipeline {
+    /// Commands connected by pipes in a single statement.
     pub commands: Vec<ParsedCommand>,
 }
 
-fn split_statements(line: &str) -> Vec<&str> {
+#[derive(Clone, Debug)]
+pub struct ParsedStatement {
+    /// The pipeline(s) in this statement.
+    pub pipelines: Vec<ParsedPipeline>,
+    /// The control operator that governs execution of the next statement.
+    pub operator: ControlOperator,
+}
+
+/// Splits `line` into statements separated by unquoted control operators.
+fn split_statements(line: &str) -> Vec<(&str, ControlOperator)> {
     let mut out = Vec::new();
     let mut start = 0usize;
     let mut in_single = false;
     let mut in_double = false;
+    let mut pending = ControlOperator::Sequential;
 
-    for (idx, ch) in line.char_indices() {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        let (byte_idx, ch) = chars[idx];
         match ch {
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
-            ';' if !in_single && !in_double => {
-                let part = line[start..idx].trim();
+            '&' if !in_single && !in_double && idx + 1 < chars.len() && chars[idx + 1].1 == '&' => {
+                let part = line[start..byte_idx].trim();
                 if !part.is_empty() {
-                    out.push(part);
+                    out.push((part, pending));
                 }
-                start = idx + ch.len_utf8();
+                start = byte_idx + 2;
+                pending = ControlOperator::AndAnd;
+                idx += 2;
+                continue;
+            }
+            '&' if !in_single && !in_double => {
+                let part = line[start..byte_idx].trim();
+                if !part.is_empty() {
+                    out.push((part, pending));
+                }
+                start = byte_idx + 1;
+                pending = ControlOperator::Background;
+            }
+            '|' if !in_single && !in_double && idx + 1 < chars.len() && chars[idx + 1].1 == '|' => {
+                let part = line[start..byte_idx].trim();
+                if !part.is_empty() {
+                    out.push((part, pending));
+                }
+                start = byte_idx + 2;
+                pending = ControlOperator::OrOr;
+                idx += 2;
+                continue;
+            }
+            ';' if !in_single && !in_double => {
+                let part = line[start..byte_idx].trim();
+                if !part.is_empty() {
+                    out.push((part, pending));
+                }
+                start = byte_idx + 1;
+                pending = ControlOperator::Sequential;
             }
             _ => {}
         }
+
+        idx += 1;
     }
 
     let tail = line[start..].trim();
     if !tail.is_empty() {
-        out.push(tail);
+        out.push((tail, pending));
     }
 
     out
 }
 
+/// Splits `statement` into pipeline stages separated by unquoted pipes.
 fn split_pipeline(statement: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -72,6 +137,7 @@ fn split_pipeline(statement: &str) -> Vec<&str> {
                 }
                 start = idx + ch.len_utf8();
             }
+            // Other characters are part of the pipeline stage.
             _ => {}
         }
     }
@@ -84,6 +150,10 @@ fn split_pipeline(statement: &str) -> Vec<&str> {
     out
 }
 
+/// Tokenizes a single pipeline stage into words and redirection operators.
+///
+/// Quote characters toggle quoting state and are stripped from the resulting
+/// tokens.
 fn tokenize(part: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
@@ -121,6 +191,7 @@ fn tokenize(part: &str) -> Vec<String> {
                 }
                 out.push("<".into());
             }
+            // Append any other character to the current token.
             _ => current.push(ch),
         }
     }
@@ -132,6 +203,7 @@ fn tokenize(part: &str) -> Vec<String> {
     out
 }
 
+/// Parses a single pipeline stage into a command, arguments and redirections.
 fn parse_command(part: &str) -> Option<ParsedCommand> {
     let tokens = tokenize(part);
     if tokens.is_empty() {
@@ -173,6 +245,7 @@ fn parse_command(part: &str) -> Option<ParsedCommand> {
                 i += 2;
                 continue;
             }
+            // Regular word: first becomes the command, rest become arguments.
             _ => {}
         }
 
@@ -192,9 +265,11 @@ fn parse_command(part: &str) -> Option<ParsedCommand> {
     })
 }
 
-pub fn parse_line(line: &str) -> Vec<ParsedPipeline> {
-    let mut pipelines = Vec::new();
-    for statement in split_statements(line) {
+/// Parses a complete input line into one or more parsed statements.
+pub fn parse_line(line: &str) -> Vec<ParsedStatement> {
+    let mut statements = Vec::new();
+    for (statement, operator) in split_statements(line) {
+        let mut pipelines = Vec::new();
         let mut commands = Vec::new();
         for part in split_pipeline(statement) {
             if let Some(cmd) = parse_command(part) {
@@ -204,6 +279,37 @@ pub fn parse_line(line: &str) -> Vec<ParsedPipeline> {
         if !commands.is_empty() {
             pipelines.push(ParsedPipeline { commands });
         }
+        if !pipelines.is_empty() {
+            statements.push(ParsedStatement {
+                pipelines,
+                operator,
+            });
+        }
     }
-    pipelines
+    statements
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_control_operators_and_redirects() {
+        let statements = parse_line("echo hello | grep h && echo ok > out.txt");
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].operator, ControlOperator::Sequential);
+        assert_eq!(statements[1].operator, ControlOperator::AndAnd);
+        assert_eq!(statements[0].pipelines.len(), 1);
+        assert_eq!(statements[0].pipelines[0].commands.len(), 2);
+        assert_eq!(statements[1].pipelines[0].commands[0].redirections.len(), 1);
+    }
+
+    #[test]
+    fn parses_background_and_or_or() {
+        let statements = parse_line("echo first & echo second || echo third");
+        assert_eq!(statements.len(), 3);
+        assert_eq!(statements[0].operator, ControlOperator::Background);
+        assert_eq!(statements[1].operator, ControlOperator::OrOr);
+        assert_eq!(statements[2].operator, ControlOperator::Sequential);
+    }
 }

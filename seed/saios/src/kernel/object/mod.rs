@@ -10,11 +10,11 @@ pub mod types;
 pub use event::{ObjectEvent, ObjectEventRecord};
 pub use handle::ObjectHandle;
 pub use id::ObjectId;
-pub use registry::{KomStats, ObjectRecord};
 pub use manager::{
     count, enumerate, events, find, find_by_name, find_by_type, init, inspect, register, stats,
     unregister,
 };
+pub use registry::{KomStats, ObjectRecord};
 pub use state::ObjectState;
 pub use r#trait::KernelObject;
 pub use types::ObjectType;

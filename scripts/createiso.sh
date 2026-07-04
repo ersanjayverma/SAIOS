@@ -7,6 +7,10 @@ set -Eeuo pipefail
 # that contains:
 #   /EFI/BOOT/BOOTX64.EFI   (UEFI application)
 #   /SAIOS/seed.elf         (kernel payload)
+#
+# This script builds optical-style media. For physical USB sticks on real
+# hardware, prefer scripts/createuefiusb.ps1 (Windows) to produce a GPT+ESP
+# layout directly.
 
 usage() {
     cat <<'EOF'
@@ -84,6 +88,57 @@ require_cmd() {
     fi
 }
 
+read_u16_le() {
+    local file="$1"
+    local offset="$2"
+    dd if="$file" bs=1 skip="$offset" count=2 status=none | od -An -tu2 | tr -d '[:space:]'
+}
+
+read_u32_le() {
+    local file="$1"
+    local offset="$2"
+    dd if="$file" bs=1 skip="$offset" count=4 status=none | od -An -tu4 | tr -d '[:space:]'
+}
+
+check_efi_binary() {
+    local file="$1"
+
+    local mz_sig
+    mz_sig="$(dd if="$file" bs=1 count=2 status=none | od -An -tx1 | tr -d '[:space:]')"
+    if [[ "$mz_sig" != "4d5a" ]]; then
+        echo "Invalid EFI image: missing MZ header: $file" >&2
+        exit 1
+    fi
+
+    local pe_off
+    pe_off="$(read_u32_le "$file" 60)"
+    if [[ -z "$pe_off" ]]; then
+        echo "Invalid EFI image: unable to read PE header offset: $file" >&2
+        exit 1
+    fi
+
+    local pe_sig
+    pe_sig="$(dd if="$file" bs=1 skip="$pe_off" count=4 status=none | od -An -tx1 | tr -d '[:space:]')"
+    if [[ "$pe_sig" != "50450000" ]]; then
+        echo "Invalid EFI image: missing PE signature at offset $pe_off: $file" >&2
+        exit 1
+    fi
+
+    local machine
+    machine="$(read_u16_le "$file" $((pe_off + 4)))"
+    if [[ "$machine" != "34404" ]]; then
+        echo "Invalid EFI image: machine is $machine, expected 34404 (0x8664, x64)" >&2
+        exit 1
+    fi
+
+    local subsystem
+    subsystem="$(read_u16_le "$file" $((pe_off + 24 + 68)))"
+    if [[ "$subsystem" != "10" ]]; then
+        echo "Invalid EFI image: subsystem is $subsystem, expected 10 (EFI Application)" >&2
+        exit 1
+    fi
+}
+
 for cmd in xorriso dd mkfs.fat mmd mcopy mdir; do
     require_cmd "$cmd"
 done
@@ -111,6 +166,8 @@ if [[ ! -f "$BOOTLOADER" ]]; then
     exit 1
 fi
 
+check_efi_binary "$BOOTLOADER"
+
 if [[ ! -f "$KERNEL" ]]; then
     echo "Kernel payload not found: $KERNEL" >&2
     echo "Build it first or run with --rebuild" >&2
@@ -123,6 +180,7 @@ trap '[[ "$KEEP_TEMP" == "1" ]] || rm -rf "$STAGE_DIR"' EXIT
 ISO_ROOT="$STAGE_DIR/isoroot"
 EFI_IMG="$STAGE_DIR/efiboot.img"
 mkdir -p "$ISO_ROOT/EFI/BOOT"
+mkdir -p "$ISO_ROOT/SAIOS"
 
 echo "[3/5] Creating FAT EFI image (${EFI_SIZE_MIB} MiB)..."
 dd if=/dev/zero of="$EFI_IMG" bs=1M count="$EFI_SIZE_MIB" status=none
@@ -135,6 +193,11 @@ mmd -i "$EFI_IMG" ::/SAIOS
 mcopy -i "$EFI_IMG" "$BOOTLOADER" ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i "$EFI_IMG" "$KERNEL" ::/SAIOS/seed.elf
 
+# Keep direct copies in the ISO tree as an extra compatibility fallback for
+# firmware tools that inspect the ISO filesystem.
+cp "$BOOTLOADER" "$ISO_ROOT/EFI/BOOT/BOOTX64.EFI"
+cp "$KERNEL" "$ISO_ROOT/SAIOS/seed.elf"
+
 echo "[5/5] Building ISO..."
 cp "$EFI_IMG" "$ISO_ROOT/EFI/BOOT/efiboot.img"
 
@@ -146,8 +209,10 @@ xorriso \
     -R \
     -J \
     -eltorito-alt-boot \
+    -eltorito-platform efi \
     -e EFI/BOOT/efiboot.img \
     -no-emul-boot \
+    -efi-boot-part --efi-boot-image \
     -isohybrid-gpt-basdat \
     -o "$ISO_OUT" \
     "$ISO_ROOT" >/dev/null

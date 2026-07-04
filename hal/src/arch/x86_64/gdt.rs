@@ -1,3 +1,5 @@
+//! Global Descriptor Table setup for x86_64 long mode.
+
 use crate::arch::x86_64::sync::StaticCell;
 use crate::arch::x86_64::tss::{self, TaskStateSegment};
 use core::{arch::asm, mem::size_of};
@@ -10,6 +12,13 @@ pub const USER_CODE: SegmentSelector = SegmentSelector::new(3, 3);
 pub const USER_DATA: SegmentSelector = SegmentSelector::new(4, 3);
 
 pub const TSS_SELECTOR: SegmentSelector = SegmentSelector::new(5, 0);
+
+const GDT_NULL_DESCRIPTOR: u64 = 0;
+const GDT_KERNEL_CODE_DESCRIPTOR: u64 = 0x00AF9A000000FFFF;
+const GDT_KERNEL_DATA_DESCRIPTOR: u64 = 0x00AF92000000FFFF;
+const GDT_USER_CODE_DESCRIPTOR: u64 = 0x00AFFA000000FFFF;
+const GDT_USER_DATA_DESCRIPTOR: u64 = 0x00AFF2000000FFFF;
+const GDT_TSS_AVAILABLE_DESCRIPTOR_TYPE: u64 = 0x89;
 
 /// Global GDT storage.
 static GDT: StaticCell<GlobalDescriptorTable> = StaticCell::new(GlobalDescriptorTable::new());
@@ -56,19 +65,19 @@ impl GlobalDescriptorTable {
 
     fn install_segments(&mut self) {
         // Long mode ignores base/limit for code/data segments.
-        self.entries[0] = 0;
+        self.entries[0] = GDT_NULL_DESCRIPTOR;
 
         // Kernel code
-        self.entries[1] = 0x00AF9A000000FFFF;
+        self.entries[1] = GDT_KERNEL_CODE_DESCRIPTOR;
 
         // Kernel data
-        self.entries[2] = 0x00AF92000000FFFF;
+        self.entries[2] = GDT_KERNEL_DATA_DESCRIPTOR;
 
         // User code
-        self.entries[3] = 0x00AFFA000000FFFF;
+        self.entries[3] = GDT_USER_CODE_DESCRIPTOR;
 
         // User data
-        self.entries[4] = 0x00AFF2000000FFFF;
+        self.entries[4] = GDT_USER_DATA_DESCRIPTOR;
     }
 
     fn install_tss(&mut self, tss: *const TaskStateSegment) {
@@ -99,7 +108,7 @@ impl SystemDescriptor {
         let low = ((limit as u64) & 0xFFFF)
             | ((base & 0xFFFF) << 16)
             | (((base >> 16) & 0xFF) << 32)
-            | (0x89u64 << 40)
+            | (GDT_TSS_AVAILABLE_DESCRIPTOR_TYPE << 40)
             | ((((limit as u64) >> 16) & 0xF) << 48)
             | (((base >> 24) & 0xFF) << 56);
 

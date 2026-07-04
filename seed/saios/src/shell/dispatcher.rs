@@ -2,13 +2,12 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use super::command::ShellResult;
-use super::parser::{self, ParsedCommand, RedirectKind};
+use super::parser::{self, ControlOperator, ParsedCommand, RedirectKind};
 use super::registry::CommandRegistry;
 use super::session::CommandContext;
 use crate::console;
 use crate::kernel::process;
 use crate::saifs;
-use crate::vfs;
 
 pub struct CommandDispatcher;
 
@@ -17,10 +16,39 @@ impl CommandDispatcher {
         Self
     }
 
-    pub fn dispatch(&self, registry: &CommandRegistry, ctx: &mut CommandContext, line: &str) -> ShellResult {
-        let pipelines = parser::parse_line(line);
-        for pipeline in pipelines {
-            self.dispatch_pipeline(registry, ctx, pipeline.commands)?;
+    pub fn dispatch(
+        &self,
+        registry: &CommandRegistry,
+        ctx: &mut CommandContext,
+        line: &str,
+    ) -> ShellResult {
+        let statements = parser::parse_line(line);
+        let mut previous_ok = true;
+        for statement in statements {
+            for pipeline in statement.pipelines {
+                let ok = self.dispatch_pipeline(registry, ctx, pipeline.commands)?;
+                if !ok {
+                    previous_ok = false;
+                    break;
+                }
+            }
+
+            match statement.operator {
+                ControlOperator::AndAnd => {
+                    if !previous_ok {
+                        break;
+                    }
+                }
+                ControlOperator::OrOr => {
+                    if previous_ok {
+                        break;
+                    }
+                }
+                ControlOperator::Background => {
+                    previous_ok = true;
+                }
+                ControlOperator::Sequential => {}
+            }
         }
         Ok(())
     }
@@ -30,13 +58,14 @@ impl CommandDispatcher {
         registry: &CommandRegistry,
         ctx: &mut CommandContext,
         mut commands: Vec<ParsedCommand>,
-    ) -> ShellResult {
+    ) -> Result<bool, &'static str> {
         if commands.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
 
         let mut pipe_input: Option<String> = None;
         let len = commands.len();
+        let mut ok = true;
 
         for (idx, cmd) in commands.iter_mut().enumerate() {
             self.expand_alias_and_env(ctx, cmd);
@@ -53,7 +82,10 @@ impl CommandDispatcher {
             for redir in &cmd.redirections {
                 match redir.kind {
                     RedirectKind::Read => {
-                        stdin_data = Some(saifs::read_text(redir.path.as_str()).map_err(|_| "redirect: input open failed")?);
+                        stdin_data = Some(
+                            saifs::read_text(redir.path.as_str())
+                                .map_err(|_| "redirect: input open failed")?,
+                        );
                     }
                     RedirectKind::Write => {
                         out_redirect = Some((redir.path.clone(), false));
@@ -65,7 +97,11 @@ impl CommandDispatcher {
             }
 
             let suppress_console = idx + 1 < len || out_redirect.is_some();
-            let (_exit, captured) = self.execute_command(registry, ctx, cmd, stdin_data.as_deref(), suppress_console)?;
+            let (exit_code, captured) =
+                self.execute_command(registry, ctx, cmd, stdin_data.as_deref(), suppress_console)?;
+            if exit_code != 0 {
+                ok = false;
+            }
 
             if let Some((path, append)) = out_redirect {
                 self.write_redirect(path.as_str(), captured.as_str(), append)?;
@@ -74,7 +110,7 @@ impl CommandDispatcher {
             }
         }
 
-        Ok(())
+        Ok(ok)
     }
 
     fn execute_command(
@@ -104,7 +140,11 @@ impl CommandDispatcher {
                 run
             }
             None => {
-                match process::exec(cmd.command.as_str(), argv.as_slice(), ctx.session.environment.as_slice()) {
+                match process::exec(
+                    cmd.command.as_str(),
+                    argv.as_slice(),
+                    ctx.session.environment.as_slice(),
+                ) {
                     Ok(code) => {
                         exit_code = code;
                         ctx.session.last_exit_code = code;
@@ -226,7 +266,12 @@ impl CommandDispatcher {
         out
     }
 
-    fn run_script(&self, registry: &CommandRegistry, ctx: &mut CommandContext, path: &str) -> ShellResult {
+    fn run_script(
+        &self,
+        registry: &CommandRegistry,
+        ctx: &mut CommandContext,
+        path: &str,
+    ) -> ShellResult {
         let abs = if path.starts_with('/') {
             path.to_string()
         } else {
@@ -250,15 +295,33 @@ impl CommandDispatcher {
     }
 
     fn write_redirect(&self, path: &str, data: &str, append: bool) -> ShellResult {
+        let path = self.resolve_shell_path(path);
         let final_data = if append {
-            let mut merged = saifs::read_text(path).unwrap_or_default();
+            let mut merged = saifs::read_text(path.as_str()).unwrap_or_default();
             merged.push_str(data);
             merged
         } else {
             data.to_string()
         };
 
-        let _ = saifs::touch(path);
-        vfs::write_path(path, final_data.as_bytes())
+        let _ = saifs::remove(path.as_str());
+        let _ = saifs::touch(path.as_str());
+        let handle = saifs::open(path.as_str()).map_err(|_| "redirect: output open failed")?;
+        crate::saifs::Handle::write(&handle, final_data.as_bytes())
+            .map(|_| ())
+            .map_err(|_| "redirect: output write failed")
+    }
+
+    fn resolve_shell_path(&self, path: &str) -> String {
+        if path.starts_with('/') {
+            return path.to_string();
+        }
+
+        let cwd = saifs::pwd();
+        if cwd == "/" {
+            alloc::format!("/{}", path)
+        } else {
+            alloc::format!("{}/{}", cwd, path)
+        }
     }
 }

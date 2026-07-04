@@ -389,5 +389,9 @@ fn compute_pie_layout(pid: u64, preferred_base: u64) -> (u64, u64) {
 
 pub fn exec(name: &str, args: &[&str], env: &[(String, String)]) -> Result<i32, &'static str> {
     let pid = spawn(name, args, env)?;
-    wait(pid)
+    jobs()
+        .into_iter()
+        .find(|job| job.pid == pid)
+        .and_then(|job| job.exit_code)
+        .ok_or("exec: process did not exit")
 }

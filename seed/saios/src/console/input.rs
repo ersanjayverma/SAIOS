@@ -250,5 +250,4 @@ impl InputBuffer {
 
         line
     }
-
 }

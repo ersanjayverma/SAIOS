@@ -1,3 +1,5 @@
+//! Model-specific register access helpers for x86_64.
+
 use core::arch::asm;
 
 /// Read a Model-Specific Register.

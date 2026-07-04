@@ -1,14 +1,27 @@
+//! Kernel heap allocator.
+//!
+//! A bump-style allocator that grows by allocating physical pages and mapping
+//! them into kernel virtual address space. It serves as the global allocator
+//! for the `alloc` crate.
+
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
 use crate::pmm::{self, HeapStats, PAGE_SIZE};
 
-const INITIAL_HEAP_BYTES: usize = 32 * 1024 * 1024; // 32 MiB initial mapped heap
-const RESERVED_VIRTUAL_HEAP_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB virtual heap budget
-const HEAP_GROW_STEP_SMALL_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
-const HEAP_GROW_STEP_LARGE_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+/// Initial heap size in bytes (32 MiB).
+const INITIAL_HEAP_BYTES: usize = 32 * 1024 * 1024;
+const FALLBACK_INITIAL_HEAP_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum virtual heap budget in bytes (1 GiB).
+const RESERVED_VIRTUAL_HEAP_BYTES: usize = 1024 * 1024 * 1024;
+const FALLBACK_MAX_HEAP_BYTES: usize = 32 * 1024 * 1024;
+/// Small grow step in bytes (2 MiB).
+const HEAP_GROW_STEP_SMALL_BYTES: usize = 2 * 1024 * 1024;
+/// Large grow step in bytes (4 MiB).
+const HEAP_GROW_STEP_LARGE_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum number of heap chunks.
 const MAX_HEAP_CHUNKS: usize = 512;
 
 #[derive(Copy, Clone)]
@@ -59,6 +72,7 @@ impl HeapState {
 
 static STATE: StaticCell<HeapState> = StaticCell::new(HeapState::new());
 static LOCK: AtomicBool = AtomicBool::new(false);
+static IDENTITY_HEAP_MAX_PHYS: AtomicU64 = AtomicU64::new(0);
 
 fn lock() {
     while LOCK
@@ -84,10 +98,27 @@ fn bytes_to_pages_ceil(bytes: usize) -> usize {
     core::cmp::max(1, with_tail / page)
 }
 
+fn identity_heap_max_phys() -> Option<u64> {
+    match IDENTITY_HEAP_MAX_PHYS.load(Ordering::Relaxed) {
+        0 => None,
+        value => Some(value),
+    }
+}
+
+pub fn configure_identity_mode(max_phys: Option<u64>) {
+    IDENTITY_HEAP_MAX_PHYS.store(max_phys.unwrap_or(0), Ordering::Relaxed);
+}
+
 fn alloc_best_effort_pages(max_pages: usize) -> Option<(usize, usize)> {
     let mut pages = max_pages;
     while pages > 0 {
-        if let Some(base) = pmm::alloc_pages(pages) {
+        let allocation = if let Some(max_phys) = identity_heap_max_phys() {
+            pmm::alloc_pages_below(pages, max_phys)
+        } else {
+            pmm::alloc_pages(pages)
+        };
+
+        if let Some(base) = allocation {
             return Some((base as usize, pages));
         }
         pages /= 2;
@@ -172,6 +203,7 @@ fn compute_used_bytes(state: &HeapState) -> usize {
     used
 }
 
+/// Global allocator used by the kernel.
 pub struct KernelHeapAllocator;
 
 unsafe impl GlobalAlloc for KernelHeapAllocator {
@@ -217,10 +249,12 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
     }
 
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Bump allocator v1: no reclaim yet.
+        // Bump allocator v1: deallocation is a no-op because individual
+        // allocations are not tracked.
     }
 }
 
+/// Initializes the kernel heap.
 pub fn init() {
     lock();
     let state = unsafe { &mut *STATE.get() };
@@ -234,18 +268,31 @@ pub fn init() {
     state.initialized = false;
 
     let total_ram_bytes = pmm::total_pages().saturating_mul(PAGE_SIZE as usize);
-    state.max_bytes = core::cmp::min(total_ram_bytes, RESERVED_VIRTUAL_HEAP_BYTES);
+    let fallback_mode = identity_heap_max_phys().is_some();
+    state.max_bytes = if fallback_mode {
+        core::cmp::min(total_ram_bytes, FALLBACK_MAX_HEAP_BYTES)
+    } else {
+        core::cmp::min(total_ram_bytes, RESERVED_VIRTUAL_HEAP_BYTES)
+    };
     state.target_bytes = state.max_bytes;
 
     // Bring heap to the initial mapped size first.
-    let initial = core::cmp::min(INITIAL_HEAP_BYTES, state.max_bytes);
+    let initial = if fallback_mode {
+        core::cmp::min(FALLBACK_INITIAL_HEAP_BYTES, state.max_bytes)
+    } else {
+        core::cmp::min(INITIAL_HEAP_BYTES, state.max_bytes)
+    };
     grow_heap_locked(state, initial, HEAP_GROW_STEP_LARGE_BYTES);
 
     state.initialized = state.chunk_count > 0;
-    assert!(state.initialized, "heap: failed to allocate initial heap pages");
+    assert!(
+        state.initialized,
+        "heap: failed to allocate initial heap pages"
+    );
     unlock();
 }
 
+/// Returns current heap usage statistics.
 pub fn stats() -> HeapStats {
     lock();
     let state = unsafe { &*STATE.get() };

@@ -11,7 +11,6 @@ pub struct ShellSession {
     pub aliases: Vec<(String, String)>,
     pub last_exit_code: i32,
     pub history: Vec<String>,
-    pub prompt: String,
     pub current_user: Option<String>,
 }
 
@@ -32,7 +31,6 @@ impl CommandContext {
                 aliases: Vec::new(),
                 last_exit_code: 0,
                 history: Vec::new(),
-                prompt: "SAIOS v1.0>".into(),
                 current_user: None,
             },
             command_catalog: Vec::new(),

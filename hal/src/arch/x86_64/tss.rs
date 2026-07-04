@@ -24,6 +24,12 @@ impl TaskStateSegment {
     }
 }
 
+impl Default for TaskStateSegment {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn instance() -> *const TaskStateSegment {
     TSS.get() as *const TaskStateSegment
 }

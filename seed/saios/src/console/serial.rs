@@ -1,4 +1,10 @@
+//! Serial console backend and input event decoder.
+//!
+//! Reads bytes from COM1, decodes UTF-8 and parses ANSI/VT escape sequences
+//! into [`KeyEvent`] values for the shell and console subsystem.
+
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 use smallvec::SmallVec;
 use utf8parse::{Parser, Receiver};
 
@@ -7,9 +13,18 @@ use super::keyboard::{KeyEvent, KeyModifiers};
 use hal::arch::x86_64::io::inb;
 use hal::arch::x86_64::sync::StaticCell;
 
+/// Base I/O port for COM1.
 const COM1_DATA: u16 = 0x3F8;
+/// Line status register for COM1.
 const COM1_LINE_STATUS: u16 = COM1_DATA + 5;
+/// Whether serial input polling is enabled.
+const SERIAL_INPUT_ENABLED: bool = true;
+/// Line status bit indicating data is ready to be read.
+const LSR_DATA_READY: u8 = 0x01;
+/// Line status mask for framing, parity and overrun errors.
+const LSR_ERROR_MASK: u8 = 0x1E;
 
+/// State machine for parsing incoming escape sequences.
 enum EscState {
     None,
     Esc,
@@ -79,18 +94,34 @@ impl Utf8Decoder {
 
 static UTF8_DECODER: StaticCell<Utf8Decoder> = StaticCell::new(Utf8Decoder::new());
 static ESC_STATE: StaticCell<EscState> = StaticCell::new(EscState::None);
+static SERIAL_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(true);
 
+/// Polls COM1 for a single received byte, discarding bytes with line errors.
 fn poll_byte() -> Option<u8> {
-    if (inb(COM1_LINE_STATUS) & 0x01) == 0 {
+    if !SERIAL_INPUT_ENABLED {
         return None;
     }
+
+    let status = inb(COM1_LINE_STATUS);
+    if (status & LSR_DATA_READY) == 0 {
+        return None;
+    }
+
+    if (status & LSR_ERROR_MASK) != 0 {
+        let _ = inb(COM1_DATA);
+        return None;
+    }
+
     Some(inb(COM1_DATA))
 }
 
+/// Returns true when the collected CSI parameters exactly match `expected`.
 fn csi_params_eq_dyn(params: &SmallVec<[u8; 8]>, expected: &[u8]) -> bool {
     params.as_slice() == expected
 }
 
+/// Extracts shift/ctrl modifier flags from the trailing numeric parameter of a
+/// CSI sequence.
 fn parse_csi_modifier(params: &SmallVec<[u8; 8]>) -> KeyModifiers {
     let bytes = params.as_slice();
     let mut last_value: u8 = 0;
@@ -122,11 +153,13 @@ fn parse_csi_modifier(params: &SmallVec<[u8; 8]>) -> KeyModifiers {
             mods |= KeyModifiers::CTRL;
             mods |= KeyModifiers::SHIFT;
         }
+        // Other modifier values are not mapped.
         _ => {}
     }
     mods
 }
 
+/// Applies shift/ctrl modifiers to an arrow key event.
 fn apply_arrow_modifiers(base: KeyEvent, mods: KeyModifiers) -> KeyEvent {
     let shift = mods.contains(KeyModifiers::SHIFT);
     let ctrl = mods.contains(KeyModifiers::CTRL);
@@ -147,6 +180,7 @@ fn apply_arrow_modifiers(base: KeyEvent, mods: KeyModifiers) -> KeyEvent {
     }
 }
 
+/// Polls the serial port and returns the next decoded input event, if any.
 pub fn poll_input_event() -> Option<KeyEvent> {
     let byte = poll_byte()?;
     // SAFETY: single-core early kernel context.
@@ -243,16 +277,26 @@ pub fn poll_input_event() -> Option<KeyEvent> {
                     } else if csi_params_eq_dyn(&param_bytes, b"24") {
                         Some(KeyEvent::FKey(12))
                     } else if csi_params_eq_dyn(&param_bytes, b"1;2") {
-                        Some(apply_arrow_modifiers(KeyEvent::ArrowUp, KeyModifiers::SHIFT))
+                        Some(apply_arrow_modifiers(
+                            KeyEvent::ArrowUp,
+                            KeyModifiers::SHIFT,
+                        ))
                     } else if csi_params_eq_dyn(&param_bytes, b"1;5") {
                         Some(apply_arrow_modifiers(KeyEvent::ArrowUp, KeyModifiers::CTRL))
                     } else if csi_params_eq_dyn(&param_bytes, b"1;6") {
-                        Some(apply_arrow_modifiers(KeyEvent::ArrowUp, KeyModifiers::CTRL | KeyModifiers::SHIFT))
+                        Some(apply_arrow_modifiers(
+                            KeyEvent::ArrowUp,
+                            KeyModifiers::CTRL | KeyModifiers::SHIFT,
+                        ))
                     } else if csi_params_eq_dyn(&param_bytes, b"3") {
                         Some(KeyEvent::Delete)
-                    } else if csi_params_eq_dyn(&param_bytes, b"1") || csi_params_eq_dyn(&param_bytes, b"7") {
+                    } else if csi_params_eq_dyn(&param_bytes, b"1")
+                        || csi_params_eq_dyn(&param_bytes, b"7")
+                    {
                         Some(KeyEvent::Home)
-                    } else if csi_params_eq_dyn(&param_bytes, b"4") || csi_params_eq_dyn(&param_bytes, b"8") {
+                    } else if csi_params_eq_dyn(&param_bytes, b"4")
+                        || csi_params_eq_dyn(&param_bytes, b"8")
+                    {
                         Some(KeyEvent::End)
                     } else {
                         None
@@ -286,35 +330,51 @@ pub fn poll_input_event() -> Option<KeyEvent> {
     }
 }
 
+/// Console backend that sends output to the serial port.
 pub struct SerialConsole;
 
 impl SerialConsole {
+    /// Creates a new serial console backend.
     pub const fn new() -> Self {
         Self
     }
 
+    /// Initializes the underlying serial hardware.
     pub fn init() {
         hal::arch::x86_64::console::init_serial();
     }
 
+    /// Enables or disables serial output.
+    pub fn set_output_enabled(enabled: bool) {
+        SERIAL_OUTPUT_ENABLED.store(enabled, Ordering::Release);
+    }
+
+    /// Returns true if serial output is currently enabled.
+    pub fn output_enabled() -> bool {
+        SERIAL_OUTPUT_ENABLED.load(Ordering::Acquire)
+    }
+
+    /// Writes a single character during early boot or emergency conditions.
     #[inline(always)]
     pub fn emergency_put_char(c: char) {
         match c {
             '\n' => {
-                hal::arch::x86_64::console::_print(format_args!("\r\n"));
+                hal::arch::x86_64::console::_print_force(format_args!("\r\n"));
             }
             _ => {
-                hal::arch::x86_64::console::_print(format_args!("{}", c));
+                hal::arch::x86_64::console::_print_force(format_args!("{}", c));
             }
         }
     }
 
+    /// Writes a string during early boot or emergency conditions.
     pub fn emergency_write_str(s: &str) {
         for c in s.chars() {
             Self::emergency_put_char(c);
         }
     }
 
+    /// Writes an escape sequence to the serial port.
     fn write_escape(args: fmt::Arguments) {
         hal::arch::x86_64::console::_print(args);
     }
@@ -322,6 +382,10 @@ impl SerialConsole {
 
 impl ConsoleBackend for SerialConsole {
     fn put_char(&mut self, c: char) {
+        if !Self::output_enabled() {
+            return;
+        }
+
         match c {
             '\n' => {
                 // Keep serial terminals aligned by using CRLF line endings.
@@ -334,6 +398,10 @@ impl ConsoleBackend for SerialConsole {
     }
 
     fn clear(&mut self) {
+        if !Self::output_enabled() {
+            return;
+        }
+
         // Keep serial logs line-oriented: do not emit terminal control sequences.
         Self::write_escape(format_args!("\r\n"));
     }
@@ -344,6 +412,10 @@ impl ConsoleBackend for SerialConsole {
     }
 
     fn scroll_up(&mut self, rows: usize) -> bool {
+        if !Self::output_enabled() {
+            return true;
+        }
+
         let rows = core::cmp::max(1, rows);
         for _ in 0..rows {
             Self::write_escape(format_args!("\r\n"));

@@ -1,9 +1,17 @@
+//! Physical memory manager (PMM) facade.
+//!
+//! Re-exports the page size and address type and delegates allocation,
+//! reservation and statistics to the lower-level memory driver.
+
 use efi_main::memorymap::MemoryRegion;
 
 pub use crate::driver::memory::PAGE_SIZE;
+/// Physical address type.
 pub type PhysAddr = crate::driver::memory::PhysAddr;
+/// Memory map slice type.
 pub type MemoryMap = [MemoryRegion];
 
+/// Statistics snapshot for the kernel heap.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct HeapStats {
     pub total: usize,
@@ -11,26 +19,42 @@ pub struct HeapStats {
     pub free: usize,
 }
 
+/// Initializes the physical memory manager from the UEFI memory map.
 pub fn init(memory_map: &MemoryMap) {
     crate::driver::memory::init(memory_map);
 }
 
+/// Allocates a single physical page.
 pub fn alloc_page() -> Option<PhysAddr> {
     crate::driver::memory::alloc_page()
 }
 
+/// Allocates a single physical page below `max_phys`.
+pub fn alloc_page_below(max_phys: PhysAddr) -> Option<PhysAddr> {
+    crate::driver::memory::alloc_page_below(max_phys)
+}
+
+/// Allocates `count` contiguous physical pages.
 pub fn alloc_pages(count: usize) -> Option<PhysAddr> {
     crate::driver::memory::alloc_pages(count)
 }
 
+/// Allocates `count` contiguous physical pages below `max_phys`.
+pub fn alloc_pages_below(count: usize, max_phys: PhysAddr) -> Option<PhysAddr> {
+    crate::driver::memory::alloc_pages_below(count, max_phys)
+}
+
+/// Frees a single physical page, ignoring errors.
 pub fn free_page(page: PhysAddr) {
     let _ = crate::driver::memory::free_page(page);
 }
 
+/// Frees a single physical page and returns true on success.
 pub fn try_free_page(page: PhysAddr) -> bool {
     crate::driver::memory::free_page(page)
 }
 
+/// Frees `count` pages starting at `base`.
 pub fn free_pages_range(base: PhysAddr, count: usize) -> bool {
     if count == 0 {
         return false;
@@ -48,34 +72,42 @@ pub fn free_pages_range(base: PhysAddr, count: usize) -> bool {
     ok
 }
 
+/// Marks the physical range `[base, base + length)` as reserved.
 pub fn reserve(base: PhysAddr, length: u64) {
     crate::driver::memory::reserve(base, length);
 }
 
+/// Returns the number of bytes available for allocation.
 pub fn available_bytes() -> u64 {
     crate::driver::memory::available()
 }
 
+/// Returns the number of bytes currently allocated.
 pub fn used_bytes() -> u64 {
     crate::driver::memory::used()
 }
 
+/// Returns the total number of physical pages.
 pub fn total_pages() -> usize {
     crate::driver::memory::total_pages()
 }
 
+/// Returns the number of free physical pages.
 pub fn free_pages() -> usize {
     crate::driver::memory::free_pages()
 }
 
+/// Returns the number of used physical pages.
 pub fn used_pages() -> usize {
     crate::driver::memory::used_pages()
 }
 
+/// Returns the total physical RAM in megabytes.
 pub fn total_ram_mb() -> usize {
     (total_pages() * (PAGE_SIZE as usize)) / (1024 * 1024)
 }
 
+/// Diagnostic test that allocates, frees and reallocates pages.
 pub fn run_reuse_test(page_count: usize) {
     use heapless::Vec;
 

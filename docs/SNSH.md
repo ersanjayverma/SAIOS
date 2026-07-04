@@ -132,45 +132,47 @@ Current implementation uses session-backed prompt text, and can switch to user/p
 
 Primary object-first interface:
 
-- help
-- echo
+- help, registry
+- echo, grep, wc
 - version
 - clear
 - exit
 - history
 - time
-- mem
+- mem, memory
 - cpu
-- ps
-- dmesg
-- panic
-- spawn
-- exec
-- env
-- setenv
-- unsetenv
-- status
-- objects
+- ps, jobs
+- kill, wait
+- spawn, exec
+- env, setenv, unsetenv, status
+- alias, unalias, aliases
+- source, .
+- syscall
+- crt
+- pkgimg
+- dashboard, dash
+- objects, obj
 - providers
-- service
-- test
-- verify
+- devices, dev
+- drivers, drv, driver
+- service, svc, services, svcs, restart
+- reload
+- test, verify
 - query
-- inspect
-- describe
-- health
-- diagnose
-- explain
-- events
-- logs
-- mount
+- inspect, describe
+- health, diagnose, explain
+- events, ev, logs
+- graph, gr
+- timeline, tl
+- tree
+- mount, umount
 - threads
-- uptime
-- ticks
+- uptime, ticks, irq
 - heap
 - pci
-- shutdown
-- reboot
+- sairu
+- recover, rcv
+- shutdown, reboot
 
 Service subcommands:
 
@@ -256,15 +258,39 @@ Runtime note:
 
 - Execution is binary-metadata driven and no longer dependent on demo-only `run` flow.
 
+## SISH Language Features
+
+The SNSH parser supports a small but complete command language:
+
+- **Statements**: Multiple statements on one line separated by `;`.
+  - Example: `echo a; echo b; echo c`
+- **Pipelines**: Commands connected by `|` with stdin capture via `SISH_STDIN`.
+  - Example: `ls | grep txt | wc`
+- **Redirection**:
+  - `>` write stdout to file
+  - `>>` append stdout to file
+  - `<` read file as stdin (`SISH_STDIN`)
+  - Example: `cat < /etc/hostname`, `echo hi > /tmp/out.txt`
+- **Environment expansion**: `$VAR` and `${VAR}` are expanded from the session environment.
+  - Example: `echo $PATH`
+- **Inline environment overlay**: `KEY=VALUE` prefixes on `exec` set temporary variables.
+  - Example: `exec MODE=debug hello world`
+- **Aliases**: User-defined command shortcuts.
+  - `alias ll ls -l`
+  - `aliases`, `unalias ll`
+- **Source scripts**: Execute a file in the current shell context.
+  - `source /etc/profile` or `. /etc/profile`
+- **Tab completion**: The console completion engine suggests registered commands and aliases.
+
 ## Execution Flow
 
 1. KSF starts shell service and spawns shell thread.
 2. Engine renders prompt via PromptProvider.
 3. Engine receives console input events.
-4. Parser tokenizes into command and args.
-5. Dispatcher resolves command in registry.
-6. Command executes with mutable CommandContext.
-7. If no command matches, dispatcher attempts program execution fallback.
+4. Parser splits input into statements and pipelines, tokenizes words, and extracts redirections.
+5. Dispatcher resolves each command in the registry.
+6. Command executes with mutable CommandContext; pipeline stdin is passed via `SISH_STDIN`.
+7. If no command matches, dispatcher attempts program execution fallback (`/bin/<name>` or explicit path).
 8. Exit code is persisted in session state for `status` and diagnostics.
 
 ## Error Model
@@ -324,8 +350,8 @@ After this handoff, boot code no longer invokes shell loops directly.
 
 ## Planned Extensions
 
-- completion subsystem
-- pipeline and filter graph execution
+- background jobs (`&`) and job control
 - command permissions and policy checks
 - structured output modes for machine consumers
 - remote shell transport over SIF APIs
+- startup script (`/etc/profile`) auto-sourcing at shell start

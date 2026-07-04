@@ -1,8 +1,35 @@
-use core::{arch::asm, mem::size_of};
+//! Interrupt Descriptor Table setup for x86_64.
+
+use core::{
+    arch::{asm, global_asm},
+    mem::size_of,
+};
 
 use crate::arch::x86_64::sync::StaticCell;
 
+const IDT_ENTRY_COUNT: usize = 256;
+const IDT_INTERRUPT_GATE_ATTRIBUTES: u8 = 0x8E;
+
 static IDT: StaticCell<InterruptDescriptorTable> = StaticCell::new(InterruptDescriptorTable::new());
+
+global_asm!(
+    ".global saios_default_interrupt_stub",
+    "saios_default_interrupt_stub:",
+    "push rax",
+    "push rdx",
+    "mov al, 0x20",
+    "mov dx, 0xA0",
+    "out dx, al",
+    "mov dx, 0x20",
+    "out dx, al",
+    "pop rdx",
+    "pop rax",
+    "iretq",
+);
+
+unsafe extern "C" {
+    fn saios_default_interrupt_stub();
+}
 
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
@@ -41,11 +68,10 @@ impl IdtEntry {
     }
 
     pub fn set_handler_addr(&mut self, addr: usize) {
-
         self.offset_low = addr as u16;
         self.selector = crate::arch::x86_64::gdt::KERNEL_CODE.0;
         self.ist = 0;
-        self.attributes = 0x8E;
+        self.attributes = IDT_INTERRUPT_GATE_ATTRIBUTES;
         self.offset_mid = (addr >> 16) as u16;
         self.offset_high = (addr >> 32) as u32;
         self.reserved = 0;
@@ -53,13 +79,13 @@ impl IdtEntry {
 }
 
 pub struct InterruptDescriptorTable {
-    entries: [IdtEntry; 256],
+    entries: [IdtEntry; IDT_ENTRY_COUNT],
 }
 
 impl InterruptDescriptorTable {
     pub const fn new() -> Self {
         Self {
-            entries: [IdtEntry::missing(); 256],
+            entries: [IdtEntry::missing(); IDT_ENTRY_COUNT],
         }
     }
 
@@ -68,6 +94,12 @@ impl InterruptDescriptorTable {
             limit: (size_of::<Self>() - 1) as u16,
             base: self.entries.as_ptr() as u64,
         }
+    }
+}
+
+impl Default for InterruptDescriptorTable {
+    fn default() -> Self {
+        Self::new()
     }
 }
 pub fn register(vector: u8, handler: extern "C" fn()) {
@@ -97,6 +129,10 @@ pub fn load() {
     }
 }
 pub fn init() {
+    for vector in 32u8..=255 {
+        register_raw(vector, saios_default_interrupt_stub as *const () as usize);
+    }
+
     register(0, divide_error);
     register(3, breakpoint);
     register(6, invalid_opcode);

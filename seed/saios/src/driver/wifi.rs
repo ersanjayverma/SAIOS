@@ -90,8 +90,7 @@ fn looks_like_wifi(dev: &pci::PciDevice) -> bool {
     }
 
     // Accept explicit wireless subclass and known vendor IDs often used by Wi-Fi chipsets.
-    dev.subclass == 0x80
-        || matches!(dev.vendor_id, 0x8086 | 0x168C | 0x14E4 | 0x10EC)
+    dev.subclass == 0x80 || matches!(dev.vendor_id, 0x8086 | 0x168C | 0x14E4 | 0x10EC)
 }
 
 pub fn init() {

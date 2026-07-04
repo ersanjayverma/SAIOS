@@ -1,5 +1,14 @@
+//! Shared types and helpers for the SAIOS UEFI bootloader.
+//!
+//! This crate defines the boot information structure passed from the UEFI
+//! application to the kernel, plus minimal ELF parsing and relocation helpers
+//! used during kernel loading.
+
 #![no_std]
-pub const SAIOS_BOOT_MAGIC: u64 = 0x5341_494F_5342_4F4F; // Choose your preferred value
+
+/// Magic value identifying a valid [`SaiosBootInfo`] structure.
+pub const SAIOS_BOOT_MAGIC: u64 = 0x5341_494F_5342_4F4F;
+/// Version of the boot information structure.
 pub const SAIOS_BOOT_VERSION: u32 = 1;
 pub mod acpi;
 pub mod cpu;
@@ -8,21 +17,32 @@ pub mod graphics;
 pub mod memorymap;
 pub mod smbios;
 pub mod ui;
+use uefi::println;
 pub const R_X86_64_RELATIVE: u32 = 8;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SaiosBootInfo {
+    /// Must equal [`SAIOS_BOOT_MAGIC`].
     pub magic: u64,
+    /// Structure version, currently [`SAIOS_BOOT_VERSION`].
     pub version: u32,
+    /// Total size of this structure in bytes.
     pub size: u32,
 
+    /// Framebuffer information for the kernel console.
     pub framebuffer: graphics::FramebufferInfo,
+    /// UEFI memory map describing available physical memory.
     pub memorymap: memorymap::MemoryMapInfo,
+    /// ACPI RSDP and revision information.
     pub acpi: acpi::AcpiInfo,
+    /// SMBIOS entry point information.
     pub smbios: smbios::SmbiosInfo,
+    /// CPU feature and topology information.
     pub cpu: cpu::CpuInfo,
+    /// UEFI firmware vendor and revision information.
     pub firmware: firmware::FirmwareInfo,
 
+    /// Reserved for future expansion.
     pub reserved: [u64; 16],
 }
 #[repr(C)]
@@ -106,21 +126,68 @@ pub struct Elf64Rela {
     pub r_info: u64,
     pub r_addend: i64,
 }
+/// Collects boot information from UEFI firmware and hardware probes.
 pub fn initialize_boot_info() -> SaiosBootInfo {
+    println!("Initializing boot information");
+    let framebuffer = graphics::initialize().unwrap_or_else(|_| graphics::FramebufferInfo::empty());
+    println!("Framebuffer initialized: {:?}", framebuffer);
+    let acpi = acpi::initialize().unwrap_or_else(|_| acpi::AcpiInfo::empty());
+    println!("ACPI initialized: {:?}", acpi);
+    let smbios = smbios::initialize().unwrap_or(smbios::SmbiosInfo {
+        entry_point: 0,
+        version_major: 0,
+        version_minor: 0,
+        version_revision: 0,
+        table_address: 0,
+        table_length: 0,
+        is_64bit: false,
+    });
+    println!("SMBIOS initialized: {:?}", smbios);
+    let cpu = cpu::initialize().unwrap_or(cpu::CpuInfo {
+        vendor: [0; 13],
+        brand: [0; 49],
+        features: 0,
+        extended_features: 0,
+        max_basic_cpuid: 0,
+        max_extended_cpuid: 0,
+        family: 0,
+        model: 0,
+        stepping: 0,
+        cores: 0,
+        threads: 0,
+        cache_line_size: 0,
+        cache_size: 0,
+        microcode_version: 0,
+        apic_id: 0,
+        logical_processors: 0,
+        hypervisor: cpu::HypervisorInfo {
+            present: false,
+            vendor: [0; 13],
+            max_basic_cpuid: 0,
+            features: 0,
+        },
+    });
+    println!("CPU initialized: {:?}", cpu);
+    let firmware = firmware::initialize().unwrap_or(firmware::FirmwareInfo {
+        vendor: [0; 32],
+        firmware_revision: 0,
+        uefi_revision: uefi::table::Revision::new(0, 0),
+    });
+    println!("Firmware initialized: {:?}", firmware);
     SaiosBootInfo {
         magic: SAIOS_BOOT_MAGIC,
         version: SAIOS_BOOT_VERSION,
         size: core::mem::size_of::<SaiosBootInfo>() as u32,
 
-        framebuffer: graphics::initialize().expect("Failed to initialize framebuffer"),
+        framebuffer,
         memorymap: memorymap::MemoryMapInfo {
             entries: core::ptr::null(),
             entry_count: 0,
         },
-        acpi: acpi::initialize().expect("Failed to initialize ACPI info"),
-        smbios: smbios::initialize().expect("Failed to initialize SMBIOS info"),
-        cpu: cpu::initialize().expect("Failed to initialize CPU info"),
-        firmware: firmware::initialize().expect("Failed to initialize firmware info"),
+        acpi,
+        smbios,
+        cpu,
+        firmware,
 
         reserved: [0; 16],
     }
@@ -172,6 +239,7 @@ pub fn parse_dynamic(bytes: &[u8], segment: &Elf64ProgramHeader) -> DynamicInfo 
             x if x == DynamicTag::RelaEnt as i64 => {
                 dynamic_info.rela_entry_size = Some(dyn_entry.d_val)
             }
+            // Ignore unknown or unneeded dynamic tags.
             _ => {}
         }
     }
@@ -190,7 +258,7 @@ pub fn relocation_symbol(info: u64) -> u32 {
 pub fn apply_relocations(load_bias: u64, relocations: &[Elf64Rela]) -> Result<(), &'static str> {
     for rela in relocations {
         let relocation_type = relocation_type(rela.r_info);
-       
+
         match relocation_type {
             R_X86_64_RELATIVE => {
                 let new_value = load_bias.wrapping_add(rela.r_addend as u64);

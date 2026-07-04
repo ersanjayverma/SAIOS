@@ -27,13 +27,15 @@ pub fn verify() -> VerifyReport {
         VerifyCheck::fail("Page accounting", "free + used mismatch")
     });
 
-    checks.push(if pmm::available_bytes() + pmm::used_bytes()
-        == (pmm::total_pages() as u64).saturating_mul(pmm::PAGE_SIZE)
-    {
-        VerifyCheck::pass("PMM byte accounting", "available + used == total bytes")
-    } else {
-        VerifyCheck::fail("PMM byte accounting", "byte accounting mismatch")
-    });
+    checks.push(
+        if pmm::available_bytes() + pmm::used_bytes()
+            == (pmm::total_pages() as u64).saturating_mul(pmm::PAGE_SIZE)
+        {
+            VerifyCheck::pass("PMM byte accounting", "available + used == total bytes")
+        } else {
+            VerifyCheck::fail("PMM byte accounting", "byte accounting mismatch")
+        },
+    );
 
     checks.push(if heap_stats.total > 0 {
         VerifyCheck::pass("Heap initialized", "heap arena configured")

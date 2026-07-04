@@ -30,7 +30,7 @@ impl Pmm {
         self.bitmap.fill(u64::MAX);
         self.tracked_pages = 0;
         self.free_pages = 0;
-        self.next_hint = 0;
+        self.next_hint = 1;
         self.initialized = true;
     }
 
@@ -85,7 +85,8 @@ pub fn init(entries: &[MemoryRegion]) {
         }
 
         let start = (align_up(entry.base, PAGE_SIZE) / PAGE_SIZE) as usize;
-        let end = (align_down(entry.base.saturating_add(entry.length), PAGE_SIZE) / PAGE_SIZE) as usize;
+        let end =
+            (align_down(entry.base.saturating_add(entry.length), PAGE_SIZE) / PAGE_SIZE) as usize;
         let limit = core::cmp::min(end, pmm.tracked_pages);
 
         for page in start..limit {
@@ -95,6 +96,11 @@ pub fn init(entries: &[MemoryRegion]) {
             }
         }
     }
+
+    if pmm.tracked_pages > 0 && !pmm.is_used(0) {
+        pmm.set_used(0);
+        pmm.free_pages = pmm.free_pages.saturating_sub(1);
+    }
 }
 
 /// Allocate one 4 KiB physical page.
@@ -102,8 +108,18 @@ pub fn alloc_page() -> Option<PhysAddr> {
     alloc_pages(1)
 }
 
+/// Allocate one 4 KiB physical page below `max_phys`.
+pub fn alloc_page_below(max_phys: PhysAddr) -> Option<PhysAddr> {
+    alloc_pages_below(1, max_phys)
+}
+
 /// Allocate `count` contiguous 4 KiB pages.
 pub fn alloc_pages(count: usize) -> Option<PhysAddr> {
+    alloc_pages_below(count, u64::MAX)
+}
+
+/// Allocate `count` contiguous 4 KiB pages whose range stays below `max_phys`.
+pub fn alloc_pages_below(count: usize, max_phys: PhysAddr) -> Option<PhysAddr> {
     if count == 0 {
         return None;
     }
@@ -113,15 +129,33 @@ pub fn alloc_pages(count: usize) -> Option<PhysAddr> {
         return None;
     }
 
-    let start = if pmm.next_hint < pmm.tracked_pages.saturating_sub(count) + 1 {
+    let first_allocatable = 1usize;
+    if pmm.tracked_pages <= first_allocatable || pmm.tracked_pages - first_allocatable < count {
+        return None;
+    }
+
+    let max_page_exclusive = if max_phys == u64::MAX {
+        pmm.tracked_pages
+    } else {
+        ((max_phys.saturating_add(PAGE_SIZE - 1)) / PAGE_SIZE) as usize
+    };
+    let bounded_tracked_pages = core::cmp::min(pmm.tracked_pages, max_page_exclusive);
+    if bounded_tracked_pages <= first_allocatable || bounded_tracked_pages - first_allocatable < count {
+        return None;
+    }
+
+    let start = if pmm.next_hint >= first_allocatable
+        && pmm.next_hint < bounded_tracked_pages.saturating_sub(count) + 1
+    {
         pmm.next_hint
     } else {
-        0
+        first_allocatable
     };
 
-    let max_start = pmm.tracked_pages - count;
-    for offset in 0..=max_start {
-        let first = (start + offset) % (max_start + 1);
+    let max_start = bounded_tracked_pages - count;
+    let search_slots = max_start.saturating_sub(first_allocatable) + 1;
+    for offset in 0..search_slots {
+        let first = first_allocatable + ((start - first_allocatable + offset) % search_slots);
 
         let mut all_free = true;
         for page in first..(first + count) {
@@ -156,7 +190,7 @@ pub fn free_page(phys_addr: PhysAddr) -> bool {
     }
 
     let page = (phys_addr / PAGE_SIZE) as usize;
-    if page >= pmm.tracked_pages || !pmm.is_used(page) {
+    if page == 0 || page >= pmm.tracked_pages || !pmm.is_used(page) {
         return false;
     }
 

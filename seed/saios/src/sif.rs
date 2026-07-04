@@ -4,8 +4,8 @@ use alloc::vec::Vec;
 use crate::object_manager;
 use crate::provider::ProviderType;
 use crate::saifs::{self, Event, EventType, SaifsError};
+use crate::snom::{AbiVersion, abi_version};
 use crate::som::{ObjectId, ProviderId};
-use crate::snom::{abi_version, AbiVersion};
 
 pub fn init() {
     object_manager::init();

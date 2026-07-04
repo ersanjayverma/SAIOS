@@ -37,15 +37,11 @@ const WIDTH: usize = 66;
 
 fn rule() {
     // 66 box-drawing horizontal bars
-    console::println!(
-        "══════════════════════════════════════════════════════════════════"
-    );
+    console::println!("══════════════════════════════════════════════════════════════════");
 }
 
 fn thin_rule() {
-    console::println!(
-        "──────────────────────────────────────────────────────────────────"
-    );
+    console::println!("──────────────────────────────────────────────────────────────────");
 }
 
 fn section(title: &str) {
@@ -74,29 +70,29 @@ fn process_state_label(s: &process::ProcessState) -> &'static str {
     match s {
         process::ProcessState::Running => "Running",
         process::ProcessState::Waiting => "Waiting",
-        process::ProcessState::Exited  => "Exited ",
+        process::ProcessState::Exited => "Exited ",
     }
 }
 
 fn service_state_label(s: ksf::ServiceState) -> &'static str {
     match s {
-        ksf::ServiceState::Registered   => "Registered",
+        ksf::ServiceState::Registered => "Registered",
         ksf::ServiceState::Initializing => "Init      ",
-        ksf::ServiceState::Ready        => "Ready     ",
-        ksf::ServiceState::Running      => "Running   ",
-        ksf::ServiceState::Paused       => "Paused    ",
-        ksf::ServiceState::Stopping     => "Stopping  ",
-        ksf::ServiceState::Stopped      => "Stopped   ",
-        ksf::ServiceState::Failed       => "FAILED    ",
+        ksf::ServiceState::Ready => "Ready     ",
+        ksf::ServiceState::Running => "Running   ",
+        ksf::ServiceState::Paused => "Paused    ",
+        ksf::ServiceState::Stopping => "Stopping  ",
+        ksf::ServiceState::Stopped => "Stopped   ",
+        ksf::ServiceState::Failed => "FAILED    ",
     }
 }
 
 fn health_label(h: HealthState) -> &'static str {
     match h {
-        HealthState::Healthy  => "OK     ",
-        HealthState::Warning  => "WARN   ",
+        HealthState::Healthy => "OK     ",
+        HealthState::Warning => "WARN   ",
         HealthState::Critical => "CRIT   ",
-        HealthState::Offline  => "OFFLINE",
+        HealthState::Offline => "OFFLINE",
     }
 }
 
@@ -108,7 +104,7 @@ fn print_system_summary() {
     let t = telemetry::snapshot();
     let uptime = timer::uptime();
     let secs = uptime.as_secs();
-    let hours   = secs / 3600;
+    let hours = secs / 3600;
     let minutes = (secs % 3600) / 60;
     let seconds = secs % 60;
 
@@ -121,7 +117,8 @@ fn print_system_summary() {
     console::println!("  RAM           {} MB", t.ram_mb);
     console::println!(
         "  Heap          {} KB used  /  {} KB total",
-        t.heap_used_kb, t.heap_total_kb
+        t.heap_used_kb,
+        t.heap_total_kb
     );
     console::println!("  Threads       {}", threads.len());
     console::println!("  Processes     {}", t.process_count);
@@ -135,7 +132,10 @@ fn print_processes() {
     section("PROCESSES");
     console::println!(
         "  {:>6}  {:<10}  {:>7}  {}",
-        "PID", "STATE", "THREADS", "NAME"
+        "PID",
+        "STATE",
+        "THREADS",
+        "NAME"
     );
     thin_rule();
 
@@ -165,7 +165,11 @@ fn print_services() {
     section("SERVICES");
     console::println!(
         "  {:>4}  {:<10}  {:<7}  {:<7}  {}",
-        "ID", "STATE", "HEALTH", "VER", "NAME"
+        "ID",
+        "STATE",
+        "HEALTH",
+        "VER",
+        "NAME"
     );
     thin_rule();
 
@@ -243,7 +247,11 @@ pub fn run(args: &[&str], _env: &[(String, String)]) -> TaskmanResult {
         Some("svc") | Some("-s") => {
             // Check whether the first arg was "-s" (shorthand for svc list)
             let is_shorthand = args.first().copied() == Some("-s");
-            let sub = if is_shorthand { None } else { args.get(1).copied() };
+            let sub = if is_shorthand {
+                None
+            } else {
+                args.get(1).copied()
+            };
 
             match sub {
                 Some("start") => {
@@ -282,7 +290,9 @@ pub fn run(args: &[&str], _env: &[(String, String)]) -> TaskmanResult {
                     print_services();
                     Ok(0)
                 }
-                Some(_) => Err("taskman svc: unknown subcommand; try start|stop|restart|health|list"),
+                Some(_) => {
+                    Err("taskman svc: unknown subcommand; try start|stop|restart|health|list")
+                }
             }
         }
 

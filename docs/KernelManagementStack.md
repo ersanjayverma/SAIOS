@@ -285,7 +285,39 @@ SAIRU facade is implemented in `kernel/sairu.rs`.
 - `sairu explain memory`
 - `sairu recover`
 
-## 11. SNSH Commands
+## 11. Package Image (Phase 5/6)
+
+Package image is implemented in `kernel/package_image.rs` and mounted during shell initialization.
+
+### Responsibilities
+
+- Ensure root namespace layout exists:
+  - `/boot`, `/bin`, `/etc`, `/home`, `/proc`, `/dev`, `/tmp`, `/usr`, `/lib`, `/system`
+- Seed `/boot/package.manifest` with profile, directories, binaries, and shared libraries.
+- Write ELF64 stub binaries for every `/bin` entry so the process runtime path can detect and load them.
+- Seed shared-library metadata under `/lib` for dynamic-link validation.
+
+### Seeded `/bin` entries
+
+- `hello`, `calc`, `editor`, `shell`
+- `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`
+- `ps`, `kill`, `top`, `uname`, `stress`
+- `cc`, `taskman`, `diskpart`
+
+### Seeded `/lib` entries
+
+- `ld-saios.so`
+- `libc.so`
+- `libm.so`
+- `libshell.so`
+- `libui.so`
+
+### Shell visibility
+
+- `pkgimg` shows current package image status.
+- `pkgimg remount` re-runs `mount_default()`.
+
+## 12. SNSH Commands
 
 ### KOM
 
@@ -327,8 +359,10 @@ SAIRU facade is implemented in `kernel/sairu.rs`.
 - `jobs`
 - `kill <pid>`
 - `wait <pid>`
+- `spawn <program> [args...]`
+- `exec [KEY=VALUE ...] <program> [args...]`
 
-## 6.1 Syscall ABI (Phase 2/6)
+## 13. Syscall ABI (Phase 2/6)
 
 Initial stable syscall ABI surface is now defined in code:
 
@@ -356,7 +390,7 @@ Shell visibility:
 - `syscall check <id>`
 - `syscall invoke <name|id> [arg0]`
 
-## 6.2 C Runtime Scaffold (Phase 3/6)
+## 14. C Runtime Scaffold (Phase 3/6)
 
 Initial C runtime foundation is now present as a kernel contract surface:
 
@@ -374,7 +408,7 @@ Shell visibility:
 - `crt abi`
 - `crt probe <program> [args...]`
 
-## 6.3 Core Userland Programs (Phase 4/6)
+## 15. Core Userland Programs (Phase 4/6)
 
 The `/bin` runtime surface now includes user-launchable programs resolved through the process runtime path:
 
@@ -396,6 +430,8 @@ Behavior notes:
 
 - Programs are launched through Process Manager execution (`exec` and unknown-command fallback).
 - `/bin/<name>` lookup remains the default resolution path for external commands.
+- ELF64 detection is performed by the shell program fallback; package image seeds `/bin` entries as ELF stubs.
+- SAIFS/VFS use binary-safe reads (`vfs::read_path`) to avoid UTF-8 lossy conversion for executables.
 - Process-start events include `argc` and `envc` metadata from CRT startup block preparation.
 
 ## 6.4 Package Image Runtime (Phase 5/6)

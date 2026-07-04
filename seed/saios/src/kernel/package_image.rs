@@ -8,16 +8,7 @@ const PROFILE: &str = "saios-base";
 const MANIFEST_PATH: &str = "/boot/package.manifest";
 
 const ROOT_DIRS: &[&str] = &[
-    "/boot",
-    "/bin",
-    "/etc",
-    "/home",
-    "/proc",
-    "/dev",
-    "/tmp",
-    "/usr",
-    "/lib",
-    "/system",
+    "/boot", "/bin", "/etc", "/home", "/proc", "/dev", "/tmp", "/usr", "/lib", "/system",
 ];
 
 const SHARED_LIB_ENTRIES: &[&str] = &[
@@ -29,23 +20,8 @@ const SHARED_LIB_ENTRIES: &[&str] = &[
 ];
 
 const BIN_ENTRIES: &[&str] = &[
-    "hello",
-    "calc",
-    "editor",
-    "shell",
-    "ls",
-    "cat",
-    "cp",
-    "mv",
-    "rm",
-    "mkdir",
-    "ps",
-    "kill",
-    "top",
-    "uname",
-    "stress",
-    "cc",
-    "taskman",
+    "hello", "calc", "editor", "shell", "ls", "cat", "cp", "mv", "rm", "mkdir", "ps", "kill",
+    "top", "uname", "stress", "cc", "taskman", "diskpart",
 ];
 
 static MOUNTED: AtomicBool = AtomicBool::new(false);

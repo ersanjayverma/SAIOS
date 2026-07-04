@@ -1,3 +1,9 @@
+//! Virtual filesystem (VFS) layer.
+//!
+//! The VFS provides a tree of in-memory nodes backed by a simple tmpfs
+//! implementation. It supports path resolution, file open/read/write/seek,
+//! directory creation and mount-point tracking.
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -6,8 +12,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
+use crate::driver::storage;
+use crate::kernel::device as kernel_device;
 use crate::object_manager;
 
+/// Type of a VFS node.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum FileType {
     Directory,
@@ -16,30 +25,44 @@ pub enum FileType {
 
 #[derive(Debug, Clone)]
 pub struct VNode {
+    /// Inode number.
     pub inode: u64,
+    /// File or directory name.
     pub name: String,
+    /// Node type.
     pub kind: FileType,
 }
 
+/// File descriptor identifier used by the VFS.
 pub type VfsFd = u32;
 
 #[derive(Debug, Copy, Clone)]
 pub enum SeekFrom {
+    /// Seek relative to the start of the file.
     Start(usize),
+    /// Seek relative to the current offset.
     Current(isize),
+    /// Seek relative to the end of the file.
     End(isize),
 }
 
+/// Flags controlling how a file is opened.
 #[derive(Debug, Copy, Clone)]
 pub struct OpenOptions {
+    /// Open for reading.
     pub read: bool,
+    /// Open for writing.
     pub write: bool,
+    /// Create the file if it does not exist.
     pub create: bool,
+    /// Truncate the file to zero length.
     pub truncate: bool,
+    /// Append writes to the end of the file.
     pub append: bool,
 }
 
 impl OpenOptions {
+    /// Returns options for read-only access.
     pub const fn read_only() -> Self {
         Self {
             read: true,
@@ -50,6 +73,7 @@ impl OpenOptions {
         }
     }
 
+    /// Returns options for write-only access, creating the file if needed.
     pub const fn write_only_create() -> Self {
         Self {
             read: false,
@@ -60,6 +84,7 @@ impl OpenOptions {
         }
     }
 
+    /// Returns options for read/write access, creating the file if needed.
     pub const fn read_write_create() -> Self {
         Self {
             read: true,
@@ -70,6 +95,7 @@ impl OpenOptions {
         }
     }
 
+    /// Returns options for append-only access, creating the file if needed.
     pub const fn append_create() -> Self {
         Self {
             read: false,
@@ -92,8 +118,11 @@ struct OpenFile {
 
 #[derive(Debug, Clone)]
 pub struct MountRecord {
+    /// Absolute mount path.
     pub path: String,
+    /// Name of the mounted filesystem.
     pub fs_name: String,
+    /// True if the mount is read-only.
     pub read_only: bool,
 }
 
@@ -177,10 +206,10 @@ impl TmpFs {
         }
 
         for &child_inode in &dir.children {
-            if let Ok(child) = self.node(child_inode) {
-                if child.name == name {
-                    return Some(child_inode);
-                }
+            if let Ok(child) = self.node(child_inode)
+                && child.name == name
+            {
+                return Some(child_inode);
             }
         }
         None
@@ -191,10 +220,15 @@ impl TmpFs {
             return Ok(self.root);
         }
 
-        let mut current = if path.starts_with('/') { self.root } else { start };
+        let mut current = if path.starts_with('/') {
+            self.root
+        } else {
+            start
+        };
 
         for part in Self::path_parts(path) {
             match part {
+                // Current directory: no change.
                 "." => {}
                 ".." => {
                     let parent = self.node(current)?.parent;
@@ -311,12 +345,7 @@ impl TmpFs {
         let mut parts: Vec<String> = Vec::new();
         let mut current = inode;
 
-        loop {
-            let node = match self.node(current) {
-                Ok(n) => n,
-                Err(_) => break,
-            };
-
+        while let Ok(node) = self.node(current) {
             if current == self.root {
                 break;
             }
@@ -344,6 +373,7 @@ impl TmpFs {
 
         for p in Self::path_parts(path) {
             match p {
+                // Current directory: no change.
                 "." => {}
                 ".." => {
                     let _ = parts.pop();
@@ -404,7 +434,12 @@ impl TmpFs {
         Ok(node.data[offset..end].to_vec())
     }
 
-    fn write_inode_at(&mut self, inode: u64, offset: usize, data: &[u8]) -> Result<usize, &'static str> {
+    fn write_inode_at(
+        &mut self,
+        inode: u64,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<usize, &'static str> {
         let node = self.node_mut(inode)?;
         if node.kind != FileType::File {
             return Err("not a file");
@@ -486,7 +521,11 @@ impl FileSystem for TmpFs {
     }
 
     fn readdir(&self, path: &str) -> Result<Vec<String>, &'static str> {
-        let inode = if path.is_empty() { self.cwd } else { self.resolve(path)? };
+        let inode = if path.is_empty() {
+            self.cwd
+        } else {
+            self.resolve(path)?
+        };
         let node = self.node(inode)?;
         if node.kind != FileType::Directory {
             return Err("not a directory");
@@ -566,10 +605,10 @@ impl VfsState {
 
     fn invalidate_inode_descriptors(&mut self, inode: u64) {
         for slot in &mut self.open_files {
-            if let Some(open) = slot {
-                if open.inode == inode {
-                    *slot = None;
-                }
+            if let Some(open) = slot
+                && open.inode == inode
+            {
+                *slot = None;
             }
         }
     }
@@ -577,17 +616,8 @@ impl VfsState {
 
 fn seed_standard_tree(fs: &mut TmpFs) {
     let roots = [
-        "/system",
-        "/dev",
-        "/proc",
-        "/sys",
-        "/home",
-        "/tmp",
-        "/var",
-        "/boot",
-        "/bin",
-        "/usr",
-        "/etc",
+        "/system", "/dev", "/proc", "/sys", "/home", "/tmp", "/var", "/boot", "/bin", "/usr",
+        "/etc", "/mnt",
     ];
     for path in roots {
         let _ = fs.mkdir(path);
@@ -607,25 +637,8 @@ fn seed_standard_tree(fs: &mut TmpFs) {
     }
 
     let user_programs = [
-        "hello",
-        "true",
-        "false",
-        "argc",
-        "env",
-        "fail",
-        "ls",
-        "cat",
-        "cp",
-        "mv",
-        "rm",
-        "mkdir",
-        "ps",
-        "kill",
-        "top",
-        "uname",
-        "calc",
-        "stress",
-        "cc",
+        "hello", "true", "false", "argc", "env", "fail", "ls", "cat", "cp", "mv", "rm", "mkdir",
+        "ps", "kill", "top", "uname", "calc", "stress", "cc",
     ];
     for name in user_programs {
         let _ = fs.create(format!("/bin/{}", name).as_str());
@@ -634,6 +647,29 @@ fn seed_standard_tree(fs: &mut TmpFs) {
 
 fn is_sys_path(path: &str) -> bool {
     path == "/sys" || path.starts_with("/sys/")
+}
+
+fn is_storage_backed(path: &str) -> bool {
+    storage::mounted_volume_for_path(path).is_some_and(|v| v.name != "tmpfs")
+}
+
+fn storage_node_name(path: &str) -> String {
+    if path == "/" {
+        return "/".to_string();
+    }
+    path.rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("/")
+        .to_string()
+}
+
+fn storage_inode(path: &str) -> u64 {
+    let mut h = 1469598103934665603u64;
+    for b in path.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h
 }
 
 static VFS: StaticCell<Option<VfsState>> = StaticCell::new(None);
@@ -668,15 +704,21 @@ fn with_vfs<R>(f: impl FnOnce(&mut VfsState) -> R) -> R {
     out
 }
 
+/// Initializes the VFS subsystem.
 pub fn init() {
     with_vfs(|_| {});
 }
 
+/// Creates a directory at `path`.
 pub fn mkdir(path: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
         if is_sys_path(&abs) {
             return Err("read-only virtual path");
+        }
+
+        if is_storage_backed(&abs) {
+            return storage::fs_mkdir(&abs);
         }
 
         vfs.fs.mkdir(path)?;
@@ -685,11 +727,16 @@ pub fn mkdir(path: &str) -> Result<(), &'static str> {
     })
 }
 
+/// Creates an empty file at `path`.
 pub fn touch(path: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
         if is_sys_path(&abs) {
             return Err("read-only virtual path");
+        }
+
+        if is_storage_backed(&abs) {
+            return storage::fs_create(&abs);
         }
 
         vfs.fs.create(path)?;
@@ -698,6 +745,7 @@ pub fn touch(path: &str) -> Result<(), &'static str> {
     })
 }
 
+/// Records a mount of `fs_name` at `path`.
 pub fn mount(path: &str, fs_name: &str, read_only: bool) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
@@ -720,10 +768,31 @@ pub fn mount(path: &str, fs_name: &str, read_only: bool) -> Result<(), &'static 
     })
 }
 
+/// Returns a snapshot of all recorded mount points.
 pub fn mounts() -> Vec<MountRecord> {
     with_vfs(|vfs| vfs.mounts.clone())
 }
 
+/// Remove a mount record registered at `path`.  The root mount (`/`) cannot
+/// be unmounted.  The directory node itself is left in place.
+pub fn umount(path: &str) -> Result<(), &'static str> {
+    with_vfs(|vfs| {
+        let abs = vfs.fs.normalized_path(path);
+        if abs == "/" {
+            return Err("cannot unmount root filesystem");
+        }
+        let before = vfs.mounts.len();
+        vfs.mounts.retain(|m| m.path != abs);
+        if vfs.mounts.len() == before {
+            return Err("not mounted");
+        }
+        object_manager::log_event(&format!("Unmounted {}", abs));
+        Ok(())
+    })
+}
+
+/// Opens the file at `path` with the given options and returns a file
+/// descriptor.
 pub fn open(path: &str, options: OpenOptions) -> Result<VfsFd, &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
@@ -731,7 +800,9 @@ pub fn open(path: &str, options: OpenOptions) -> Result<VfsFd, &'static str> {
             return Err("open requires read or write access");
         }
 
-        if is_sys_path(&abs) && (options.write || options.create || options.truncate || options.append) {
+        if is_sys_path(&abs)
+            && (options.write || options.create || options.truncate || options.append)
+        {
             return Err("read-only virtual path");
         }
 
@@ -768,10 +839,12 @@ pub fn open(path: &str, options: OpenOptions) -> Result<VfsFd, &'static str> {
     })
 }
 
+/// Closes a file descriptor previously returned by [`open`].
 pub fn close(fd: VfsFd) -> Result<(), &'static str> {
     with_vfs(|vfs| vfs.close_fd(fd))
 }
 
+/// Reads up to `max_len` bytes from the file descriptor.
 pub fn read(fd: VfsFd, max_len: usize) -> Result<Vec<u8>, &'static str> {
     with_vfs(|vfs| {
         let (inode, offset, readable) = {
@@ -790,6 +863,8 @@ pub fn read(fd: VfsFd, max_len: usize) -> Result<Vec<u8>, &'static str> {
     })
 }
 
+/// Writes `data` to the file descriptor and returns the number of bytes
+/// written.
 pub fn write(fd: VfsFd, data: &[u8]) -> Result<usize, &'static str> {
     with_vfs(|vfs| {
         let (inode, mut offset, writable, append) = {
@@ -811,6 +886,7 @@ pub fn write(fd: VfsFd, data: &[u8]) -> Result<usize, &'static str> {
     })
 }
 
+/// Repositions the file descriptor's offset according to `from`.
 pub fn seek(fd: VfsFd, from: SeekFrom) -> Result<usize, &'static str> {
     with_vfs(|vfs| {
         let (inode, current) = {
@@ -838,6 +914,7 @@ pub fn seek(fd: VfsFd, from: SeekFrom) -> Result<usize, &'static str> {
     })
 }
 
+/// Lists the entries in `path`, or the current directory if `path` is None.
 pub fn ls(path: Option<&str>) -> Result<Vec<String>, &'static str> {
     with_vfs(|vfs| {
         let req = path.unwrap_or(".");
@@ -846,20 +923,42 @@ pub fn ls(path: Option<&str>) -> Result<Vec<String>, &'static str> {
             return object_manager::sys_readdir(&abs).ok_or("not a directory");
         }
 
+        if is_storage_backed(&abs) {
+            return storage::fs_readdir(&abs);
+        }
+
+        if abs == "/dev" {
+            let mut merged = vfs.fs.readdir(req)?;
+            for dev in kernel_device::devices() {
+                if let Some(name) = dev.name.strip_prefix("/dev/") {
+                    merged.push(name.to_string());
+                }
+            }
+            merged.sort();
+            merged.dedup();
+            return Ok(merged);
+        }
+
         vfs.fs.readdir(req)
     })
 }
 
+/// Reads the entire file at `path` as a UTF-8 string.
 pub fn cat(path: &str) -> Result<String, &'static str> {
     let bytes = read_path(path)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// Reads the entire file at `path` as raw bytes.
 pub fn read_path(path: &str) -> Result<Vec<u8>, &'static str> {
     let abs = with_vfs(|vfs| vfs.fs.normalized_path(path));
     if is_sys_path(&abs) {
         let lines = object_manager::sys_read(&abs).ok_or("not a file")?;
         return Ok(lines.join("\n").into_bytes());
+    }
+
+    if is_storage_backed(&abs) {
+        return storage::fs_read(&abs);
     }
 
     let fd = open(path, OpenOptions::read_only())?;
@@ -870,15 +969,21 @@ pub fn read_path(path: &str) -> Result<Vec<u8>, &'static str> {
     Ok(bytes)
 }
 
+/// Removes the file or directory at `path`.
 pub fn rm(path: &str) -> Result<(), &'static str> {
     unlink(path)
 }
 
+/// Removes the file or directory at `path`.
 pub fn unlink(path: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
         if is_sys_path(&abs) {
             return Err("read-only virtual path");
+        }
+
+        if is_storage_backed(&abs) {
+            return storage::fs_delete(&abs);
         }
 
         let inode = vfs.fs.resolve(path)?;
@@ -889,6 +994,7 @@ pub fn unlink(path: &str) -> Result<(), &'static str> {
     })
 }
 
+/// Renames or moves `from` to `to`.
 pub fn rename(from: &str, to: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs_from = vfs.fs.normalized_path(from);
@@ -897,12 +1003,17 @@ pub fn rename(from: &str, to: &str) -> Result<(), &'static str> {
             return Err("read-only virtual path");
         }
 
+        if is_storage_backed(&abs_from) || is_storage_backed(&abs_to) {
+            return storage::fs_rename(&abs_from, &abs_to);
+        }
+
         vfs.fs.rename_path(from, to)?;
         object_manager::log_event(&format!("Renamed {} -> {}", abs_from, abs_to));
         Ok(())
     })
 }
 
+/// Changes the current working directory to `path`.
 pub fn cd(path: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let inode = vfs.fs.resolve(path)?;
@@ -915,11 +1026,18 @@ pub fn cd(path: &str) -> Result<(), &'static str> {
     })
 }
 
+/// Returns the current working directory.
 pub fn pwd() -> String {
     with_vfs(|vfs| vfs.fs.cwd_path())
 }
 
+/// Writes `data` to the file at `path`, creating it if necessary.
 pub fn write_path(path: &str, data: &[u8]) -> Result<(), &'static str> {
+    let abs = with_vfs(|vfs| vfs.fs.normalized_path(path));
+    if is_storage_backed(&abs) {
+        return storage::fs_write(&abs, data);
+    }
+
     let fd = open(path, OpenOptions::write_only_create())?;
     let write_result = write(fd, data);
     let close_result = close(fd);
@@ -927,6 +1045,20 @@ pub fn write_path(path: &str, data: &[u8]) -> Result<(), &'static str> {
     close_result
 }
 
+/// Returns the VFS node for `path` without opening it.
 pub fn open_node(path: &str) -> Result<VNode, &'static str> {
+    let abs = with_vfs(|vfs| vfs.fs.normalized_path(path));
+    if is_storage_backed(&abs) {
+        let stat = storage::fs_stat(&abs)?;
+        return Ok(VNode {
+            inode: storage_inode(&abs),
+            name: storage_node_name(&abs),
+            kind: match stat.kind {
+                storage::FsNodeKind::File => FileType::File,
+                storage::FsNodeKind::Directory => FileType::Directory,
+            },
+        });
+    }
+
     with_vfs(|vfs| vfs.fs.open_node(path))
 }

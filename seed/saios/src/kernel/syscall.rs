@@ -1,8 +1,17 @@
+//! System call dispatcher.
+//!
+//! Translates integer syscall requests from user-space into kernel operations
+//! on the VFS, process manager and timer. Unsupported or unimplemented
+//! syscalls return negative error codes compatible with POSIX errno values.
+
 use core::fmt;
 
+use crate::console;
 use crate::kernel::process;
 use crate::timer;
+use crate::vfs;
 
+/// Kernel syscall ABI version.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AbiVersion {
     pub major: u16,
@@ -18,6 +27,7 @@ const ABI_VERSION: AbiVersion = AbiVersion {
 
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// Identifiers for supported system calls.
 pub enum SyscallNumber {
     Open = 1,
     Read = 2,
@@ -127,14 +137,64 @@ fn selector_to_program(selector: u64) -> Option<&'static str> {
     }
 }
 
+/// Map an `open` path selector to a well-known filesystem path.
+///
+/// The syscall ABI only carries integer arguments (there is no user-space
+/// memory model to pass a string pointer), so file paths are addressed by a
+/// small fixed selector table, mirroring how [`selector_to_program`] addresses
+/// executables.
+fn selector_to_path(selector: u64) -> Option<&'static str> {
+    match selector {
+        1 => Some("/etc/motd"),
+        2 => Some("/tmp/scratch"),
+        3 => Some("/boot/package.manifest"),
+        4 => Some("/home/user/notes.txt"),
+        5 => Some("/tmp/syscall.out"),
+        _ => None,
+    }
+}
+
+/// Map a `write` data selector to a fixed payload.
+///
+/// As with [`selector_to_path`], arbitrary buffers cannot be passed through the
+/// integer-only ABI, so writable data is chosen from a small predefined table.
+fn selector_to_data(selector: u64) -> Option<&'static [u8]> {
+    match selector {
+        0 => Some(b""),
+        1 => Some(b"hello\n"),
+        2 => Some(b"SAIOS syscall write test\n"),
+        3 => Some(b"The quick brown fox jumps over the lazy dog\n"),
+        _ => None,
+    }
+}
+
+/// Translate the `mode` argument of the `open` syscall into VFS open options.
+///
+/// * `0` -> read-only
+/// * `1` -> read/write, creating the file if missing
+/// * `2` -> append, creating the file if missing
+fn open_mode_to_options(mode: u64) -> Option<vfs::OpenOptions> {
+    match mode {
+        0 => Some(vfs::OpenOptions::read_only()),
+        1 => Some(vfs::OpenOptions::read_write_create()),
+        2 => Some(vfs::OpenOptions::append_create()),
+        _ => None,
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// Error returned when a syscall cannot be completed.
 pub enum SyscallError {
+    /// The requested syscall number is not recognized.
     InvalidNumber,
+    /// One or more arguments are invalid.
     InvalidArgument,
+    /// The syscall is recognized but not yet implemented.
     Unimplemented,
 }
 
 impl SyscallError {
+    /// Returns the negative error code returned to user-space.
     pub fn code(self) -> i64 {
         match self {
             SyscallError::InvalidNumber => -38,
@@ -155,11 +215,14 @@ impl fmt::Display for SyscallError {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// Context in which a syscall is executed.
 pub struct SyscallContext {
+    /// Process identifier of the caller.
     pub pid: u64,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// A decoded system call request.
 pub struct SyscallRequest {
     pub number: SyscallNumber,
     pub args: [u64; 6],
@@ -173,6 +236,7 @@ pub fn supported() -> &'static [SyscallNumber] {
     &SUPPORTED
 }
 
+/// Dispatches `req` in the context `ctx` and returns the syscall result.
 pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, SyscallError> {
     match req.number {
         SyscallNumber::GetPid => Ok(ctx.pid),
@@ -206,10 +270,53 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             let pid = process::spawn(name, &[], &[]).map_err(|_| SyscallError::InvalidArgument)?;
             Ok(pid)
         }
-        SyscallNumber::Open
-        | SyscallNumber::Read
-        | SyscallNumber::Write
-        | SyscallNumber::Close
-        | SyscallNumber::Fork => Err(SyscallError::Unimplemented),
+        SyscallNumber::Open => {
+            // args[0] = path selector, args[1] = open mode (0=ro, 1=rw+create, 2=append+create).
+            let path = selector_to_path(req.args[0]).ok_or(SyscallError::InvalidArgument)?;
+            let options = open_mode_to_options(req.args[1]).ok_or(SyscallError::InvalidArgument)?;
+            let fd = vfs::open(path, options).map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(fd as u64)
+        }
+        SyscallNumber::Read => {
+            // args[0] = fd, args[1] = max bytes to read (0 defaults to 4096).
+            let fd = req.args[0] as vfs::VfsFd;
+            let max_len = if req.args[1] == 0 {
+                4096
+            } else {
+                req.args[1] as usize
+            };
+            let data = vfs::read(fd, max_len).map_err(|_| SyscallError::InvalidArgument)?;
+            // Echo the bytes to the console (the integer-only ABI has no user
+            // buffer to fill) and report how many bytes were read.
+            console::print(core::str::from_utf8(&data).unwrap_or("<binary>"));
+            Ok(data.len() as u64)
+        }
+        SyscallNumber::Write => {
+            // args[0] = fd, args[1] = data selector.
+            let fd = req.args[0] as vfs::VfsFd;
+            let data = selector_to_data(req.args[1]).ok_or(SyscallError::InvalidArgument)?;
+            let written = vfs::write(fd, data).map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(written as u64)
+        }
+        SyscallNumber::Close => {
+            // args[0] = fd.
+            let fd = req.args[0] as vfs::VfsFd;
+            vfs::close(fd).map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(0)
+        }
+        SyscallNumber::Fork => {
+            // Duplicate the calling process by spawning a fresh instance of the
+            // same program image. Returns the child pid. Without per-process
+            // address spaces this is a spawn of the caller's program rather than
+            // a copy-on-write clone.
+            let name = process::jobs()
+                .into_iter()
+                .find(|r| r.pid == ctx.pid)
+                .map(|r| r.name)
+                .ok_or(SyscallError::InvalidArgument)?;
+            let child = process::spawn(name.as_str(), &[], &[])
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(child)
+        }
     }
 }

@@ -1,7 +1,7 @@
-use core::cell::Cell;
 use bitflags::bitflags;
+use core::cell::Cell;
 
-use hal::arch::x86_64::io::inb;
+use hal::arch::x86_64::io::{inb, outb};
 
 bitflags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -12,6 +12,7 @@ bitflags! {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum KeyEvent {
     Character(char),
     Enter,
@@ -51,6 +52,31 @@ pub enum KeyEvent {
     CtrlW,
 }
 
+const PS2_STATUS_OUTPUT_FULL: u8 = 0x01;
+const PS2_STATUS_AUXILIARY_OUTPUT: u8 = 0x20;
+const SCANCODE_EXTENDED_PREFIX: u8 = 0xE0;
+const SCANCODE_RELEASE_MASK: u8 = 0x80;
+const SCANCODE_KEY_MASK: u8 = 0x7F;
+const SCANCODE_CTRL: u8 = 0x1D;
+const SCANCODE_LEFT_SHIFT: u8 = 0x2A;
+const SCANCODE_RIGHT_SHIFT: u8 = 0x36;
+const SCANCODE_CAPS_LOCK: u8 = 0x3A;
+
+const PS2_STATUS_INPUT_FULL: u8 = 0x02;
+
+const PS2_CMD_READ_CONFIG: u8 = 0x20;
+const PS2_CMD_WRITE_CONFIG: u8 = 0x60;
+const PS2_CMD_ENABLE_KEYBOARD: u8 = 0xAE;
+
+const PS2_CONFIG_IRQ1: u8 = 0x01;
+const PS2_CONFIG_DISABLE_KEYBOARD_CLOCK: u8 = 0x10;
+const PS2_CONFIG_TRANSLATION: u8 = 0x40;
+
+const KEYBOARD_SET_DEFAULTS: u8 = 0xF6;
+const KEYBOARD_ENABLE_SCANNING: u8 = 0xF4;
+const KEYBOARD_ACK: u8 = 0xFA;
+const WAIT_ITERS: usize = 100_000;
+
 struct Ps2Driver;
 
 impl Ps2Driver {
@@ -61,13 +87,74 @@ impl Ps2Driver {
         Self
     }
 
+    fn wait_input_clear(&self) -> bool {
+        for _ in 0..WAIT_ITERS {
+            if (inb(Self::STATUS_PORT) & PS2_STATUS_INPUT_FULL) == 0 {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        false
+    }
+
+    fn wait_output_ready(&self) -> bool {
+        for _ in 0..WAIT_ITERS {
+            if (inb(Self::STATUS_PORT) & PS2_STATUS_OUTPUT_FULL) != 0 {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        false
+    }
+
+    fn command_write(&self, cmd: u8) -> bool {
+        if !self.wait_input_clear() {
+            return false;
+        }
+        outb(Self::STATUS_PORT, cmd);
+        true
+    }
+
+    fn data_write(&self, value: u8) -> bool {
+        if !self.wait_input_clear() {
+            return false;
+        }
+        outb(Self::DATA_PORT, value);
+        true
+    }
+
+    fn data_read(&self) -> Option<u8> {
+        if self.wait_output_ready() {
+            Some(inb(Self::DATA_PORT))
+        } else {
+            None
+        }
+    }
+
+    fn drain_output(&self) {
+        for _ in 0..32 {
+            let status = inb(Self::STATUS_PORT);
+            if (status & PS2_STATUS_OUTPUT_FULL) == 0 {
+                break;
+            }
+            let _ = inb(Self::DATA_PORT);
+        }
+    }
+
+    fn write_keyboard_command(&self, cmd: u8) -> bool {
+        if !self.data_write(cmd) {
+            return false;
+        }
+        matches!(self.data_read(), Some(KEYBOARD_ACK))
+    }
+
     pub fn read_scancode(&self) -> Option<u8> {
         let status = inb(Self::STATUS_PORT);
-        if (status & 0x01) == 0 {
+        if (status & PS2_STATUS_OUTPUT_FULL) == 0 {
             return None;
         }
         // Skip AUX (mouse) bytes so keyboard and mouse do not consume each other.
-        if (status & 0x20) != 0 {
+        if (status & PS2_STATUS_AUXILIARY_OUTPUT) != 0 {
             return None;
         }
         Some(inb(Self::DATA_PORT))
@@ -76,6 +163,7 @@ impl Ps2Driver {
 
 pub struct KeyboardDriver {
     ps2: Ps2Driver,
+    initialized: Cell<bool>,
     extended: Cell<bool>,
     ctrl_down: Cell<bool>,
     shift_down: Cell<bool>,
@@ -86,11 +174,52 @@ impl KeyboardDriver {
     pub const fn new() -> Self {
         Self {
             ps2: Ps2Driver::new(),
+            initialized: Cell::new(false),
             extended: Cell::new(false),
             ctrl_down: Cell::new(false),
             shift_down: Cell::new(false),
             caps_lock: Cell::new(false),
         }
+    }
+
+    pub fn init(&self) -> bool {
+        if self.initialized.get() {
+            return true;
+        }
+
+        self.ps2.drain_output();
+        if !self.ps2.command_write(PS2_CMD_ENABLE_KEYBOARD) {
+            return false;
+        }
+
+        let Some(mut config) = (if self.ps2.command_write(PS2_CMD_READ_CONFIG) {
+            self.ps2.data_read()
+        } else {
+            None
+        }) else {
+            return false;
+        };
+
+        config |= PS2_CONFIG_IRQ1 | PS2_CONFIG_TRANSLATION;
+        config &= !PS2_CONFIG_DISABLE_KEYBOARD_CLOCK;
+        if !self.ps2.command_write(PS2_CMD_WRITE_CONFIG) || !self.ps2.data_write(config) {
+            return false;
+        }
+
+        self.ps2.drain_output();
+        if !self.ps2.write_keyboard_command(KEYBOARD_SET_DEFAULTS) {
+            return false;
+        }
+        if !self.ps2.write_keyboard_command(KEYBOARD_ENABLE_SCANNING) {
+            return false;
+        }
+
+        self.extended.set(false);
+        self.ctrl_down.set(false);
+        self.shift_down.set(false);
+        self.caps_lock.set(false);
+        self.initialized.set(true);
+        true
     }
 
     fn decode_char(&self, code: u8) -> Option<char> {
@@ -184,29 +313,33 @@ impl KeyboardDriver {
     }
 
     pub fn poll_event(&self) -> Option<KeyEvent> {
+        if !self.initialized.get() {
+            return None;
+        }
+
         let scancode = self.ps2.read_scancode()?;
 
-        if scancode == 0xE0 {
+        if scancode == SCANCODE_EXTENDED_PREFIX {
             self.extended.set(true);
             return None;
         }
 
         let extended = self.extended.replace(false);
-        let released = (scancode & 0x80) != 0;
-        let code = scancode & 0x7F;
+        let released = (scancode & SCANCODE_RELEASE_MASK) != 0;
+        let code = scancode & SCANCODE_KEY_MASK;
 
         if !extended {
-            if code == 0x1D {
+            if code == SCANCODE_CTRL {
                 self.ctrl_down.set(!released);
                 return None;
             }
 
-            if code == 0x2A || code == 0x36 {
+            if code == SCANCODE_LEFT_SHIFT || code == SCANCODE_RIGHT_SHIFT {
                 self.shift_down.set(!released);
                 return None;
             }
 
-            if code == 0x3A {
+            if code == SCANCODE_CAPS_LOCK {
                 if !released {
                     self.caps_lock.set(!self.caps_lock.get());
                 }
@@ -256,7 +389,9 @@ impl KeyboardDriver {
             return None;
         }
 
+        // The keypad Enter key sends the extended E0 1C scancode sequence.
         match code {
+            0x1C => Some(KeyEvent::Enter),
             0x47 => Some(KeyEvent::Home),
             0x48 => Some(self.apply_arrow_modifiers(KeyEvent::ArrowUp)),
             0x49 => Some(KeyEvent::PageUp),

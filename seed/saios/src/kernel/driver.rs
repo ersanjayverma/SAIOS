@@ -100,9 +100,8 @@ impl DriverRegistry {
 
     fn dependencies_ready(&self, deps: &[String]) -> bool {
         deps.iter().all(|dep| {
-            self.status_by_name(dep).is_some_and(|s| {
-                matches!(s, DriverStatus::Running | DriverStatus::Loaded)
-            })
+            self.status_by_name(dep)
+                .is_some_and(|s| matches!(s, DriverStatus::Running | DriverStatus::Loaded))
         })
     }
 
@@ -167,18 +166,31 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
         pci::init();
         Ok(())
     } else if name.eq_ignore_ascii_case("network") {
+        crate::driver::network::init();
         crate::driver::loopback::init();
         crate::driver::ethernet::init();
         crate::driver::wifi::init();
         crate::driver::dns::init();
-        let _ = device::ensure_device("lo", "loopback", "network/loopback", device::DeviceStatus::Online);
+        let _ = crate::driver::network::bind_nic();
+        let _ = device::ensure_device(
+            "lo",
+            "loopback",
+            "network/loopback",
+            device::DeviceStatus::Online,
+        );
         Ok(())
     } else if name.eq_ignore_ascii_case("loopback") {
         crate::driver::loopback::init();
-        let _ = device::ensure_device("lo", "loopback", "network/loopback", device::DeviceStatus::Online);
+        let _ = device::ensure_device(
+            "lo",
+            "loopback",
+            "network/loopback",
+            device::DeviceStatus::Online,
+        );
         Ok(())
     } else if name.eq_ignore_ascii_case("ethernet") {
         crate::driver::ethernet::rescan();
+        let _ = crate::driver::network::bind_nic();
         let interfaces = crate::driver::ethernet::interfaces();
         for iface in interfaces {
             let _ = device::ensure_device(
@@ -195,6 +207,7 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
         Ok(())
     } else if name.eq_ignore_ascii_case("wifi") {
         crate::driver::wifi::rescan();
+        let _ = crate::driver::network::bind_nic();
         let interfaces = crate::driver::wifi::interfaces();
         for iface in interfaces {
             let _ = device::ensure_device(
@@ -211,9 +224,29 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
         Ok(())
     } else if name.eq_ignore_ascii_case("dhcp") {
         crate::driver::dhcp::renew_all();
+        let _ = crate::driver::network::apply_dhcp();
         Ok(())
     } else if name.eq_ignore_ascii_case("dns") {
         crate::driver::dns::init();
+        Ok(())
+    } else if name.eq_ignore_ascii_case("usb") {
+        crate::driver::usb::rescan();
+        let controllers = crate::driver::usb::controllers();
+        for controller in controllers {
+            let _ = device::ensure_device(
+                controller.name.as_str(),
+                "usb",
+                "bus/usb-host",
+                if matches!(
+                    controller.state,
+                    crate::driver::usb::UsbControllerState::Faulted
+                ) {
+                    device::DeviceStatus::Faulted
+                } else {
+                    device::DeviceStatus::Online
+                },
+            );
+        }
         Ok(())
     } else if name.eq_ignore_ascii_case("storage")
         || name.eq_ignore_ascii_case("ext4")
@@ -250,6 +283,7 @@ fn run_reload_hook(name: &str) -> Result<(), &'static str> {
         || name.eq_ignore_ascii_case("wifi")
         || name.eq_ignore_ascii_case("dhcp")
         || name.eq_ignore_ascii_case("dns")
+        || name.eq_ignore_ascii_case("usb")
     {
         run_start_hook(name)
     } else if name.eq_ignore_ascii_case("storage")
@@ -276,18 +310,67 @@ pub fn init() {
         // Drivers that have no early runtime registration site yet.
         let _ = r.ensure_driver("pci", "0.1.0", "SAIOS", &[], DriverStatus::Loaded);
         let _ = r.ensure_driver("network", "0.1.0", "SAIOS", &["pci"], DriverStatus::Loaded);
-        let _ = r.ensure_driver("loopback", "0.1.0", "SAIOS", &["network"], DriverStatus::Loaded);
-        let _ = r.ensure_driver("ethernet", "0.1.0", "SAIOS", &["network", "pci"], DriverStatus::Loaded);
-        let _ = r.ensure_driver("wifi", "0.1.0", "SAIOS", &["network", "pci"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("usb", "0.1.0", "SAIOS", &["pci"], DriverStatus::Loaded);
+        let _ = r.ensure_driver(
+            "loopback",
+            "0.1.0",
+            "SAIOS",
+            &["network"],
+            DriverStatus::Loaded,
+        );
+        let _ = r.ensure_driver(
+            "ethernet",
+            "0.1.0",
+            "SAIOS",
+            &["network", "pci"],
+            DriverStatus::Loaded,
+        );
+        let _ = r.ensure_driver(
+            "wifi",
+            "0.1.0",
+            "SAIOS",
+            &["network", "pci"],
+            DriverStatus::Loaded,
+        );
         let _ = r.ensure_driver("dhcp", "0.1.0", "SAIOS", &["network"], DriverStatus::Loaded);
-        let _ = r.ensure_driver("dns", "0.1.0", "SAIOS", &["network", "dhcp"], DriverStatus::Loaded);
+        let _ = r.ensure_driver(
+            "dns",
+            "0.1.0",
+            "SAIOS",
+            &["network", "dhcp"],
+            DriverStatus::Loaded,
+        );
         let _ = r.ensure_driver("storage", "0.1.0", "SAIOS", &["pci"], DriverStatus::Loaded);
         let _ = r.ensure_driver("ext4", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
         let _ = r.ensure_driver("ntfs", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
-        let _ = r.ensure_driver("fat16", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
-        let _ = r.ensure_driver("fat32", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
-        let _ = r.ensure_driver("fat64", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
-        let _ = r.ensure_driver("fat128", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
+        let _ = r.ensure_driver(
+            "fat16",
+            "0.1.0",
+            "SAIOS",
+            &["storage"],
+            DriverStatus::Loaded,
+        );
+        let _ = r.ensure_driver(
+            "fat32",
+            "0.1.0",
+            "SAIOS",
+            &["storage"],
+            DriverStatus::Loaded,
+        );
+        let _ = r.ensure_driver(
+            "fat64",
+            "0.1.0",
+            "SAIOS",
+            &["storage"],
+            DriverStatus::Loaded,
+        );
+        let _ = r.ensure_driver(
+            "fat128",
+            "0.1.0",
+            "SAIOS",
+            &["storage"],
+            DriverStatus::Loaded,
+        );
 
         r.refresh_devices();
         r.initialized = true;
@@ -336,7 +419,11 @@ pub fn reload(name: &str) -> Result<(), &'static str> {
         driver.status = DriverStatus::Running;
         driver.reload_count = driver.reload_count.saturating_add(1);
         driver.last_error = None;
-        event::publish(EventKind::DriverReloaded, "driver-manager", driver.name.as_str());
+        event::publish(
+            EventKind::DriverReloaded,
+            "driver-manager",
+            driver.name.as_str(),
+        );
         r.refresh_devices();
         Ok(())
     })
@@ -355,7 +442,11 @@ pub fn start(name: &str) -> Result<(), &'static str> {
             r.records[idx].status = DriverStatus::Faulted;
             r.records[idx].fault_count = r.records[idx].fault_count.saturating_add(1);
             r.records[idx].last_error = Some("dependencies not ready".to_string());
-            event::publish(EventKind::DriverFaulted, "driver-manager", "dependencies not ready");
+            event::publish(
+                EventKind::DriverFaulted,
+                "driver-manager",
+                "dependencies not ready",
+            );
             return Err("driver: dependencies not ready");
         }
 

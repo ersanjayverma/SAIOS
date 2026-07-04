@@ -7,7 +7,10 @@ fn test_console_initialized() -> Result<(), &'static str> {
     Ok(())
 }
 
-const TESTS: [TestCase; 1] = [TestCase::new("console_initialized", test_console_initialized)];
+const TESTS: [TestCase; 1] = [TestCase::new(
+    "console_initialized",
+    test_console_initialized,
+)];
 
 pub fn suite() -> TestSuite {
     TestSuite::new("console", &TESTS)
