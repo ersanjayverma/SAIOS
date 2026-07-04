@@ -478,6 +478,33 @@ pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
     });
 }
 
+pub(crate) fn attach_framebuffer_direct(info: FramebufferInfo) {
+    with_console(|console| {
+        console.backend.right_mut().attach_direct(info);
+        if info.base != 0 {
+            let _ = driver::ensure_driver(
+                "framebuffer",
+                "0.1.0",
+                "SAIOS",
+                &["serial"],
+                driver::DriverStatus::Running,
+            );
+            let _ = device::ensure_device(
+                "fb0",
+                "framebuffer",
+                "display",
+                device::DeviceStatus::Online,
+            );
+        }
+        if let (Some(columns), Some(rows)) = (
+            console.backend.right_mut().text_columns(),
+            console.backend.right_mut().text_rows(),
+        ) {
+            console.resize(columns, rows);
+        }
+    });
+}
+
 /// Ensures the framebuffer renderer is ready and returns true on success.
 pub fn promote_framebuffer_renderer() -> bool {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {

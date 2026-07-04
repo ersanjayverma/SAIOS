@@ -29,9 +29,19 @@ pub fn alloc_page() -> Option<PhysAddr> {
     crate::driver::memory::alloc_page()
 }
 
+/// Allocates a single physical page below `max_phys`.
+pub fn alloc_page_below(max_phys: PhysAddr) -> Option<PhysAddr> {
+    crate::driver::memory::alloc_page_below(max_phys)
+}
+
 /// Allocates `count` contiguous physical pages.
 pub fn alloc_pages(count: usize) -> Option<PhysAddr> {
     crate::driver::memory::alloc_pages(count)
+}
+
+/// Allocates `count` contiguous physical pages below `max_phys`.
+pub fn alloc_pages_below(count: usize, max_phys: PhysAddr) -> Option<PhysAddr> {
+    crate::driver::memory::alloc_pages_below(count, max_phys)
 }
 
 /// Frees a single physical page, ignoring errors.

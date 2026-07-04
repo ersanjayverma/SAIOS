@@ -55,6 +55,73 @@ pub struct FramebufferDisplay {
 }
 
 impl FramebufferDisplay {
+    fn build_from_info(info: FramebufferInfo, mapped_base: u64) -> Option<Self> {
+        let bytes_per_pixel = (info.bpp.saturating_add(7)) / 8;
+        if mapped_base == 0
+            || info.width == 0
+            || info.height == 0
+            || bytes_per_pixel == 0
+            || bytes_per_pixel > 4
+        {
+            return None;
+        }
+
+        let mut stride_pixels = info.stride;
+        let pixels_layout_ok = stride_pixels
+            .checked_mul(info.height)
+            .and_then(|v| v.checked_mul(bytes_per_pixel))
+            .map(|v| v <= info.size)
+            .unwrap_or(false);
+
+        if !pixels_layout_ok {
+            if info.stride.is_multiple_of(bytes_per_pixel) {
+                let stride_from_bytes = info.stride / bytes_per_pixel;
+                let bytes_layout_ok = info
+                    .stride
+                    .checked_mul(info.height)
+                    .map(|v| v <= info.size)
+                    .unwrap_or(false);
+                if bytes_layout_ok && stride_from_bytes >= info.width {
+                    stride_pixels = stride_from_bytes;
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+
+        let min_visible = stride_pixels
+            .checked_mul(info.height)?
+            .checked_mul(bytes_per_pixel)?;
+        if info.size < min_visible {
+            return None;
+        }
+
+        let (pixel_format, red_mask, green_mask, blue_mask, reserved_mask) = Self::normalize_format(
+            info.pixel_format,
+            bytes_per_pixel,
+            info.red_mask,
+            info.green_mask,
+            info.blue_mask,
+            info.reserved_mask,
+        );
+
+        Some(Self {
+            base: mapped_base as *mut u8,
+            width: info.width,
+            height: info.height,
+            stride: stride_pixels,
+            bytes_per_pixel,
+            size_bytes: info.size,
+            pixel_format,
+            red_mask,
+            green_mask,
+            blue_mask,
+            reserved_mask,
+        })
+    }
+
     /// Convert a logical 0x00RRGGBB color into the 32-bit word that must be
     /// written to a 4-byte hardware pixel for this display's format.
     #[inline(always)]
@@ -161,16 +228,6 @@ impl FramebufferDisplay {
     /// that, and rejects layouts that would not fit within the reported
     /// framebuffer size.
     pub fn from_info(info: FramebufferInfo) -> Option<Self> {
-        let bytes_per_pixel = (info.bpp.saturating_add(7)) / 8;
-        if info.base == 0
-            || info.width == 0
-            || info.height == 0
-            || bytes_per_pixel == 0
-            || bytes_per_pixel > 4
-        {
-            return None;
-        }
-
         let framebuffer_pages = ((info.size as u64).div_ceil(4096)).max(1) as usize;
         let mapped_base = vmm::map_physical_anywhere(
             info.base,
@@ -180,61 +237,13 @@ impl FramebufferDisplay {
         )
         .ok()?;
 
-        let mut stride_pixels = info.stride;
-        let pixels_layout_ok = stride_pixels
-            .checked_mul(info.height)
-            .and_then(|v| v.checked_mul(bytes_per_pixel))
-            .map(|v| v <= info.size)
-            .unwrap_or(false);
+        Self::build_from_info(info, mapped_base)
+    }
 
-        if !pixels_layout_ok {
-            // Some firmware appears to report stride in bytes rather than pixels.
-            if info.stride.is_multiple_of(bytes_per_pixel) {
-                let stride_from_bytes = info.stride / bytes_per_pixel;
-                let bytes_layout_ok = info
-                    .stride
-                    .checked_mul(info.height)
-                    .map(|v| v <= info.size)
-                    .unwrap_or(false);
-                if bytes_layout_ok && stride_from_bytes >= info.width {
-                    stride_pixels = stride_from_bytes;
-                } else {
-                    return None;
-                }
-            } else {
-                return None;
-            }
-        }
-
-        let min_visible = stride_pixels
-            .checked_mul(info.height)?
-            .checked_mul(bytes_per_pixel)?;
-        if info.size < min_visible {
-            return None;
-        }
-
-        let (pixel_format, red_mask, green_mask, blue_mask, reserved_mask) = Self::normalize_format(
-            info.pixel_format,
-            bytes_per_pixel,
-            info.red_mask,
-            info.green_mask,
-            info.blue_mask,
-            info.reserved_mask,
-        );
-
-        Some(Self {
-            base: mapped_base as *mut u8,
-            width: info.width,
-            height: info.height,
-            stride: stride_pixels,
-            bytes_per_pixel,
-            size_bytes: info.size,
-            pixel_format,
-            red_mask,
-            green_mask,
-            blue_mask,
-            reserved_mask,
-        })
+    /// Build a display directly from the bootloader-provided framebuffer pointer
+    /// without creating a new VMM mapping. Used during firmware-CR3 fallback.
+    pub fn from_info_direct(info: FramebufferInfo) -> Option<Self> {
+        Self::build_from_info(info, info.base)
     }
 
     /// Scale an 8-bit channel value into an arbitrary bit field described by

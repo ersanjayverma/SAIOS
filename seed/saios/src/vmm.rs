@@ -26,6 +26,7 @@ pub const PAGE_SIZE: u64 = 4096;
 pub const KERNEL_VIRT_BASE: VirtAddr = 0xFFFF_8000_0000_0000;
 /// Page-table slot used for recursive mapping.
 const RECURSIVE_SLOT: u64 = 511;
+const EARLY_TABLE_MAX_PHYS: u64 = 0x4000_0000; // 1 GiB
 
 /// Page-table flag: readable.
 pub const FLAG_READ: u64 = 1 << 0;
@@ -386,7 +387,19 @@ fn translate_hw(virt: VirtAddr) -> Option<PhysAddr> {
 }
 
 fn alloc_zeroed_table() -> Result<PhysAddr, &'static str> {
-    let phys = pmm::alloc_page().ok_or("vmm: out of memory allocating page table")?;
+    // Before we switch CR3, only low physical memory is guaranteed to be
+    // identity-mapped on all firmware implementations.
+    let mut phys = None;
+    for _ in 0..4096usize {
+        let candidate = pmm::alloc_page().ok_or("vmm: out of memory allocating page table")?;
+        if candidate < EARLY_TABLE_MAX_PHYS {
+            phys = Some(candidate);
+            break;
+        }
+        pmm::free_page(candidate);
+    }
+
+    let phys = phys.ok_or("vmm: no low-memory page available for page table")?;
     let table = unsafe { &mut *(phys as *mut paging::Table) };
     table.clear();
     Ok(phys)
@@ -463,11 +476,10 @@ fn map_boot_stack(root: &mut paging::Table) -> Result<(), &'static str> {
     unsafe {
         asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
     }
-    let start = align_down(rsp, PAGE_SIZE as u64);
-    let end = align_up(
-        start.saturating_add(PAGE_SIZE.saturating_mul(4)),
-        PAGE_SIZE as u64,
-    );
+    // The stack grows downward on x86_64; ensure pages below current RSP are mapped.
+    let below_pages = PAGE_SIZE.saturating_mul(16);
+    let start = align_down(rsp.saturating_sub(below_pages), PAGE_SIZE as u64);
+    let end = align_up(rsp.saturating_add(PAGE_SIZE), PAGE_SIZE as u64);
     map_range_identity(root, start, end, FLAG_WRITE | FLAG_GLOBAL)
 }
 
@@ -480,7 +492,14 @@ fn map_range_identity(
     let mut current = align_down(start, PAGE_SIZE as u64);
     let limit = align_up(end, PAGE_SIZE as u64);
     while current < limit {
-        map_kernel_page(root, current, current, flags)?;
+        match map_kernel_page(root, current, current, flags) {
+            Ok(_) => {}
+            Err("vmm: page already mapped") => {
+                // Reuse existing mapping; early firmware mappings can already
+                // cover parts of these ranges and should not be fatal.
+            }
+            Err(e) => return Err(e),
+        }
         current = current.saturating_add(PAGE_SIZE);
     }
     Ok(())
@@ -525,11 +544,20 @@ pub fn bootstrap_kernel_page_tables(
     map_boot_stack(root)?;
 
     root.entries[511].set_page(root_phys, paging::FLAG_WRITABLE);
-    unsafe {
-        paging::write_cr3(root_phys);
-    }
 
     Ok(root_phys)
+}
+
+/// Activates a prepared PML4 by loading CR3.
+pub fn activate_kernel_page_tables(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
+    if !is_page_aligned(kernel_pml4_phys) {
+        return Err("vmm: cr3 physical address must be page aligned");
+    }
+
+    unsafe {
+        paging::write_cr3(kernel_pml4_phys);
+    }
+    Ok(())
 }
 
 /// Initializes the VMM with the given physical PML4 address.

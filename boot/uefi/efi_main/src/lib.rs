@@ -130,7 +130,7 @@ pub struct Elf64Rela {
 pub fn initialize_boot_info() -> SaiosBootInfo {
     println!("Initializing boot information");
     let framebuffer = graphics::initialize().unwrap_or_else(|_| graphics::FramebufferInfo::empty());
-    println!("Framebuffer initialized: {:?}", framebuffer);  
+    println!("Framebuffer initialized: {:?}", framebuffer);
     let acpi = acpi::initialize().unwrap_or_else(|_| acpi::AcpiInfo::empty());
     println!("ACPI initialized: {:?}", acpi);
     let smbios = smbios::initialize().unwrap_or(smbios::SmbiosInfo {

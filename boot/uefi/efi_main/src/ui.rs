@@ -337,7 +337,6 @@ pub fn draw_boot_splash(info: FramebufferInfo) {
 
     let mut framebuffer = Framebuffer { info };
 
-
     if let Ok(bitmap) = Bitmap::from_bytes(SPLASH) {
         bitmap.draw_centered(&mut framebuffer);
     }

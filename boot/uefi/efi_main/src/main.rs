@@ -4,8 +4,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::time::Duration;
-use uefi::mem::memory_map::MemoryMap;
 use uefi::boot::{AllocateType, MemoryType};
+use uefi::mem::memory_map::MemoryMap;
 use uefi::println;
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::file::{File, FileAttribute, FileMode, FileType};
@@ -14,6 +14,109 @@ use uefi::*;
 
 const COM1_PORT: u16 = 0x3F8;
 const HANDOFF_MAX_ADDRESS: u64 = 0x3FFF_FFFF;
+const FB_TRACE_CELL_W: usize = 12;
+const FB_TRACE_CELL_H: usize = 12;
+const FB_TRACE_SPACING: usize = 2;
+const FB_TRACE_ORIGIN_X: usize = 8;
+const FB_TRACE_ORIGIN_Y: usize = 8;
+
+#[inline(always)]
+fn pack_channel(value: u8, mask: u32) -> u32 {
+    if mask == 0 {
+        return 0;
+    }
+
+    let shift = mask.trailing_zeros();
+    let width = mask.count_ones();
+    if width == 0 {
+        return 0;
+    }
+
+    let max = (1u32 << width) - 1;
+    let scaled = ((value as u32) * max + 127) / 255;
+    (scaled << shift) & mask
+}
+
+#[inline(always)]
+fn pack_fb_color(info: efi_main::graphics::FramebufferInfo, rgb: u32) -> u32 {
+    let r = ((rgb >> 16) & 0xFF) as u8;
+    let g = ((rgb >> 8) & 0xFF) as u8;
+    let b = (rgb & 0xFF) as u8;
+
+    match info.pixel_format {
+        efi_main::graphics::PixelFormat::Bgr => {
+            (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | (0xFF << 24)
+        }
+        efi_main::graphics::PixelFormat::Rgb => {
+            (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | (0xFF << 24)
+        }
+        efi_main::graphics::PixelFormat::Bitmask => {
+            pack_channel(r, info.red_mask)
+                | pack_channel(g, info.green_mask)
+                | pack_channel(b, info.blue_mask)
+                | info.reserved_mask
+        }
+        efi_main::graphics::PixelFormat::BltOnly => {
+            (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | (0xFF << 24)
+        }
+    }
+}
+
+#[inline(always)]
+fn stage_color(stage: u8) -> u32 {
+    const PALETTE: [u32; 16] = [
+        0x00FF5555, 0x00FFAA00, 0x00FFFF55, 0x0099FF55, 0x0055FFAA, 0x0055AAFF, 0x007777FF,
+        0x00AA55FF, 0x00FF55CC, 0x00FFFFFF, 0x00555555, 0x00AAFFAA, 0x00FFAACC, 0x00AAFFFF,
+        0x00FFDDAA, 0x00CCFF55,
+    ];
+
+    PALETTE[(stage as usize) & 0x0F]
+}
+
+fn fb_trace_mark(info: efi_main::graphics::FramebufferInfo, stage: u8) {
+    if info.base == 0 || info.width == 0 || info.height == 0 || info.stride == 0 || info.size == 0 {
+        return;
+    }
+
+    let bytes_per_pixel = core::cmp::max(info.bpp.div_ceil(8), 1);
+    if bytes_per_pixel > 4 {
+        return;
+    }
+
+    let marker = stage as usize;
+    let step_x = FB_TRACE_CELL_W + FB_TRACE_SPACING;
+    let columns = core::cmp::max(1, (info.width.saturating_sub(FB_TRACE_ORIGIN_X)) / step_x);
+    let x0 = FB_TRACE_ORIGIN_X + (marker % columns) * step_x;
+    let y0 = FB_TRACE_ORIGIN_Y + (marker / columns) * (FB_TRACE_CELL_H + FB_TRACE_SPACING);
+    if x0 >= info.width || y0 >= info.height {
+        return;
+    }
+
+    let x1 = core::cmp::min(info.width, x0 + FB_TRACE_CELL_W);
+    let y1 = core::cmp::min(info.height, y0 + FB_TRACE_CELL_H);
+    let packed = pack_fb_color(info, stage_color(stage));
+    let packed_bytes = packed.to_le_bytes();
+    let fb = info.base as *mut u8;
+
+    for y in y0..y1 {
+        let row = y.saturating_mul(info.stride);
+        for x in x0..x1 {
+            let offset = (row + x).saturating_mul(bytes_per_pixel);
+            if offset + bytes_per_pixel > info.size {
+                continue;
+            }
+
+            unsafe {
+                let dst = fb.add(offset);
+                let mut i = 0;
+                while i < bytes_per_pixel {
+                    core::ptr::write(dst.add(i), packed_bytes[i]);
+                    i += 1;
+                }
+            }
+        }
+    }
+}
 
 #[inline(always)]
 fn io_in8(port: u16) -> u8 {
@@ -76,8 +179,15 @@ fn serial_write_str(s: &str) {
 
 #[inline(always)]
 fn trace_marker(marker: u8) {
-    // Emit a raw byte to COM1 for handoff-stage tracing.
-    io_out8(0x3F8, marker);
+    // Emit a raw byte to COM1 for handoff-stage tracing. Use a bounded wait so
+    // diagnostics cannot become the thing that blocks the handoff.
+    for _ in 0..100_000 {
+        if (io_in8(COM1_PORT + 5) & 0x20) != 0 {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    io_out8(COM1_PORT, marker);
 }
 
 #[entry]
@@ -91,6 +201,7 @@ fn main() -> Status {
     }
     boot_log("uefi init ok");
     let boot_info = efi_main::initialize_boot_info();
+    fb_trace_mark(boot_info.framebuffer, 0);
     println!(
         "[boot] fb info: base={:#x} size={} {}x{} stride={} bpp={} bytespp={} fmt={:?} masks=({:#x},{:#x},{:#x},{:#x})",
         boot_info.framebuffer.base,
@@ -108,6 +219,7 @@ fn main() -> Status {
     );
     if boot_info.framebuffer.base != 0 {
         efi_main::ui::draw_boot_splash(boot_info.framebuffer);
+        fb_trace_mark(boot_info.framebuffer, 1);
     }
 
     let seed_path = "\\SAIOS\\seed.elf";
@@ -119,6 +231,7 @@ fn main() -> Status {
         }
     };
     boot_log("seed loaded");
+    fb_trace_mark(boot_info.framebuffer, 2);
     let mut image_start = u64::MAX;
     let mut image_end = 0u64;
     for i in 0..loader.image.elf_header.phnum {
@@ -150,6 +263,7 @@ fn main() -> Status {
         }
     };
     boot_log("kernel memory allocated");
+    fb_trace_mark(boot_info.framebuffer, 3);
     for i in 0..loader.image.elf_header.phnum {
         let ph = &loader.image.program_headers[i as usize];
 
@@ -171,6 +285,7 @@ fn main() -> Status {
         }
     }
     boot_log("segments copied");
+    fb_trace_mark(boot_info.framebuffer, 4);
     let stack_pages = 16;
 
     let stack = match boot::allocate_pages(
@@ -178,13 +293,14 @@ fn main() -> Status {
         MemoryType::LOADER_DATA,
         stack_pages,
     ) {
-            Ok(stack) => stack,
-            Err(e) => {
-                println!("Stack allocation failed: {:?}", e.status());
-                return e.status();
-            }
-        };
+        Ok(stack) => stack,
+        Err(e) => {
+            println!("Stack allocation failed: {:?}", e.status());
+            return e.status();
+        }
+    };
     boot_log("stack allocated");
+    fb_trace_mark(boot_info.framebuffer, 5);
 
     let stack_base = stack.as_ptr() as u64;
     let stack_top = stack_base + stack_pages as u64 * 4096;
@@ -216,6 +332,7 @@ fn main() -> Status {
         boot_info_ptr.write(boot_info);
     }
     boot_log("boot info copied");
+    fb_trace_mark(boot_info.framebuffer, 6);
 
     // ── Pre-allocate storage for memory-map entries ──────────────────
     //
@@ -240,6 +357,7 @@ fn main() -> Status {
         }
     };
     boot_log("map storage allocated");
+    fb_trace_mark(boot_info.framebuffer, 7);
 
     let pre_exit_memorymap = match efi_main::memorymap::initialize() {
         Ok(memorymap) => memorymap,
@@ -252,6 +370,7 @@ fn main() -> Status {
         (*boot_info_ptr).memorymap = pre_exit_memorymap;
     }
     boot_log("pre-exit map captured");
+    fb_trace_mark(boot_info.framebuffer, 8);
 
     let raw_entry = loader.entry_point;
     let entry = raw_entry.wrapping_add((base.as_ptr() as u64).wrapping_sub(aligned_start));
@@ -267,27 +386,32 @@ fn main() -> Status {
     }
     drop(loader);
     boot_log("entry resolved");
+    fb_trace_mark(boot_info.framebuffer, 9);
     println!(
         "[boot] handoff: entry={:#x} stack={:#x} boot_info={:#x}",
         entry, kernel_rsp, boot_info_ptr as u64
     );
     boot::stall(Duration::from_secs(5));
     boot_log("exit boot services begin");
+    fb_trace_mark(boot_info.framebuffer, 10);
 
     trace_marker(b'1');
     let final_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
     trace_marker(b'5');
+    serial_write_str("[boot] exit boot services returned\n");
+    fb_trace_mark(boot_info.framebuffer, 11);
 
     let final_entry_count = final_map.len();
     if final_entry_count > MAX_ENTRIES {
-        loop {
-            core::hint::spin_loop();
-        }
+        trace_marker(b'O');
+        serial_write_str("[boot] final memory map truncated\n");
+        fb_trace_mark(boot_info.framebuffer, 14);
     }
 
     if final_entry_count != 0 {
+        let copied_entry_count = core::cmp::min(final_entry_count, MAX_ENTRIES);
         let dst = entries_storage.as_ptr() as *mut efi_main::memorymap::MemoryRegion;
-        for (idx, desc) in final_map.entries().enumerate() {
+        for (idx, desc) in final_map.entries().take(copied_entry_count).enumerate() {
             let region = efi_main::memorymap::MemoryRegion {
                 base: desc.phys_start,
                 length: desc.page_count * 4096,
@@ -303,13 +427,15 @@ fn main() -> Status {
         unsafe {
             (*boot_info_ptr).memorymap = efi_main::memorymap::MemoryMapInfo {
                 entries: dst,
-                entry_count: final_entry_count,
+                entry_count: copied_entry_count,
             };
         }
+        fb_trace_mark(boot_info.framebuffer, 12);
     }
 
     unsafe {
         trace_marker(b'D');
+        fb_trace_mark(boot_info.framebuffer, 13);
         asm!(
             "cli",
             "cld",

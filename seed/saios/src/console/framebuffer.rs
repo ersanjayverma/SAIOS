@@ -685,6 +685,17 @@ impl FramebufferConsole {
         self.clear();
     }
 
+    /// Bind the console directly to the bootloader-provided framebuffer address
+    /// without creating a new VMM mapping. Used during firmware-CR3 fallback.
+    pub fn attach_direct(&mut self, info: FramebufferInfo) {
+        self.display = FramebufferDisplay::from_info_direct(info);
+
+        self.cursor_x = 0;
+        self.cursor_y = 0;
+        self.cursor_inverted = false;
+        self.clear();
+    }
+
     /// Toggle the visible cursor blink state.  Called from the timer tick path.
     pub fn blink_cursor(&mut self) {
         let Some((cols, rows)) = self.text_bounds() else {
