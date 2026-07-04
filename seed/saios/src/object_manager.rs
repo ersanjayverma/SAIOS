@@ -502,22 +502,90 @@ impl ObjectManager {
         objects: Vec<ProviderObject>,
     ) {
         for obj in objects {
+            let parent = obj.parent_path.as_deref().and_then(|p| {
+                self.objects
+                    .iter()
+                    .find(|existing| existing.path == p)
+                    .map(|existing| existing.id)
+            });
+
             let id = self.register_object(
                 &obj.path,
                 &obj.name,
                 obj.object_type,
                 obj.status,
                 obj.health,
-                obj.properties,
+                obj.properties.clone(),
                 obj.parent_path.as_deref(),
             );
 
             if let Some(managed) = self.objects.iter_mut().find(|o| o.id == id) {
+                managed.header.class = map_object_class(obj.object_type);
+                managed.header.state = map_object_state(obj.status);
+                managed.header.health = map_health_state(obj.health);
+                managed.header.name = obj.name.clone();
+                managed.header.parent = parent;
                 managed.header.provider = provider_id;
+                managed.name = obj.name;
+                managed.object_type = obj.object_type;
+                managed.status = obj.status;
+                managed.health = obj.health;
+                managed.properties = obj.properties;
                 managed.provider_name = provider_name.to_string();
                 managed.header.modified = timer::ticks();
             }
+
+            if let Some(parent_path) = obj.parent_path
+                && let Some(parent) = self.objects.iter_mut().find(|o| o.path == parent_path)
+                && !parent.children.contains(&id)
+            {
+                parent.children.push(id);
+            }
         }
+    }
+
+    fn refresh_provider_objects(&mut self, provider_name: &str) -> Result<usize, &'static str> {
+        let idx = self
+            .provider_instances
+            .iter()
+            .position(|provider| {
+                provider.name().eq_ignore_ascii_case(provider_name)
+                    || provider.namespace().trim_matches('/').eq_ignore_ascii_case(provider_name)
+            })
+            .ok_or("provider not registered")?;
+
+        let (id, name, namespace, objects) = {
+            let provider = &self.provider_instances[idx];
+            (
+                provider.id(),
+                provider.name().to_string(),
+                provider.namespace().trim_matches('/').to_string(),
+                provider.enumerate(),
+            )
+        };
+        let count = objects.len();
+        let refreshed_paths: Vec<String> = objects.iter().map(|obj| obj.path.clone()).collect();
+        self.register_provider_objects(id, name.as_str(), objects);
+
+        let prefix = format!("{}/", namespace);
+        let mut removed = Vec::new();
+        self.objects.retain(|obj| {
+            let stale = obj.header.provider == id
+                && obj.path.starts_with(prefix.as_str())
+                && !refreshed_paths.iter().any(|path| path == &obj.path);
+            if stale {
+                removed.push(obj.id);
+            }
+            !stale
+        });
+        if !removed.is_empty() {
+            for obj in &mut self.objects {
+                obj.children.retain(|child| !removed.contains(child));
+            }
+        }
+
+        self.push_event(format!("Provider refreshed: {}", name));
+        Ok(count)
     }
 
     fn register_provider_instance(&mut self, mut provider: Box<dyn Provider>) {
@@ -852,6 +920,24 @@ pub fn object_types() -> Vec<String> {
 pub fn providers() -> Vec<ProviderInfo> {
     init();
     with_manager_mut(|manager| manager.providers.clone())
+}
+
+/// Refreshes one already-registered provider and merges its current objects
+/// into the object namespace.
+pub fn refresh_provider(provider_name: &str) -> Result<usize, &'static str> {
+    with_manager_mut(|manager| {
+        if !manager.initialized {
+            return Err("object manager not initialized");
+        }
+        manager.refresh_provider_objects(provider_name)
+    })
+}
+
+/// Refreshes storage objects when the object manager is already online.
+pub fn refresh_storage_provider_if_ready() {
+    if is_initialized() {
+        let _ = refresh_provider("storage");
+    }
 }
 
 /// Queries objects using a simple `key=value,key!=value` expression.

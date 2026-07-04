@@ -2,6 +2,9 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use hal::arch::x86_64::sync::StaticCell;
 
 use crate::console;
 use crate::driver::dhcp;
@@ -33,6 +36,169 @@ use crate::shell::registry::CommandRegistry;
 use crate::shell::session::CommandContext;
 use crate::timer;
 use crate::vfs;
+
+#[derive(Clone, Default)]
+struct DetectSnapshot {
+    pci: Vec<String>,
+    devices: Vec<String>,
+    usb: Vec<String>,
+    ahci_controllers: Vec<String>,
+    ahci_disks: Vec<String>,
+    storage_fs: Vec<String>,
+}
+
+static DETECT_LOCK: AtomicBool = AtomicBool::new(false);
+static DETECT_BASELINE: StaticCell<Option<DetectSnapshot>> = StaticCell::new(None);
+
+fn detect_lock() {
+    while DETECT_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+fn detect_unlock() {
+    DETECT_LOCK.store(false, Ordering::Release);
+}
+
+fn with_detect_baseline_mut<R>(f: impl FnOnce(&mut Option<DetectSnapshot>) -> R) -> R {
+    detect_lock();
+    let out = {
+        // SAFETY: guarded by spin lock.
+        let slot = unsafe { &mut *DETECT_BASELINE.get() };
+        f(slot)
+    };
+    detect_unlock();
+    out
+}
+
+fn push_unique(out: &mut Vec<String>, value: String) {
+    if !out.iter().any(|v| v == &value) {
+        out.push(value);
+    }
+}
+
+fn snapshot_collect(live_probe: bool) -> DetectSnapshot {
+    let mut snap = DetectSnapshot::default();
+
+    for d in pci::devices() {
+        push_unique(
+            &mut snap.pci,
+            format!(
+                "{:02x}:{:02x}.{} {:04x}:{:04x} cls={:02x}{:02x}{:02x}",
+                d.bus,
+                d.device,
+                d.function,
+                d.vendor_id,
+                d.device_id,
+                d.class,
+                d.subclass,
+                d.prog_if
+            ),
+        );
+    }
+
+    for d in device::devices() {
+        push_unique(
+            &mut snap.devices,
+            format!("{} driver={} class={}", d.name, d.driver, d.class),
+        );
+    }
+
+    let usb_list = if live_probe {
+        usb::controllers()
+    } else {
+        usb::controllers_cached()
+    };
+    for u in usb_list {
+        push_unique(
+            &mut snap.usb,
+            format!(
+                "{} {:02x}:{:02x}.{} {:04x}:{:04x} {}",
+                u.name, u.bus, u.device, u.function, u.vendor_id, u.device_id, u.kind
+            ),
+        );
+    }
+
+    let ahci_ctrls = if live_probe {
+        crate::driver::ahci::controllers()
+    } else {
+        crate::driver::ahci::controllers_cached()
+    };
+    for c in ahci_ctrls {
+        push_unique(
+            &mut snap.ahci_controllers,
+            format!(
+                "{} {:02x}:{:02x}.{} {:04x}:{:04x}",
+                c.name, c.bus, c.device, c.function, c.vendor_id, c.device_id
+            ),
+        );
+    }
+
+    let ahci_disks = if live_probe {
+        crate::driver::ahci::disks()
+    } else {
+        crate::driver::ahci::disks_cached()
+    };
+    for d in ahci_disks {
+        push_unique(
+            &mut snap.ahci_disks,
+            format!(
+                "{} ctrl={} port={} sectors={} model={}",
+                d.name, d.controller, d.port, d.total_sectors, d.model
+            ),
+        );
+    }
+
+    let volumes = if live_probe {
+        disk::volumes()
+    } else {
+        disk::volumes_cached()
+    };
+    for v in volumes {
+        let fs = v.filesystem.as_str();
+        if !(fs.eq_ignore_ascii_case("fat32")
+            || fs.eq_ignore_ascii_case("ntfs")
+            || fs.eq_ignore_ascii_case("ext4"))
+        {
+            continue;
+        }
+        push_unique(
+            &mut snap.storage_fs,
+            format!(
+                "{} fs={} backing={} size_mb={}",
+                v.name,
+                fs,
+                v.backing,
+                v.total_bytes / (1024 * 1024)
+            ),
+        );
+    }
+
+    snap
+}
+
+fn diff_new(current: &[String], baseline: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in current {
+        if !baseline.iter().any(|b| b == item) {
+            out.push(item.clone());
+        }
+    }
+    out
+}
+
+fn print_detect_section(title: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    console::println!("{}", title);
+    for item in items {
+        console::println!("  + {}", item);
+    }
+}
 
 pub fn register(registry: &mut CommandRegistry) {
     registry.register(Box::new(StaticCommand {
@@ -351,6 +517,46 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_events,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "storage",
+        description: "Storage stack diagnostics and rescan",
+        handler: cmd_storage,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "scan",
+        description: "Rescan storage hardware and list volumes",
+        handler: cmd_scan,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "hdd",
+        description: "Check HDD/storage controllers, disks, and volumes",
+        handler: cmd_hdd,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "drive",
+        description: "Alias for hdd",
+        handler: cmd_hdd,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "drives",
+        description: "Alias for hdd",
+        handler: cmd_hdd,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "disks",
+        description: "Alias for volumes disks",
+        handler: cmd_disks,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "volume",
+        description: "Alias for volumes",
+        handler: cmd_volumes,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "volumes",
+        description: "Manage storage volumes, disks, scan, and mounts",
+        handler: cmd_volumes,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "mount",
         description: "Mount storage volume or list mounts; see 'mount help'",
         handler: cmd_mount,
@@ -419,6 +625,11 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "pci",
         description: "List PCI devices",
         handler: cmd_pci,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "detect",
+        description: "Detect newly available hardware since previous snapshot",
+        handler: cmd_detect,
     }));
     registry.register(Box::new(StaticCommand {
         name: "usb",
@@ -1946,75 +2157,562 @@ fn cmd_events(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     Ok(())
 }
 
+fn storage_controller_kind(dev: &pci::PciDevice) -> &'static str {
+    if dev.vendor_id == 0x1af4 && dev.class == 0x01 {
+        return "VirtIO Block";
+    }
+    if dev.class != 0x01 {
+        return "Other";
+    }
+    if dev.subclass == 0x06 && dev.prog_if == 0x01 {
+        "AHCI"
+    } else if dev.subclass == 0x08 && dev.prog_if == 0x02 {
+        "NVMe"
+    } else if dev.subclass == 0x01 {
+        "IDE"
+    } else {
+        "Storage"
+    }
+}
+
+fn pci_bar_label(dev: &pci::PciDevice, index: u8) -> String {
+    pci::read_bar(dev, index)
+        .map(|bar| {
+            let kind = if bar.is_io { "io" } else { "mem" };
+            let width = if bar.is_64bit { "64" } else { "32" };
+            format!("0x{:x}({},{})", bar.base, kind, width)
+        })
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn pci_irq_label(dev: &pci::PciDevice) -> String {
+    let irq = pci::read_u8(dev.bus, dev.device, dev.function, 0x3c);
+    if irq == 0 || irq == 0xff {
+        "-".to_string()
+    } else {
+        irq.to_string()
+    }
+}
+
+fn print_storage_pci_detail() {
+    pci::init();
+    let devices: Vec<_> = pci::devices()
+        .into_iter()
+        .filter(|dev| dev.class == 0x01)
+        .collect();
+
+    console::println!("PCI Mass Storage Controllers");
+    console::println!("============================");
+    if devices.is_empty() {
+        console::println!("  (none found)");
+        return;
+    }
+
+    for dev in &devices {
+        let bar0 = pci_bar_label(dev, 0);
+        let bar5 = pci_bar_label(dev, 5);
+        let irq = pci_irq_label(dev);
+        console::println!(
+            "{:02x}:{:02x}.{} Vendor={:04x} Device={:04x} Class={:02x} Subclass={:02x} ProgIF={:02x} BAR0={} BAR5={} IRQ={} Kind={}",
+            dev.bus,
+            dev.device,
+            dev.function,
+            dev.vendor_id,
+            dev.device_id,
+            dev.class,
+            dev.subclass,
+            dev.prog_if,
+            bar0,
+            bar5,
+            irq,
+            storage_controller_kind(dev)
+        );
+    }
+
+    console::println!("");
+    console::println!("AHCI requires Class=01 Subclass=06 ProgIF=01 and a non-zero memory BAR5.");
+}
+
+fn print_storage_scan_status(prefix: &str) {
+    let status = disk::scan_status();
+    console::println!(
+        "{}: scan {} epoch={} queued={} running={} disks={} volumes={}",
+        prefix,
+        status.phase,
+        status.epoch,
+        if status.queued { "yes" } else { "no" },
+        if status.running { "yes" } else { "no" },
+        status.disks,
+        status.volumes
+    );
+}
+
+fn print_cached_disks() {
+    let disks = disk::disks_cached();
+
+    console::println!("Detected Disks");
+    console::println!("==============");
+    console::println!(
+        "  {:<12}  {:>8}  {:<6}  {:<5}  {:<10}  {}",
+        "NAME", "SIZE(MB)", "SECTOR", "HW", "PARTS", "BACKING"
+    );
+    console::println!(
+        "  {:-<12}  {:->8}  {:-<6}  {:-<5}  {:-<10}  {:-<32}",
+        "", "", "", "", "", ""
+    );
+
+    for d in &disks {
+        let mb = d.total_bytes / (1024 * 1024);
+        console::println!(
+            "  {:<12.12}  {:>8}  {:<6}  {:<5}  {:<10}  {}",
+            d.name,
+            mb,
+            d.sector_size,
+            if d.hardware { "yes" } else { "no" },
+            d.partitions.len(),
+            d.backing
+        );
+    }
+
+    if disks.is_empty() {
+        console::println!("  (no disks detected)");
+        console::println!("");
+        console::println!("Run 'volumes scan' to request storage discovery.");
+    } else {
+        console::println!("");
+        console::println!("{} disk(s) detected. Use 'volumes' for mountable volumes.", disks.len());
+    }
+}
+
+fn print_cached_volumes() {
+    let volumes = disk::volumes_cached();
+    console::println!("Detected Volumes");
+    console::println!("================");
+    console::println!(
+        "  {:<12}  {:<8}  {:>8}  {:<10}  {:<18}  {}",
+        "NAME", "FS", "SIZE(MB)", "ACCESS", "MOUNTED", "BACKING"
+    );
+    console::println!(
+        "  {:-<12}  {:-<8}  {:->8}  {:-<10}  {:-<18}  {:-<28}",
+        "", "", "", "", "", ""
+    );
+
+    for v in &volumes {
+        console::println!(
+            "  {:<12.12}  {:<8.8}  {:>8}  {:<10}  {:<18.18}  {}",
+            v.name,
+            v.filesystem.as_str(),
+            v.total_bytes / (1024 * 1024),
+            if v.writable { "rw" } else { "ro" },
+            v.mounted_at.as_deref().unwrap_or("-"),
+            v.backing
+        );
+    }
+
+    if volumes.iter().all(|v| v.name == "tmpfs") {
+        console::println!("");
+        console::println!("Only tmpfs is known. Run 'volumes scan' to request storage discovery.");
+    }
+}
+
+fn print_cached_ahci() {
+    console::println!("AHCI Controllers");
+    console::println!("----------------");
+    let ctrls = crate::driver::ahci::controllers_cached();
+    if ctrls.is_empty() {
+        console::println!("  (none discovered - run 'volumes scan')");
+    }
+    for c in &ctrls {
+        let state = match c.state {
+            crate::driver::ahci::AhciControllerState::Discovered => "ready",
+            crate::driver::ahci::AhciControllerState::Faulted => "faulted",
+        };
+        let abar = c
+            .abar
+            .map(|value| format!("0x{:x}", value))
+            .unwrap_or_else(|| "-".to_string());
+        console::println!(
+            "  {} {} {:02x}:{:02x}.{} {:04x}:{:04x} abar={}",
+            c.name, state, c.bus, c.device, c.function, c.vendor_id, c.device_id, abar
+        );
+        if let Some(err) = c.last_error.as_ref() {
+            console::println!("    error: {}", err);
+        }
+    }
+
+    console::println!("\nAHCI Disks");
+    console::println!("----------");
+    let disks = crate::driver::ahci::disks_cached();
+    if disks.is_empty() {
+        console::println!("  (none found)");
+    }
+    for d in &disks {
+        let gb = d.total_sectors.saturating_mul(d.sector_size as u64) / (1024 * 1024 * 1024);
+        console::println!("  {} port={} {}GB \"{}\"", d.name, d.port, gb, d.model);
+    }
+}
+
+fn print_cached_mounts() {
+    let vfs_mounts = vfs::mounts();
+    console::println!("VFS Mounts");
+    console::println!("==========");
+    console::println!("  {:<24}  {:<10}  {:<5}", "PATH", "FS", "FLAGS");
+    for m in &vfs_mounts {
+        console::println!(
+            "  {:<24.24}  {:<10.10}  {:<5}",
+            m.path,
+            m.fs_name,
+            if m.read_only { "ro" } else { "rw" }
+        );
+    }
+    if vfs_mounts.is_empty() {
+        console::println!("  (none)");
+    }
+}
+
+fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let action = args.first().copied().unwrap_or("list");
+
+    match action {
+        "help" => {
+            console::println!("volumes                 List mountable volumes (cached)");
+            console::println!("volumes disks           List detected block disks (cached)");
+            console::println!("volumes pci             Print PCI mass-storage BAR/IRQ details");
+            console::println!("volumes ahci            Show cached AHCI controllers/disks");
+            console::println!("volumes mounts          Show VFS mounts and volumes");
+            console::println!("volumes scan            Request background storage discovery");
+            console::println!("volumes check           Storage check summary");
+            console::println!("volume                  Alias for volumes");
+            console::println!("disks                   Alias for volumes disks");
+            console::println!("scan                    Alias for volumes scan");
+            Ok(())
+        }
+        "scan" | "rescan" => {
+            console::println!("volumes: scan requested");
+            disk::request_rescan();
+            print_storage_scan_status("volumes");
+            print_cached_volumes();
+            Ok(())
+        }
+        "disks" | "disk" => {
+            print_cached_disks();
+            Ok(())
+        }
+        "pci" => {
+            print_storage_pci_detail();
+            Ok(())
+        }
+        "ahci" => {
+            print_cached_ahci();
+            Ok(())
+        }
+        "mounts" | "mount" => {
+            print_cached_mounts();
+            console::println!("");
+            print_cached_volumes();
+            Ok(())
+        }
+        "check" | "hdd" | "drives" => {
+            print_storage_scan_status("volumes");
+            print_cached_disks();
+            console::println!("");
+            print_cached_volumes();
+            let mountable = disk::volumes_cached()
+                .into_iter()
+                .find(|volume| volume.name != "tmpfs" && volume.mounted_at.is_none());
+            if let Some(volume) = mountable {
+                console::println!("\nmount hint: mount {} /mnt/{}", volume.name, volume.name);
+            } else {
+                console::println!("\nmount hint: no unmounted disk volume found");
+            }
+            Ok(())
+        }
+        "list" | "ls" | _ => {
+            print_cached_volumes();
+            Ok(())
+        }
+    }
+}
+
+fn cmd_disks(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    if args.is_empty() {
+        cmd_volumes(ctx, &["disks"])
+    } else {
+        cmd_volumes(ctx, args)
+    }
+}
+
+fn cmd_storage(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let sub = args.first().copied().unwrap_or("diag");
+
+    match sub {
+        "help" => {
+            console::println!("storage diag            Run bottom-up diagnostics (cached, non-blocking)");
+            console::println!("storage diag probe      Run diagnostics with live AHCI/storage probe");
+            console::println!("storage scan            Force AHCI + storage rescan");
+            console::println!("storage pci             List PCI storage controllers");
+            Ok(())
+        }
+        "scan" => {
+            disk::request_rescan();
+            print_storage_scan_status("storage");
+            Ok(())
+        }
+        "pci" => {
+            print_storage_pci_detail();
+            Ok(())
+        }
+        "diag" => {
+            let live_probe = args
+                .get(1)
+                .is_some_and(|v| v.eq_ignore_ascii_case("probe") || v.eq_ignore_ascii_case("live"));
+
+            console::println!("Storage Diagnostics");
+            console::println!("===================");
+
+            console::println!("\n[1] PCI Enumeration");
+            pci::init();
+            let storage_pci: Vec<_> = pci::devices()
+                .into_iter()
+                .filter(|d| d.class == 0x01)
+                .collect();
+            if storage_pci.is_empty() {
+                console::println!("  FAIL: no PCI storage class devices found");
+            } else {
+                for dev in &storage_pci {
+                    console::println!(
+                        "  {:02x}:{:02x}.{} {} {:04x}:{:04x}",
+                        dev.bus,
+                        dev.device,
+                        dev.function,
+                        storage_controller_kind(dev),
+                        dev.vendor_id,
+                        dev.device_id
+                    );
+                }
+            }
+
+            let has_ahci_pci = storage_pci
+                .iter()
+                .any(|d| d.subclass == 0x06 && d.prog_if == 0x01);
+            let has_nvme_pci = storage_pci
+                .iter()
+                .any(|d| d.subclass == 0x08 && d.prog_if == 0x02);
+
+            console::println!("\n[2] Driver Binding");
+            let pci_drv = driver::find("pci");
+            let storage_drv = driver::find("storage");
+            let ext4_drv = driver::find("ext4");
+            let ntfs_drv = driver::find("ntfs");
+            let fat32_drv = driver::find("fat32");
+            console::println!(
+                "  pci={} storage={} ext4={} ntfs={} fat32={}",
+                if pci_drv.is_some() { "ok" } else { "missing" },
+                if storage_drv.is_some() { "ok" } else { "missing" },
+                if ext4_drv.is_some() { "ok" } else { "missing" },
+                if ntfs_drv.is_some() { "ok" } else { "missing" },
+                if fat32_drv.is_some() { "ok" } else { "missing" }
+            );
+
+            console::println!("\n[3] Controller Initialization");
+            if live_probe {
+                console::println!("  mode: live probe");
+                console::println!("  probing: ahci.rescan");
+                crate::driver::ahci::rescan();
+            } else {
+                console::println!("  mode: cached (use 'storage diag probe' for live)");
+            }
+            let ahci_ctrl = if live_probe {
+                crate::driver::ahci::controllers()
+            } else {
+                crate::driver::ahci::controllers_cached()
+            };
+            if ahci_ctrl.is_empty() {
+                console::println!(
+                    "  AHCI: {}",
+                    if has_ahci_pci {
+                        "FAIL (PCI AHCI present but no initialized controller)"
+                    } else {
+                        "Not Found"
+                    }
+                );
+            } else {
+                console::println!("  AHCI: PASS ({})", ahci_ctrl.len());
+                for c in &ahci_ctrl {
+                    let state = match c.state {
+                        crate::driver::ahci::AhciControllerState::Discovered => "ready",
+                        crate::driver::ahci::AhciControllerState::Faulted => "faulted",
+                    };
+                    let abar = c
+                        .abar
+                        .map(|v| format!("0x{:x}", v))
+                        .unwrap_or_else(|| "-".to_string());
+                    console::println!(
+                        "    {} {} abar={} {:02x}:{:02x}.{}",
+                        c.name,
+                        state,
+                        abar,
+                        c.bus,
+                        c.device,
+                        c.function
+                    );
+                    if let Some(err) = c.last_error.as_ref() {
+                        console::println!("      note: {}", err);
+                    }
+                }
+            }
+            console::println!("  NVMe: {}", if has_nvme_pci { "PCI Found (driver pending)" } else { "Not Found" });
+
+            console::println!("\n[4] Port Enumeration + IDENTIFY");
+            let ahci_disks = if live_probe {
+                crate::driver::ahci::disks()
+            } else {
+                crate::driver::ahci::disks_cached()
+            };
+            if ahci_disks.is_empty() {
+                console::println!("  no AHCI media identified");
+            } else {
+                for d in &ahci_disks {
+                    let gb = d.total_sectors.saturating_mul(d.sector_size as u64) / (1024 * 1024 * 1024);
+                    console::println!(
+                        "  {} ctrl={} port={} model={} size={}GB",
+                        d.name, d.controller, d.port, d.model, gb
+                    );
+                }
+            }
+
+            console::println!("\n[5] Block Device Registration");
+            if live_probe {
+                console::println!("  probing: storage.rescan");
+                disk::rescan();
+            } else {
+                console::println!("  using cached storage registry");
+            }
+            let block_devices: Vec<_> = device::devices()
+                .into_iter()
+                .filter(|d| d.class.contains("block/") || d.driver.eq_ignore_ascii_case("storage") || d.driver.eq_ignore_ascii_case("ahci"))
+                .collect();
+            if block_devices.is_empty() {
+                console::println!("  FAIL: no block devices registered");
+            } else {
+                for d in &block_devices {
+                    console::println!(
+                        "  {} driver={} class={} status={}",
+                        d.name,
+                        d.driver,
+                        d.class,
+                        device_status_label(d.status)
+                    );
+                }
+            }
+
+            console::println!("\n[6] Volume Manager");
+            let volumes = if live_probe {
+                disk::volumes()
+            } else {
+                disk::volumes_cached()
+            };
+            let real_volumes: Vec<_> = volumes
+                .into_iter()
+                .filter(|v| v.name != "tmpfs")
+                .collect();
+            if real_volumes.is_empty() {
+                console::println!("  FAIL: no non-tmpfs volumes");
+            } else {
+                for v in &real_volumes {
+                    console::println!(
+                        "  {} fs={} backing={} size_mb={}",
+                        v.name,
+                        v.filesystem.as_str(),
+                        v.backing,
+                        v.total_bytes / (1024 * 1024)
+                    );
+                }
+            }
+
+            console::println!("\n[7] Partition Scan");
+            let parts: Vec<_> = real_volumes
+                .iter()
+                .filter(|v| v.backing.contains(':') || v.name.contains('p'))
+                .collect();
+            if parts.is_empty() {
+                console::println!("  no partitions detected");
+            } else {
+                for p in parts {
+                    console::println!(
+                        "  {} fs={} backing={}",
+                        p.name,
+                        p.filesystem.as_str(),
+                        p.backing
+                    );
+                }
+            }
+
+            console::println!("\n[8] Mounted Filesystems");
+            let mounts = vfs::mounts();
+            if mounts.is_empty() {
+                console::println!("  none");
+            } else {
+                for m in mounts {
+                    console::println!(
+                        "  {} -> {} [{}]",
+                        m.path,
+                        m.fs_name,
+                        if m.read_only { "ro" } else { "rw" }
+                    );
+                }
+            }
+
+            Ok(())
+        }
+        _ => Err("storage: usage: storage [diag [probe]|scan|pci|help]"),
+    }
+}
+
+fn cmd_scan(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    cmd_volumes(ctx, &["scan"])
+}
+
+fn cmd_hdd(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let cached = args
+        .first()
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("cached") || arg.eq_ignore_ascii_case("list"));
+
+    if cached {
+        cmd_volumes(ctx, &["check"])
+    } else {
+        cmd_volumes(ctx, &["scan"])?;
+        cmd_volumes(ctx, &["check"])
+    }
+}
+
 fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let sub = args.first().copied().unwrap_or("list");
 
     match sub {
         // ── mount list (default) ────────────────────────────────────────────
         "list" | "ls" => {
-            // Show VFS-level mounts first
-            let vfs_mounts = vfs::mounts();
-            console::println!("── VFS Mounts ──────────────────────────────────────────────────");
-            console::println!("  {:<24}  {:<10}  {:<5}", "PATH", "FS", "FLAGS");
-            for m in &vfs_mounts {
-                let flags = if m.read_only { "ro" } else { "rw" };
-                console::println!(
-                    "  {:<24.24}  {:<10.10}  {:<5}",
-                    m.path,
-                    m.fs_name,
-                    flags
-                );
-            }
-            if vfs_mounts.is_empty() {
-                console::println!("  (none)");
-            }
-
-            // Show all storage volumes and their mount state
-            let volumes = disk::volumes();
-            console::println!("── Storage Volumes ─────────────────────────────────────────────");
-            console::println!(
-                "  {:<12}  {:<8}  {:>8}  {:<10}  {:<24}",
-                "NAME",
-                "FS",
-                "SIZE(MB)",
-                "BACKING",
-                "MOUNTED AT"
-            );
-            for v in &volumes {
-                let size_mb = v.total_bytes / (1024 * 1024);
-                let mounted = v.mounted_at.as_deref().unwrap_or("—");
-                console::println!(
-                    "  {:<12.12}  {:<8.8}  {:>8}  {:<10.10}  {:<24.24}",
-                    v.name,
-                    v.filesystem.as_str(),
-                    size_mb,
-                    v.backing,
-                    mounted
-                );
-            }
-            if volumes.is_empty() {
-                console::println!("  (no volumes detected)");
-            }
-            Ok(())
+            cmd_volumes(_ctx, &["mounts"])
         }
+
+        "disks" => cmd_volumes(_ctx, &["disks"]),
+
+        "volumes" | "volume" => cmd_volumes(_ctx, &args[1..]),
 
         // ── mount scan ──────────────────────────────────────────────────────
-        "scan" => {
-            disk::rescan();
-            let count = disk::volumes().len();
-            console::println!("mount: rescan complete — {} volume(s) detected", count);
-            Ok(())
-        }
+        "scan" | "rescan" => cmd_scan(_ctx, &[]),
 
         // ── mount help ──────────────────────────────────────────────────────
         "help" => {
             console::println!("mount                         List mounts and storage volumes");
             console::println!("mount list                    Same as above");
-            console::println!("mount scan                    Rescan PCI storage devices");
+            console::println!("mount disks                   Alias for volumes disks");
+            console::println!("mount volumes                 List detected volumes (cached)");
+            console::println!("mount scan                    Alias for volumes scan");
             console::println!("mount <device> <path> [ro]    Mount a storage volume");
             console::println!("umount <path>                 Unmount a mounted path");
             console::println!("");
-            console::println!("Devices are shown by 'mount list'. Common names: disk0, disk1, ...");
+            console::println!("Volumes are shown by 'volumes'. Common names: sata0p1, disk0p1, ...");
             console::println!("Mount points must exist as directories (e.g. /mnt/disk0).");
             Ok(())
         }
@@ -2033,9 +2731,8 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
             let read_only = args.get(2).is_some_and(|f| f.eq_ignore_ascii_case("ro"));
 
-            // Confirm the volume exists and get its fs type
-            let vol = disk::find_volume(device)
-                .ok_or("mount: volume not found (run 'mount scan' to refresh)")?;
+            let vol = disk::resolve_mountable_volume(device)
+                .ok_or("mount: no mountable volume found (run 'mount scan', then use a partition like sata0p1)")?;
 
             let fs_name = vol.filesystem.as_str();
 
@@ -2046,11 +2743,14 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             vfs::mount(mountpoint, fs_name, read_only)?;
 
             // Update storage driver's mounted_at marker
-            disk::mount_volume(device, mountpoint, read_only)?;
+            if let Err(e) = disk::mount_volume(vol.name.as_str(), mountpoint, read_only) {
+                let _ = vfs::umount(mountpoint);
+                return Err(e);
+            }
 
             console::println!(
                 "mount: {} ({}) mounted at {} [{}]",
-                device,
+                vol.name,
                 fs_name,
                 mountpoint,
                 if read_only { "ro" } else { "rw" }
@@ -2201,6 +2901,90 @@ fn cmd_pci(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
             pci::class_name(dev.class)
         );
     }
+    Ok(())
+}
+
+fn cmd_detect(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let action = args.first().copied().unwrap_or("scan");
+
+    if action.eq_ignore_ascii_case("help") {
+        console::println!("detect             Real probe + report newly available hardware");
+        console::println!("detect quick       Compare cached snapshot only (fast, no heavy probe)");
+        console::println!("detect probe       Alias for real probe mode");
+        console::println!("detect real        Alias for real probe mode");
+        console::println!("detect reset       Reset baseline to current hardware snapshot");
+        console::println!("detect scan        Same as default");
+        console::println!("Includes new PCI/USB/AHCI devices and new FAT32/NTFS/EXT4 volumes.");
+        return Ok(());
+    }
+
+    let force_probe = action.eq_ignore_ascii_case("scan")
+        || action.eq_ignore_ascii_case("probe")
+        || action.eq_ignore_ascii_case("real")
+        || action.eq_ignore_ascii_case("rescan");
+
+    if force_probe {
+        console::println!("detect: pci probe...");
+        pci::init();
+        console::println!("detect: usb probe...");
+        usb::rescan();
+        console::println!("detect: storage+ahci probe...");
+        disk::rescan();
+    } else if !action.eq_ignore_ascii_case("quick") && !action.eq_ignore_ascii_case("reset") {
+        return Err("detect: usage: detect [scan|real|probe|quick|reset|help]");
+    }
+
+    let current = snapshot_collect(force_probe);
+
+    if action.eq_ignore_ascii_case("reset") {
+        with_detect_baseline_mut(|baseline| {
+            *baseline = Some(current);
+        });
+        console::println!("detect: baseline reset to current hardware state");
+        return Ok(());
+    }
+
+    let mut had_changes = false;
+    with_detect_baseline_mut(|baseline| {
+        if baseline.is_none() {
+            *baseline = Some(current.clone());
+            console::println!("detect: baseline initialized (run detect again to see new hardware)");
+            return;
+        }
+
+        let prev = baseline.as_ref().expect("detect baseline missing");
+
+        let new_pci = diff_new(current.pci.as_slice(), prev.pci.as_slice());
+        let new_devices = diff_new(current.devices.as_slice(), prev.devices.as_slice());
+        let new_usb = diff_new(current.usb.as_slice(), prev.usb.as_slice());
+        let new_ahci_ctrl = diff_new(
+            current.ahci_controllers.as_slice(),
+            prev.ahci_controllers.as_slice(),
+        );
+        let new_ahci_disks = diff_new(current.ahci_disks.as_slice(), prev.ahci_disks.as_slice());
+        let new_storage_fs = diff_new(current.storage_fs.as_slice(), prev.storage_fs.as_slice());
+
+        print_detect_section("new.pci", new_pci.as_slice());
+        print_detect_section("new.device.registry", new_devices.as_slice());
+        print_detect_section("new.usb.controllers", new_usb.as_slice());
+        print_detect_section("new.ahci.controllers", new_ahci_ctrl.as_slice());
+        print_detect_section("new.ahci.media", new_ahci_disks.as_slice());
+        print_detect_section("new.storage.fs(ext4|ntfs|fat32)", new_storage_fs.as_slice());
+
+        had_changes = !new_pci.is_empty()
+            || !new_devices.is_empty()
+            || !new_usb.is_empty()
+            || !new_ahci_ctrl.is_empty()
+            || !new_ahci_disks.is_empty()
+            || !new_storage_fs.is_empty();
+
+        *baseline = Some(current);
+    });
+
+    if !had_changes {
+        console::println!("detect: no new hardware/media since last snapshot");
+    }
+
     Ok(())
 }
 

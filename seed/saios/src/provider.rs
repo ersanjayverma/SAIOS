@@ -136,11 +136,149 @@ impl Provider for StorageProvider {
     /// root and any probed filesystem images.
     fn enumerate(&self) -> Vec<ProviderObject> {
         let mut out = Vec::new();
-        for volume in storage::volumes() {
+        let volumes = storage::volumes_cached();
+        let disks = storage::disks_cached();
+
+        if let Some(volume) = volumes.iter().find(|v| v.name == "tmpfs") {
+            out.push(ProviderObject {
+                path: "storage/tmpfs".to_string(),
+                name: "tmpfs".to_string(),
+                object_type: ObjectType::Volume,
+                status: ObjectStatus::Online,
+                health: Health::Healthy,
+                parent_path: Some("storage".to_string()),
+                properties: vec![
+                    Property {
+                        key: "Driver".to_string(),
+                        value: volume.filesystem.driver_name().to_string(),
+                    },
+                    Property {
+                        key: "Filesystem".to_string(),
+                        value: volume.filesystem.as_str().to_string(),
+                    },
+                    Property {
+                        key: "Backing".to_string(),
+                        value: volume.backing.clone(),
+                    },
+                    Property {
+                        key: "Mounted".to_string(),
+                        value: volume.mounted_at.clone().unwrap_or_else(|| "-".to_string()),
+                    },
+                    Property {
+                        key: "Writable".to_string(),
+                        value: if volume.writable { "true" } else { "false" }.to_string(),
+                    },
+                ],
+            });
+        }
+
+        for disk in &disks {
+            out.push(ProviderObject {
+                path: format!("storage/{}", disk.name),
+                name: disk.name.clone(),
+                object_type: ObjectType::Device,
+                status: ObjectStatus::Online,
+                health: Health::Healthy,
+                parent_path: Some("storage".to_string()),
+                properties: vec![
+                    Property {
+                        key: "Driver".to_string(),
+                        value: if disk.hardware { "ahci" } else { "ramdisk" }.to_string(),
+                    },
+                    Property {
+                        key: "Backing".to_string(),
+                        value: disk.backing.clone(),
+                    },
+                    Property {
+                        key: "SectorSize".to_string(),
+                        value: disk.sector_size.to_string(),
+                    },
+                    Property {
+                        key: "SizeBytes".to_string(),
+                        value: disk.total_bytes.to_string(),
+                    },
+                    Property {
+                        key: "Partitions".to_string(),
+                        value: disk.partitions.len().to_string(),
+                    },
+                    Property {
+                        key: "Hardware".to_string(),
+                        value: if disk.hardware { "true" } else { "false" }.to_string(),
+                    },
+                ],
+            });
+
+            for part_name in &disk.partitions {
+                let Some(volume) = volumes.iter().find(|v| v.name.eq_ignore_ascii_case(part_name)) else {
+                    continue;
+                };
+
+                let (status, health) = if volume.mounted_at.is_some() {
+                    (ObjectStatus::Online, Health::Healthy)
+                } else {
+                    (ObjectStatus::Offline, Health::Warning)
+                };
+
+                out.push(ProviderObject {
+                    path: format!("storage/{}/{}", disk.name, volume.name),
+                    name: volume.name.clone(),
+                    object_type: ObjectType::Volume,
+                    status,
+                    health,
+                    parent_path: Some(format!("storage/{}", disk.name)),
+                    properties: vec![
+                        Property {
+                            key: "Driver".to_string(),
+                            value: volume.filesystem.driver_name().to_string(),
+                        },
+                        Property {
+                            key: "Filesystem".to_string(),
+                            value: volume.filesystem.as_str().to_string(),
+                        },
+                        Property {
+                            key: "Backing".to_string(),
+                            value: volume.backing.clone(),
+                        },
+                        Property {
+                            key: "SectorSize".to_string(),
+                            value: volume.sector_size.to_string(),
+                        },
+                        Property {
+                            key: "SizeBytes".to_string(),
+                            value: volume.total_bytes.to_string(),
+                        },
+                        Property {
+                            key: "Mounted".to_string(),
+                            value: volume.mounted_at.clone().unwrap_or_else(|| "-".to_string()),
+                        },
+                        Property {
+                            key: "Writable".to_string(),
+                            value: if volume.writable { "true" } else { "false" }.to_string(),
+                        },
+                    ],
+                });
+            }
+        }
+
+        if out.is_empty() {
+            return out;
+        }
+
+        for volume in volumes {
+            if volume.name == "tmpfs" || disks.iter().any(|d| d.name.eq_ignore_ascii_case(&volume.name)) {
+                continue;
+            }
+            if disks
+                .iter()
+                .any(|d| d.partitions.iter().any(|p| p.eq_ignore_ascii_case(&volume.name)))
+            {
+                continue;
+            }
+
             let (status, health) = if volume.mounted_at.is_some() {
                 (ObjectStatus::Online, Health::Healthy)
             } else {
-                (ObjectStatus::Offline, Health::Offline)
+                (ObjectStatus::Offline, Health::Warning)
             };
 
             out.push(ProviderObject {

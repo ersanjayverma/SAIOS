@@ -180,7 +180,7 @@ fn seed_shared_libraries() -> Result<(), &'static str> {
     Ok(())
 }
 
-pub fn mount_default() -> Result<(), &'static str> {
+fn mount_default_inner() -> Result<(), &'static str> {
     for d in ROOT_DIRS {
         ensure_dir(d)?;
     }
@@ -195,6 +195,13 @@ pub fn mount_default() -> Result<(), &'static str> {
     write_manifest()?;
     MOUNTED.store(true, Ordering::Release);
     Ok(())
+}
+
+pub fn mount_default() -> Result<(), &'static str> {
+    let previous_logging = vfs::set_event_logging_enabled(false);
+    let result = mount_default_inner();
+    let _ = vfs::set_event_logging_enabled(previous_logging);
+    result
 }
 
 pub fn status() -> PackageImageStatus {

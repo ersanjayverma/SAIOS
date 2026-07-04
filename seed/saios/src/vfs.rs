@@ -650,7 +650,7 @@ fn is_sys_path(path: &str) -> bool {
 }
 
 fn is_storage_backed(path: &str) -> bool {
-    storage::mounted_volume_for_path(path).is_some_and(|v| v.name != "tmpfs")
+    storage::mounted_volume_for_path_cached(path).is_some_and(|v| v.name != "tmpfs")
 }
 
 fn storage_node_name(path: &str) -> String {
@@ -674,6 +674,17 @@ fn storage_inode(path: &str) -> u64 {
 
 static VFS: StaticCell<Option<VfsState>> = StaticCell::new(None);
 static LOCK: AtomicBool = AtomicBool::new(false);
+static EVENT_LOGGING_ENABLED: AtomicBool = AtomicBool::new(true);
+
+fn log_event(message: &str) {
+    if EVENT_LOGGING_ENABLED.load(Ordering::Acquire) {
+        object_manager::log_event(message);
+    }
+}
+
+pub fn set_event_logging_enabled(enabled: bool) -> bool {
+    EVENT_LOGGING_ENABLED.swap(enabled, Ordering::AcqRel)
+}
 
 fn lock() {
     while LOCK
@@ -722,7 +733,7 @@ pub fn mkdir(path: &str) -> Result<(), &'static str> {
         }
 
         vfs.fs.mkdir(path)?;
-        object_manager::log_event(&format!("Directory created: {}", abs));
+        log_event(&format!("Directory created: {}", abs));
         Ok(())
     })
 }
@@ -740,7 +751,7 @@ pub fn touch(path: &str) -> Result<(), &'static str> {
         }
 
         vfs.fs.create(path)?;
-        object_manager::log_event(&format!("File created: {}", abs));
+        log_event(&format!("File created: {}", abs));
         Ok(())
     })
 }
@@ -763,7 +774,7 @@ pub fn mount(path: &str, fs_name: &str, read_only: bool) -> Result<(), &'static 
             fs_name: fs_name.to_string(),
             read_only,
         });
-        object_manager::log_event(&format!("Mounted {} on {}", fs_name, abs));
+        log_event(&format!("Mounted {} on {}", fs_name, abs));
         Ok(())
     })
 }
@@ -786,7 +797,7 @@ pub fn umount(path: &str) -> Result<(), &'static str> {
         if vfs.mounts.len() == before {
             return Err("not mounted");
         }
-        object_manager::log_event(&format!("Unmounted {}", abs));
+        log_event(&format!("Unmounted {}", abs));
         Ok(())
     })
 }
@@ -989,7 +1000,7 @@ pub fn unlink(path: &str) -> Result<(), &'static str> {
         let inode = vfs.fs.resolve(path)?;
         vfs.invalidate_inode_descriptors(inode);
         vfs.fs.remove(path)?;
-        object_manager::log_event(&format!("Object removed: {}", abs));
+        log_event(&format!("Object removed: {}", abs));
         Ok(())
     })
 }
@@ -1008,7 +1019,7 @@ pub fn rename(from: &str, to: &str) -> Result<(), &'static str> {
         }
 
         vfs.fs.rename_path(from, to)?;
-        object_manager::log_event(&format!("Renamed {} -> {}", abs_from, abs_to));
+        log_event(&format!("Renamed {} -> {}", abs_from, abs_to));
         Ok(())
     })
 }

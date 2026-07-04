@@ -9,10 +9,11 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::min;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
+use crate::driver::ahci;
 use crate::kernel::device::{self, DeviceStatus};
 use crate::pci;
 
@@ -82,6 +83,16 @@ pub struct DetectedVolume {
     pub sector_size: u16,
     pub mounted_at: Option<String>,
     pub writable: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct DetectedDisk {
+    pub name: String,
+    pub backing: String,
+    pub total_bytes: u64,
+    pub sector_size: u16,
+    pub hardware: bool,
+    pub partitions: Vec<String>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -174,11 +185,59 @@ impl RamBlockDevice {
     }
 }
 
+/// Block device backing - either RAM or real AHCI hardware.
+#[derive(Clone)]
+enum BlockBacking {
+    Ram(RamBlockDevice),
+    Ahci { disk_id: u32, sector_size: u16, sectors: u64 },
+}
+
+impl BlockBacking {
+    fn sector_size(&self) -> u16 {
+        match self {
+            BlockBacking::Ram(r) => r.sector_size,
+            BlockBacking::Ahci { sector_size, .. } => *sector_size,
+        }
+    }
+
+    fn sectors(&self) -> u64 {
+        match self {
+            BlockBacking::Ram(r) => r.sectors,
+            BlockBacking::Ahci { sectors, .. } => *sectors,
+        }
+    }
+
+    fn read_sector(&self, lba: u64, out: &mut [u8]) -> Result<(), &'static str> {
+        match self {
+            BlockBacking::Ram(r) => r.read_sector(lba, out),
+            BlockBacking::Ahci { disk_id, .. } => ahci::read_sector(*disk_id, lba, out),
+        }
+    }
+
+    fn write_sector(&mut self, lba: u64, data: &[u8]) -> Result<(), &'static str> {
+        match self {
+            BlockBacking::Ram(r) => r.write_sector(lba, data),
+            BlockBacking::Ahci { disk_id, .. } => ahci::write_sector(*disk_id, lba, data),
+        }
+    }
+
+    fn flush(&mut self) {
+        match self {
+            BlockBacking::Ram(r) => r.flush(),
+            BlockBacking::Ahci { disk_id, .. } => { let _ = ahci::flush(*disk_id); }
+        }
+    }
+
+    fn is_real_hardware(&self) -> bool {
+        matches!(self, BlockBacking::Ahci { .. })
+    }
+}
+
 #[derive(Clone)]
 struct DiskDevice {
     name: String,
     backing: String,
-    block: RamBlockDevice,
+    block: BlockBacking,
     partitions: Vec<Partition>,
 }
 
@@ -209,6 +268,32 @@ impl StorageState {
 
 static STATE: StaticCell<Option<StorageState>> = StaticCell::new(None);
 static LOCK: AtomicBool = AtomicBool::new(false);
+static SCAN_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static SCAN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static SCAN_RUNNING: AtomicBool = AtomicBool::new(false);
+static SCAN_COMPLETED: AtomicBool = AtomicBool::new(false);
+static SCAN_EPOCH: AtomicU64 = AtomicU64::new(0);
+static SCAN_PHASE: AtomicU8 = AtomicU8::new(SCAN_IDLE);
+
+const SCAN_IDLE: u8 = 0;
+const SCAN_QUEUED: u8 = 1;
+const SCAN_PCI: u8 = 2;
+const SCAN_AHCI: u8 = 3;
+const SCAN_PARTITIONS: u8 = 4;
+const SCAN_PUBLISH: u8 = 5;
+const SCAN_DONE: u8 = 6;
+const SCAN_FAILED: u8 = 7;
+
+#[derive(Clone, Debug)]
+pub struct StorageScanStatus {
+    pub queued: bool,
+    pub running: bool,
+    pub completed: bool,
+    pub epoch: u64,
+    pub phase: &'static str,
+    pub disks: usize,
+    pub volumes: usize,
+}
 
 fn lock() {
     while LOCK
@@ -221,6 +306,20 @@ fn lock() {
 
 fn unlock() {
     LOCK.store(false, Ordering::Release);
+}
+
+fn scan_phase_name(phase: u8) -> &'static str {
+    match phase {
+        SCAN_IDLE => "idle",
+        SCAN_QUEUED => "queued",
+        SCAN_PCI => "pci",
+        SCAN_AHCI => "ahci",
+        SCAN_PARTITIONS => "partitions",
+        SCAN_PUBLISH => "publish",
+        SCAN_DONE => "done",
+        SCAN_FAILED => "failed",
+        _ => "unknown",
+    }
 }
 
 fn with_state_mut<R>(f: impl FnOnce(&mut StorageState) -> R) -> R {
@@ -615,7 +714,7 @@ fn write_partition_bytes(
     part: &Partition,
     bytes: &[u8],
 ) -> Result<(), &'static str> {
-    let sector_size = disk.block.sector_size as usize;
+    let sector_size = disk.block.sector_size() as usize;
     let mut lba = part.start_lba;
     let mut at = 0usize;
     let mut scratch = vec![0u8; sector_size];
@@ -642,7 +741,7 @@ fn write_partition_bytes(
 }
 
 fn read_partition_bytes(disk: &DiskDevice, part: &Partition) -> Result<Vec<u8>, &'static str> {
-    let sector_size = disk.block.sector_size as usize;
+    let sector_size = disk.block.sector_size() as usize;
     let mut lba = part.start_lba;
     let max_lba = part.start_lba.saturating_add(part.sector_count);
     let mut scratch = vec![0u8; sector_size];
@@ -718,7 +817,7 @@ fn probe_partition_filesystem(disk: &DiskDevice, part: &Partition) -> Option<Fil
         return None;
     }
 
-    let sector_size = disk.block.sector_size as usize;
+    let sector_size = disk.block.sector_size() as usize;
     if sector_size == 0 {
         return None;
     }
@@ -784,7 +883,7 @@ fn seed_default_mbr_fat32(dev: &mut RamBlockDevice) {
 }
 
 fn parse_mbr_partitions(disk: &DiskDevice) -> Vec<Partition> {
-    let mut mbr = vec![0u8; disk.block.sector_size as usize];
+    let mut mbr = vec![0u8; disk.block.sector_size() as usize];
     if disk.block.read_sector(0, mbr.as_mut_slice()).is_err() || !has_mbr_signature(&mbr) {
         return Vec::new();
     }
@@ -818,7 +917,7 @@ fn parse_mbr_partitions(disk: &DiskDevice) -> Vec<Partition> {
 }
 
 fn parse_gpt_partitions(disk: &DiskDevice) -> Vec<Partition> {
-    let mut sector = vec![0u8; disk.block.sector_size as usize];
+    let mut sector = vec![0u8; disk.block.sector_size() as usize];
     if disk.block.read_sector(1, sector.as_mut_slice()).is_err() {
         return Vec::new();
     }
@@ -835,7 +934,7 @@ fn parse_gpt_partitions(disk: &DiskDevice) -> Vec<Partition> {
 
     let mut out = Vec::new();
     let table_bytes = entries_count.saturating_mul(entry_size);
-    let sec_size = disk.block.sector_size as usize;
+    let sec_size = disk.block.sector_size() as usize;
     let table_secs = table_bytes.div_ceil(sec_size);
     let mut table = vec![0u8; table_secs.saturating_mul(sec_size)];
     let mut scratch = vec![0u8; sec_size];
@@ -885,7 +984,7 @@ fn detect_partitions_for_disk(disk: &mut DiskDevice) {
         parts.push(Partition {
             name: String::new(),
             start_lba: 2048,
-            sector_count: disk.block.sectors.saturating_sub(2048),
+            sector_count: disk.block.sectors().saturating_sub(2048),
             fs_hint: FilesystemKind::Fat32,
         });
     }
@@ -933,15 +1032,16 @@ fn rebuild_volume_registry(state: &mut StorageState) {
     });
 
     for disk in &state.disks {
+        let kind_str = if disk.block.is_real_hardware() { "ahci" } else { "ram" };
         state.volumes.push(DetectedVolume {
             name: disk.name.clone(),
             filesystem: FilesystemKind::TmpFs,
-            backing: disk.backing.clone(),
+            backing: format!("{}:{}", kind_str, disk.backing),
             total_bytes: disk
                 .block
-                .sectors
-                .saturating_mul(disk.block.sector_size as u64),
-            sector_size: disk.block.sector_size,
+                .sectors()
+                .saturating_mul(disk.block.sector_size() as u64),
+            sector_size: disk.block.sector_size(),
             mounted_at: None,
             writable: true,
         });
@@ -953,8 +1053,8 @@ fn rebuild_volume_registry(state: &mut StorageState) {
                 backing: format!("{}:{}", disk.name, part.name),
                 total_bytes: part
                     .sector_count
-                    .saturating_mul(disk.block.sector_size as u64),
-                sector_size: disk.block.sector_size,
+                    .saturating_mul(disk.block.sector_size() as u64),
+                sector_size: disk.block.sector_size(),
                 mounted_at: None,
                 writable: true,
             });
@@ -962,18 +1062,43 @@ fn rebuild_volume_registry(state: &mut StorageState) {
     }
 }
 
-fn discover_disks_from_pci(state: &mut StorageState) {
-    state.disks.clear();
+/// Discover disks - first from AHCI driver (real hardware), then PCI fallback.
+fn discover_disks_from_pci() -> Vec<DiskDevice> {
+    let mut disks = Vec::new();
 
-    let mut idx = 0usize;
+    // First: Query AHCI driver for real disks (uses cached list, won't stall)
+    let ahci_disks = ahci::disks_cached();
+    for (idx, adisk) in ahci_disks.iter().enumerate() {
+        let mut disk = DiskDevice {
+            name: format!("sata{}", idx),
+            backing: format!(
+                "ahci {} port {} model \"{}\"",
+                adisk.controller, adisk.port, adisk.model
+            ),
+            block: BlockBacking::Ahci {
+                disk_id: adisk.id,
+                sector_size: adisk.sector_size,
+                sectors: adisk.total_sectors,
+            },
+            partitions: Vec::new(),
+        };
+        detect_partitions_for_disk(&mut disk);
+        disks.push(disk);
+    }
+
+    // Second: For non-AHCI PCI storage controllers, create synthetic fallback
+    let mut idx = ahci_disks.len();
     for dev in pci::devices() {
         if dev.class != 0x01 {
+            continue;
+        }
+        // Skip AHCI controllers - already handled above
+        if dev.subclass == 0x06 && dev.prog_if == 0x01 {
             continue;
         }
 
         let controller = match (dev.vendor_id, dev.device_id) {
             (0x1AF4, _) => "virtio-blk",
-            _ if dev.subclass == 0x06 => "sata-ahci",
             _ if dev.subclass == 0x01 => "ata",
             _ => "storage-generic",
         };
@@ -984,15 +1109,15 @@ fn discover_disks_from_pci(state: &mut StorageState) {
                 "{} pci {:02x}:{:02x}.{}",
                 controller, dev.bus, dev.device, dev.function
             ),
-            // Early boot only needs a tiny synthetic backing store so storage
-            // enumeration does not allocate hundreds of MiB on real hardware.
-            block: RamBlockDevice::new(SYNTHETIC_DISK_SECTORS, 512),
+            block: BlockBacking::Ram(RamBlockDevice::new(SYNTHETIC_DISK_SECTORS, 512)),
             partitions: Vec::new(),
         };
         detect_partitions_for_disk(&mut disk);
-        state.disks.push(disk);
+        disks.push(disk);
         idx = idx.saturating_add(1);
     }
+
+    disks
 }
 
 fn ensure_volume_mounted(
@@ -1072,21 +1197,86 @@ pub fn init() {
         if state.initialized {
             return;
         }
-        discover_disks_from_pci(state);
         rebuild_volume_registry(state);
-        register_devices(state);
         state.initialized = true;
     });
 }
 
-pub fn rescan() {
+fn publish_disks(disks: Vec<DiskDevice>) {
     with_state_mut(|state| {
-        discover_disks_from_pci(state);
+        state.disks = disks;
         rebuild_volume_registry(state);
         state.mounted.clear();
         register_devices(state);
         state.initialized = true;
     });
+    crate::object_manager::refresh_storage_provider_if_ready();
+}
+
+fn perform_rescan() {
+    SCAN_RUNNING.store(true, Ordering::Release);
+    SCAN_REQUESTED.store(false, Ordering::Release);
+    SCAN_COMPLETED.store(false, Ordering::Release);
+
+    SCAN_PHASE.store(SCAN_PCI, Ordering::Release);
+    pci::init();
+
+    SCAN_PHASE.store(SCAN_AHCI, Ordering::Release);
+    ahci::rescan();
+
+    SCAN_PHASE.store(SCAN_PARTITIONS, Ordering::Release);
+    let disks = discover_disks_from_pci();
+
+    SCAN_PHASE.store(SCAN_PUBLISH, Ordering::Release);
+    publish_disks(disks);
+
+    SCAN_EPOCH.fetch_add(1, Ordering::AcqRel);
+    SCAN_COMPLETED.store(true, Ordering::Release);
+    SCAN_RUNNING.store(false, Ordering::Release);
+    SCAN_PHASE.store(SCAN_DONE, Ordering::Release);
+}
+
+fn scan_worker_entry() {
+    loop {
+        if SCAN_REQUESTED.swap(false, Ordering::AcqRel) {
+            perform_rescan();
+        } else {
+            crate::scheduler::sleep_ticks(2);
+        }
+    }
+}
+
+pub fn start_scan_worker() {
+    if SCAN_WORKER_STARTED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let _ = crate::scheduler::spawn(scan_worker_entry);
+    }
+}
+
+pub fn request_rescan() {
+    init();
+    start_scan_worker();
+    SCAN_PHASE.store(SCAN_QUEUED, Ordering::Release);
+    SCAN_REQUESTED.store(true, Ordering::Release);
+}
+
+pub fn rescan() {
+    request_rescan();
+}
+
+pub fn scan_status() -> StorageScanStatus {
+    let (disks, volumes) = with_state(|state| (state.disks.len(), state.volumes.len()));
+    StorageScanStatus {
+        queued: SCAN_REQUESTED.load(Ordering::Acquire),
+        running: SCAN_RUNNING.load(Ordering::Acquire),
+        completed: SCAN_COMPLETED.load(Ordering::Acquire),
+        epoch: SCAN_EPOCH.load(Ordering::Acquire),
+        phase: scan_phase_name(SCAN_PHASE.load(Ordering::Acquire)),
+        disks,
+        volumes,
+    }
 }
 
 pub fn supported_filesystems() -> &'static [FilesystemKind] {
@@ -1103,6 +1293,77 @@ pub fn supported_filesystems() -> &'static [FilesystemKind] {
 pub fn volumes() -> Vec<DetectedVolume> {
     init();
     with_state(|state| state.volumes.clone())
+}
+
+pub fn volumes_cached() -> Vec<DetectedVolume> {
+    with_state(|state| state.volumes.clone())
+}
+
+pub fn find_volume_cached(name: &str) -> Option<DetectedVolume> {
+    with_state(|state| {
+        state
+            .volumes
+            .iter()
+            .find(|v| v.name.eq_ignore_ascii_case(name))
+            .cloned()
+    })
+}
+
+pub fn resolve_mountable_volume(name: &str) -> Option<DetectedVolume> {
+    with_state(|state| {
+        if let Some(volume) = state
+            .volumes
+            .iter()
+            .find(|v| v.name.eq_ignore_ascii_case(name))
+        {
+            if fs_supports_mount_tree(volume.filesystem) && volume.name != "tmpfs" {
+                return Some(volume.clone());
+            }
+        }
+
+        let disk = state
+            .disks
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case(name))?;
+        for part in &disk.partitions {
+            if let Some(volume) = state
+                .volumes
+                .iter()
+                .find(|v| v.name.eq_ignore_ascii_case(part.name.as_str()))
+                && fs_supports_mount_tree(volume.filesystem)
+            {
+                return Some(volume.clone());
+            }
+        }
+        None
+    })
+}
+
+fn disk_snapshot(state: &StorageState) -> Vec<DetectedDisk> {
+    state
+        .disks
+        .iter()
+        .map(|disk| DetectedDisk {
+            name: disk.name.clone(),
+            backing: disk.backing.clone(),
+            total_bytes: disk
+                .block
+                .sectors()
+                .saturating_mul(disk.block.sector_size() as u64),
+            sector_size: disk.block.sector_size(),
+            hardware: disk.block.is_real_hardware(),
+            partitions: disk.partitions.iter().map(|p| p.name.clone()).collect(),
+        })
+        .collect()
+}
+
+pub fn disks() -> Vec<DetectedDisk> {
+    init();
+    with_state(disk_snapshot)
+}
+
+pub fn disks_cached() -> Vec<DetectedDisk> {
+    with_state(disk_snapshot)
 }
 
 pub fn probe_image(image: &[u8]) -> Option<FilesystemKind> {
@@ -1122,7 +1383,7 @@ pub fn find_volume(name: &str) -> Option<DetectedVolume> {
 
 pub fn mount_volume(name: &str, path: &str, _read_only: bool) -> Result<(), &'static str> {
     init();
-    with_state_mut(|state| {
+    let result = with_state_mut(|state| {
         let idx = state
             .volumes
             .iter()
@@ -1143,18 +1404,25 @@ pub fn mount_volume(name: &str, path: &str, _read_only: bool) -> Result<(), &'st
 
         let vol_name = state.volumes[idx].name.clone();
         let vol_fs = state.volumes[idx].filesystem;
+        if !fs_supports_mount_tree(vol_fs) || vol_name == "tmpfs" {
+            return Err("storage: volume is not mountable");
+        }
         if fs_supports_mount_tree(vol_fs) {
             ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
         }
 
         state.volumes[idx].mounted_at = Some(path.to_string());
         Ok(())
-    })
+    });
+    if result.is_ok() {
+        crate::object_manager::refresh_storage_provider_if_ready();
+    }
+    result
 }
 
 pub fn umount_volume(path: &str) -> Result<(), &'static str> {
     init();
-    with_state_mut(|state| {
+    let result = with_state_mut(|state| {
         let idx = state
             .volumes
             .iter()
@@ -1176,12 +1444,16 @@ pub fn umount_volume(path: &str) -> Result<(), &'static str> {
 
         state.volumes[idx].mounted_at = None;
         Ok(())
-    })
+    });
+    if result.is_ok() {
+        crate::object_manager::refresh_storage_provider_if_ready();
+    }
+    result
 }
 
 pub fn format_volume(name: &str, fs: FilesystemKind) -> Result<(), &'static str> {
     init();
-    with_state_mut(|state| {
+    let result = with_state_mut(|state| {
         let idx = state
             .volumes
             .iter()
@@ -1213,11 +1485,19 @@ pub fn format_volume(name: &str, fs: FilesystemKind) -> Result<(), &'static str>
         }
 
         Ok(())
-    })
+    });
+    if result.is_ok() {
+        crate::object_manager::refresh_storage_provider_if_ready();
+    }
+    result
 }
 
 pub fn mounted_volume_for_path(path: &str) -> Option<DetectedVolume> {
     init();
+    with_state(|state| mounted_volume_for_path_internal(state, path).map(|(v, _)| v.clone()))
+}
+
+pub fn mounted_volume_for_path_cached(path: &str) -> Option<DetectedVolume> {
     with_state(|state| mounted_volume_for_path_internal(state, path).map(|(v, _)| v.clone()))
 }
 
@@ -1618,7 +1898,7 @@ pub fn sector_count(device_name: &str) -> Option<u64> {
             if disk.name.eq_ignore_ascii_case(device_name)
                 || format!("/dev/{}", disk.name).eq_ignore_ascii_case(device_name)
             {
-                return Some(disk.block.sectors);
+                return Some(disk.block.sectors());
             }
 
             for part in &disk.partitions {
@@ -1640,14 +1920,14 @@ pub fn sector_size(device_name: &str) -> Option<u16> {
             if disk.name.eq_ignore_ascii_case(device_name)
                 || format!("/dev/{}", disk.name).eq_ignore_ascii_case(device_name)
             {
-                return Some(disk.block.sector_size);
+                return Some(disk.block.sector_size());
             }
 
             for part in &disk.partitions {
                 if part.name.eq_ignore_ascii_case(device_name)
                     || format!("/dev/{}", part.name).eq_ignore_ascii_case(device_name)
                 {
-                    return Some(disk.block.sector_size);
+                    return Some(disk.block.sector_size());
                 }
             }
         }

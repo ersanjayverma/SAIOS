@@ -6,9 +6,11 @@
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::global_asm;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::x86_64::interrupt;
 use hal::arch::x86_64::sync::StaticCell;
@@ -172,6 +174,7 @@ impl Scheduler {
 }
 
 static SCHEDULER: StaticCell<Option<Scheduler>> = StaticCell::new(None);
+static USER_SESSION_STARTED: AtomicBool = AtomicBool::new(false);
 
 global_asm!(
     ".global saios_context_switch",
@@ -334,6 +337,76 @@ pub fn spawn(entry: ThreadEntry) -> ThreadId {
         let scheduler = scheduler_mut().expect("scheduler not initialized");
         scheduler.spawn_internal(entry)
     })
+}
+
+fn ensure_init_script() {
+    let _ = crate::saifs::mkdir("/system");
+    let _ = crate::saifs::touch("/system/init");
+    let script = b"# SAIOS init script\nsetenv HOSTNAME saios\nalias ll ls\n";
+    let _ = crate::vfs::write_path("/system/init", script);
+}
+
+fn auto_mount_cached_fat_volume() {
+    let Some(volume) = crate::driver::storage::volumes_cached()
+        .into_iter()
+        .find(|volume| {
+            volume.filesystem == crate::driver::storage::FilesystemKind::Fat32
+                && volume.name != "tmpfs"
+                && volume.mounted_at.is_none()
+        })
+    else {
+        return;
+    };
+
+    let mountpoint = format!("/mnt/{}", volume.name);
+    let _ = crate::vfs::mkdir(mountpoint.as_str());
+
+    if crate::vfs::mount(mountpoint.as_str(), volume.filesystem.as_str(), false).is_ok()
+        && crate::driver::storage::mount_volume(volume.name.as_str(), mountpoint.as_str(), false)
+            .is_ok()
+    {
+        crate::console::println!("Mounted {} at {}", volume.name, mountpoint);
+    }
+}
+
+/// Prepares the default userland filesystem/session environment.
+pub fn prepare_default_user_session() -> Result<(), &'static str> {
+    crate::console::clear();
+    crate::console::println!("SAIOS v1.0");
+    crate::console::println!("UEFI Boot");
+    crate::console::println!("Initializing user session...");
+    crate::console::println!("UTF framebuffer: Cafe Ω α あ ┌─┐ █");
+    crate::console::newline();
+
+    crate::object_manager::init();
+    crate::saifs::init();
+    crate::kernel::package_image::mount_default()?;
+    auto_mount_cached_fat_volume();
+    ensure_init_script();
+    crate::kernel::object::init();
+    Ok(())
+}
+
+fn default_user_session_entry() {
+    crate::console::println!("[BOOTCHK] scheduler.user.entry");
+    crate::shell::program_main();
+}
+
+/// Starts the default user shell as a scheduler-owned user session.
+pub fn start_default_user_session() -> Result<(), &'static str> {
+    if USER_SESSION_STARTED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    crate::console::println!("[BOOTCHK] scheduler.user.spawn");
+    let _ = spawn(default_user_session_entry);
+    crate::console::println!("[BOOTCHK] scheduler.user.spawned");
+    yield_now();
+    crate::console::println!("[BOOTCHK] scheduler.user.yielded");
+    Ok(())
 }
 
 /// Called by the timer interrupt handler to advance scheduling state.

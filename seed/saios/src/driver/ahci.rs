@@ -50,7 +50,9 @@ const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
 
 const FIS_TYPE_REG_H2D: u8 = 0x27;
 
-const AHCI_WAIT_ITERS: usize = 1_000_000;
+// Reduced from 1M to prevent long stalls on unresponsive hardware
+const AHCI_WAIT_ITERS: usize = 50_000;
+const AHCI_QUICK_ITERS: usize = 5_000;
 
 #[repr(C, packed)]
 struct HbaCmdHeader {
@@ -276,8 +278,8 @@ fn port_write32(mmio: *mut u8, port: u8, reg: usize, value: u32) {
     write32(mmio, port_offset(port) + reg, value);
 }
 
-fn wait_until_port(mmio: *mut u8, port: u8, reg: usize, mask: u32, set: bool) -> bool {
-    for _ in 0..AHCI_WAIT_ITERS {
+fn wait_until_port_timeout(mmio: *mut u8, port: u8, reg: usize, mask: u32, set: bool, iters: usize) -> bool {
+    for _ in 0..iters {
         let value = port_read32(mmio, port, reg);
         let matches = (value & mask) != 0;
         if matches == set {
@@ -313,7 +315,8 @@ fn stop_port_engine(mmio: *mut u8, port: u8) -> Result<(), &'static str> {
     cmd &= !AHCI_PX_CMD_FRE;
     port_write32(mmio, port, AHCI_PX_CMD, cmd);
 
-    if !wait_until_port(mmio, port, AHCI_PX_CMD, AHCI_PX_CMD_CR | AHCI_PX_CMD_FR, false) {
+    // Use quick timeout for port stop - if it doesn't respond fast, skip it
+    if !wait_until_port_timeout(mmio, port, AHCI_PX_CMD, AHCI_PX_CMD_CR | AHCI_PX_CMD_FR, false, AHCI_QUICK_ITERS) {
         return Err("ahci: port stop timed out");
     }
     Ok(())
@@ -638,6 +641,10 @@ pub fn controllers() -> Vec<AhciController> {
     with_state(|state| state.controllers.clone())
 }
 
+pub fn controllers_cached() -> Vec<AhciController> {
+    with_state(|state| state.controllers.clone())
+}
+
 pub fn controller_count() -> usize {
     init();
     with_state(|state| state.controllers.len())
@@ -645,6 +652,10 @@ pub fn controller_count() -> usize {
 
 pub fn disks() -> Vec<AhciDisk> {
     init();
+    with_state(|state| state.disks.clone())
+}
+
+pub fn disks_cached() -> Vec<AhciDisk> {
     with_state(|state| state.disks.clone())
 }
 

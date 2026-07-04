@@ -681,6 +681,10 @@ pub fn controllers() -> Vec<UsbController> {
     with_state(|state| state.controllers.clone())
 }
 
+pub fn controllers_cached() -> Vec<UsbController> {
+    with_state(|state| state.controllers.clone())
+}
+
 pub fn controller_count() -> usize {
     init();
     with_state(|state| state.controllers.len())

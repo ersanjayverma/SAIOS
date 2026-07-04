@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use hal::arch::x86_64::sync::StaticCell;
 
 use crate::som::HealthState;
-use crate::{object_manager, scheduler, shell, sif, timer};
+use crate::{object_manager, scheduler, sif, timer};
 
 /// Unique identifier for a kernel service.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -40,6 +40,7 @@ pub mod ids {
     pub const IPC: ServiceId = ServiceId(16);
     pub const NETWORK: ServiceId = ServiceId(17);
     pub const SAIRU: ServiceId = ServiceId(18);
+    pub const STORAGE_DISCOVERY: ServiceId = ServiceId(19);
 }
 
 /// Lifecycle state of a service managed by KSF.
@@ -685,15 +686,15 @@ impl KernelService for InputService {
     }
 }
 
-struct ShellService;
+struct UserSessionService;
 
-impl KernelService for ShellService {
+impl KernelService for UserSessionService {
     fn id(&self) -> ServiceId {
         ids::SHELL
     }
 
     fn name(&self) -> &'static str {
-        "shell"
+        "user-session"
     }
 
     fn version(&self) -> &'static str {
@@ -705,15 +706,15 @@ impl KernelService for ShellService {
     }
 
     fn initialize(&mut self) -> Result<(), &'static str> {
-        crate::console::println!("[BOOTCHK] shell.initialize.enter");
-        shell::init();
-        crate::console::println!("[BOOTCHK] shell.initialize.ok");
+        crate::console::println!("[BOOTCHK] user-session.initialize.enter");
+        scheduler::prepare_default_user_session()?;
+        crate::console::println!("[BOOTCHK] user-session.initialize.ok");
         Ok(())
     }
 
     fn start(&mut self) -> Result<(), &'static str> {
-        crate::console::println!("[BOOTCHK] shell.start.enter");
-        shell::start_service()
+        crate::console::println!("[BOOTCHK] user-session.start.enter");
+        scheduler::start_default_user_session()
     }
 
     /// Stops the service. Currently a no-op because clean kernel shutdown is not implemented.
@@ -867,6 +868,42 @@ impl KernelService for ProcessManagerService {
     }
 }
 
+struct StorageDiscoveryService;
+
+impl KernelService for StorageDiscoveryService {
+    fn id(&self) -> ServiceId {
+        ids::STORAGE_DISCOVERY
+    }
+
+    fn name(&self) -> &'static str {
+        "storage-discovery"
+    }
+
+    fn version(&self) -> &'static str {
+        "0.1.0"
+    }
+
+    fn dependencies(&self) -> &'static [ServiceId] {
+        &[ids::SCHEDULER, ids::DEVICE_MANAGER]
+    }
+
+    fn initialize(&mut self) -> Result<(), &'static str> {
+        crate::driver::storage::init();
+        crate::driver::storage::start_scan_worker();
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {}
+
+    fn health(&self) -> HealthState {
+        HealthState::Healthy
+    }
+}
+
 struct IpcService;
 
 impl KernelService for IpcService {
@@ -988,11 +1025,12 @@ pub fn bootstrap() -> Result<(), &'static str> {
         manager.register(Box::new(VfsService));
         manager.register(Box::new(DriverManagerService));
         manager.register(Box::new(DeviceManagerService));
+        manager.register(Box::new(StorageDiscoveryService));
         manager.register(Box::new(ProcessManagerService));
         manager.register(Box::new(IpcService));
         manager.register(Box::new(NetworkService));
         manager.register(Box::new(SairuService));
-        manager.register(Box::new(ShellService));
+        manager.register(Box::new(UserSessionService));
         manager.start_all()
     })
 }

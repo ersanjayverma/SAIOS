@@ -5,7 +5,7 @@
 //! Usage:
 //!   diskpart                              Full view: disks + volumes
 //!   diskpart list                         List all volumes
-//!   diskpart disks                        List physical (PCI) disks only
+//!   diskpart volumes                      List all volumes
 //!   diskpart info   <volume>              Detailed info for one volume
 //!   diskpart format <volume> <fs>         Format a volume (ext4/ntfs/fat32/…)
 //!   diskpart mount  <volume> <path> [ro]  Mount a volume
@@ -13,6 +13,7 @@
 //!   diskpart scan                         Rescan PCI storage devices
 //!   diskpart help                         Show this help
 
+use alloc::format;
 use alloc::string::String;
 
 use crate::console;
@@ -80,8 +81,12 @@ fn mount_label(m: &Option<String>) -> &str {
     m.as_deref().unwrap_or("—")
 }
 
-fn is_physical(backing: &str) -> bool {
-    backing.starts_with("pci")
+fn is_physical_volume(name: &str, backing: &str) -> bool {
+    storage::disks_cached().iter().any(|disk| {
+        disk.hardware
+            && (disk.name.eq_ignore_ascii_case(name)
+                || backing.starts_with(format!("{}:", disk.name).as_str()))
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -89,7 +94,7 @@ fn is_physical(backing: &str) -> bool {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn cmd_list() {
-    let vols = storage::volumes();
+    let vols = storage::volumes_cached();
 
     banner("DISKPART — ALL VOLUMES");
     console::println!(
@@ -128,45 +133,8 @@ fn cmd_list() {
     rule();
 }
 
-fn cmd_disks() {
-    let vols = storage::volumes();
-    let disks: alloc::vec::Vec<_> = vols.iter().filter(|v| is_physical(&v.backing)).collect();
-
-    banner("DISKPART — PHYSICAL DISKS");
-    console::println!(
-        "  {:<10}  {:<8}  {:>8}  {:<6}  {:<6}  {}",
-        "NAME",
-        "FS",
-        "MB",
-        "SECTOR",
-        "ACCESS",
-        "PCI ADDR"
-    );
-    thin();
-
-    for d in &disks {
-        console::println!(
-            "  {:<10}  {:<8}  {:>8}  {:<6}  {:<6}  {}",
-            d.name,
-            d.filesystem.as_str(),
-            mb(d.total_bytes),
-            sector_label(d.sector_size),
-            writable_label(d.writable),
-            d.backing,
-        );
-    }
-
-    if disks.is_empty() {
-        console::println!("  (no PCI mass-storage devices detected)");
-    }
-
-    thin();
-    console::println!("  {} physical disk(s)", disks.len());
-    rule();
-}
-
 fn cmd_info(name: &str) -> DiskpartResult {
-    let v = storage::find_volume(name).ok_or("diskpart: volume not found")?;
+    let v = storage::find_volume_cached(name).ok_or("diskpart: volume not found")?;
 
     banner("VOLUME INFO");
     console::println!("  Name        : {}", v.name);
@@ -188,7 +156,7 @@ fn cmd_info(name: &str) -> DiskpartResult {
     console::println!("  Backing     : {}", v.backing);
     console::println!(
         "  Type        : {}",
-        if is_physical(&v.backing) {
+        if is_physical_volume(&v.name, &v.backing) {
             "Physical (PCI)"
         } else {
             "Virtual/RAM"
@@ -215,18 +183,21 @@ fn cmd_format(name: &str, fs_str: &str) -> DiskpartResult {
 }
 
 fn cmd_mount(name: &str, path: &str, read_only: bool) -> DiskpartResult {
-    let vol = storage::find_volume(name)
-        .ok_or("diskpart: volume not found (run 'diskpart scan' to refresh)")?;
+    let vol = storage::resolve_mountable_volume(name)
+        .ok_or("diskpart: no mountable volume found (run 'diskpart scan', then use a partition like sata0p1)")?;
 
     // Auto-create mount point directory
     let _ = vfs::mkdir(path);
 
     vfs::mount(path, vol.filesystem.as_str(), read_only)?;
-    storage::mount_volume(name, path, read_only)?;
+    if let Err(e) = storage::mount_volume(vol.name.as_str(), path, read_only) {
+        let _ = vfs::umount(path);
+        return Err(e);
+    }
 
     console::println!(
         "diskpart: '{}' ({}) mounted at {} [{}]",
-        name,
+        vol.name,
         vol.filesystem.as_str(),
         path,
         if read_only { "ro" } else { "rw" }
@@ -242,13 +213,16 @@ fn cmd_umount(path: &str) -> DiskpartResult {
 }
 
 fn cmd_scan() -> DiskpartResult {
-    storage::rescan();
-    let vols = storage::volumes();
-    let phys = vols.iter().filter(|v| is_physical(&v.backing)).count();
+    storage::request_rescan();
+    let vols = storage::volumes_cached();
+    let scan = storage::scan_status();
     console::println!(
-        "diskpart: scan complete — {} volume(s)  ({} physical disk(s))",
-        vols.len(),
-        phys
+        "diskpart: scan {} epoch={} queued={} running={} — cached: {} volume(s)",
+        scan.phase,
+        scan.epoch,
+        if scan.queued { "yes" } else { "no" },
+        if scan.running { "yes" } else { "no" },
+        vols.len()
     );
     Ok(0)
 }
@@ -257,14 +231,16 @@ fn cmd_help() {
     banner("DISKPART HELP");
     console::println!("  diskpart                              Full volume listing");
     console::println!("  diskpart list                         All volumes");
-    console::println!("  diskpart disks                        Physical (PCI) disks only");
+    console::println!("  diskpart volumes                      All volumes");
+    console::println!("  diskpart scan                         Request storage discovery and list volumes");
+    console::println!("  diskpart disks                        Alias for volumes");
+    console::println!("  diskpart hdd                          Alias for scan + volumes");
     console::println!("  diskpart info   <vol>                 Detailed info for a volume");
     console::println!(
         "  diskpart format <vol> <fs>            Format: ext4 ntfs fat16 fat32 fat64 fat128"
     );
     console::println!("  diskpart mount  <vol> <path> [ro]     Mount a volume");
     console::println!("  diskpart umount <path>                Unmount a path");
-    console::println!("  diskpart scan                         Rescan PCI storage bus");
     console::println!("  diskpart help                         Show this help");
     rule();
 }
@@ -275,13 +251,14 @@ fn cmd_help() {
 
 pub fn run(args: &[&str], _env: &[(String, String)]) -> DiskpartResult {
     match args.first().copied() {
-        None | Some("list") => {
+        None | Some("list") | Some("volumes") | Some("volume") => {
             cmd_list();
             Ok(0)
         }
 
-        Some("disks") => {
-            cmd_disks();
+        Some("disks") | Some("disk") => {
+            console::println!("diskpart: disk commands are merged into volumes");
+            cmd_list();
             Ok(0)
         }
 
@@ -326,7 +303,17 @@ pub fn run(args: &[&str], _env: &[(String, String)]) -> DiskpartResult {
             cmd_umount(path)
         }
 
-        Some("scan") => cmd_scan(),
+        Some("scan") => {
+            cmd_scan()?;
+            cmd_list();
+            Ok(0)
+        }
+
+        Some("hdd") | Some("check") | Some("drives") | Some("drive") => {
+            cmd_scan()?;
+            cmd_list();
+            Ok(0)
+        }
 
         Some("help") | Some("-h") | Some("--help") => {
             cmd_help();
@@ -335,7 +322,7 @@ pub fn run(args: &[&str], _env: &[(String, String)]) -> DiskpartResult {
 
         Some(other) => {
             // Try treating the first argument as a volume name — show its info
-            if storage::find_volume(other).is_some() {
+            if storage::find_volume_cached(other).is_some() {
                 return cmd_info(other);
             }
             Err("diskpart: unknown command; run 'diskpart help'")
