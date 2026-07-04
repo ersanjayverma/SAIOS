@@ -4,8 +4,8 @@ use alloc::vec::Vec;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use heapless::Deque;
 use hal::arch::x86_64::sync::StaticCell;
+use heapless::Deque;
 
 use crate::console::{KeyEvent, MouseButtons, MouseEvent};
 use crate::pci::{self, PciBar, PciDevice};
@@ -312,18 +312,14 @@ fn alloc_dma_pages(pages: usize, owner: &str) -> Result<DmaAllocation, &'static 
     }
 
     let phys = pmm::alloc_pages(pages).ok_or("usb: dma physical allocation failed")?;
-    let virt = match vmm::map_physical_anywhere(
-        phys,
-        pages,
-        vmm::FLAG_READ | vmm::FLAG_WRITE,
-        owner,
-    ) {
-        Ok(virt) => virt,
-        Err(err) => {
-            let _ = pmm::free_pages_range(phys, pages);
-            return Err(err);
-        }
-    };
+    let virt =
+        match vmm::map_physical_anywhere(phys, pages, vmm::FLAG_READ | vmm::FLAG_WRITE, owner) {
+            Ok(virt) => virt,
+            Err(err) => {
+                let _ = pmm::free_pages_range(phys, pages);
+                return Err(err);
+            }
+        };
 
     unsafe {
         ptr::write_bytes(virt as *mut u8, 0, pages * vmm::PAGE_SIZE as usize);
@@ -498,7 +494,11 @@ fn probe_xhci(dev: &PciDevice, mmio_base: u64) -> Result<XhciProbeResult, &'stat
         let runtime = init_xhci_runtime(mapping, mmio, op, max_slots)?;
 
         command = read32(op, XHCI_OP_USBCMD);
-        write32(op, XHCI_OP_USBCMD, command | XHCI_USBCMD_RUN_STOP | XHCI_USBCMD_INTE);
+        write32(
+            op,
+            XHCI_OP_USBCMD,
+            command | XHCI_USBCMD_RUN_STOP | XHCI_USBCMD_INTE,
+        );
         if !wait_until(op, XHCI_OP_USBSTS, XHCI_USBSTS_HCHALTED, false) {
             return Err("usb: xhci run timed out");
         }
@@ -613,7 +613,8 @@ fn rescan_locked(state: &mut UsbState) {
                         }
                         if result.handed_off {
                             last_error = Some(if runtime_ready {
-                                "bios-owned->os-owned handoff completed; xhci runtime ready".to_string()
+                                "bios-owned->os-owned handoff completed; xhci runtime ready"
+                                    .to_string()
                             } else {
                                 "bios-owned->os-owned handoff completed".to_string()
                             });
@@ -749,7 +750,11 @@ fn usage_to_key_event(usage: u8, modifiers: u8) -> Option<KeyEvent> {
     match usage {
         0x04..=0x1D => {
             let base = b'a' + (usage - 0x04);
-            let ch = if shift { (base as char).to_ascii_uppercase() } else { base as char };
+            let ch = if shift {
+                (base as char).to_ascii_uppercase()
+            } else {
+                base as char
+            };
             Some(KeyEvent::Character(ch))
         }
         0x1E => Some(KeyEvent::Character(if shift { '!' } else { '1' })),

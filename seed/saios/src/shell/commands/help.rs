@@ -27,17 +27,8 @@ fn print_command_table(ctx: &CommandContext) {
         .unwrap_or(7)
         .max(7);
 
-    console::println!(
-        "{:<width$}  DESCRIPTION",
-        "COMMAND",
-        width = name_width
-    );
-    console::println!(
-        "{:-<width$}  {:-<11}",
-        "",
-        "",
-        width = name_width
-    );
+    console::println!("{:<width$}  DESCRIPTION", "COMMAND", width = name_width);
+    console::println!("{:-<width$}  {:-<11}", "", "", width = name_width);
 
     for item in &ctx.command_catalog {
         console::println!(

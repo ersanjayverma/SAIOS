@@ -42,6 +42,17 @@ pub const FLAG_DEVICE: u64 = 1 << 5;
 /// Page-table flag: write-combining memory.
 pub const FLAG_WRITE_COMBINE: u64 = 1 << 6;
 
+/// High-level memory types that the VMM can apply to a mapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemoryType {
+    /// Default write-back caching.
+    WriteBack,
+    /// Write-combining cacheability; enabled conservatively until PAT is wired up.
+    WriteCombining,
+    /// Device/un-cacheable mapping for MMIO.
+    Device,
+}
+
 /// A recorded virtual-to-physical mapping.
 #[derive(Clone, Debug)]
 pub struct Mapping {
@@ -145,6 +156,14 @@ fn is_page_aligned(value: u64) -> bool {
     (value & (PAGE_SIZE - 1)) == 0
 }
 
+fn align_down(value: u64, align: u64) -> u64 {
+    value & !(align - 1)
+}
+
+fn align_up(value: u64, align: u64) -> u64 {
+    (value + align - 1) & !(align - 1)
+}
+
 fn checked_range_end(start: u64, pages: usize) -> Option<u64> {
     let bytes = (pages as u64).checked_mul(PAGE_SIZE)?;
     start.checked_add(bytes)
@@ -223,6 +242,16 @@ fn nonleaf_flags(vmm_flags: u64) -> u64 {
     f
 }
 
+fn memory_type_from_flags(vmm_flags: u64) -> MemoryType {
+    if (vmm_flags & FLAG_DEVICE) != 0 {
+        MemoryType::Device
+    } else if (vmm_flags & FLAG_WRITE_COMBINE) != 0 {
+        MemoryType::WriteCombining
+    } else {
+        MemoryType::WriteBack
+    }
+}
+
 fn leaf_flags(vmm_flags: u64) -> u64 {
     // Translate high-level VMM memory flags into leaf page-table bits.
     let mut f = 0u64;
@@ -235,12 +264,15 @@ fn leaf_flags(vmm_flags: u64) -> u64 {
     if (vmm_flags & FLAG_GLOBAL) != 0 {
         f |= paging::FLAG_GLOBAL;
     }
-    if (vmm_flags & FLAG_WRITE_COMBINE) != 0 {
-        // Select PAT index 5 (PAT=1, PCD=0, PWT=1) for write-combining.
-        f |= paging::FLAG_PWT | paging::FLAG_PAT;
-    }
-    if (vmm_flags & FLAG_DEVICE) != 0 {
-        f |= paging::FLAG_PCD | paging::FLAG_PWT;
+    match memory_type_from_flags(vmm_flags) {
+        MemoryType::WriteBack => {}
+        MemoryType::WriteCombining => {
+            // Keep the initial mapping conservative until PAT is enabled.
+            f |= paging::FLAG_PWT;
+        }
+        MemoryType::Device => {
+            f |= paging::FLAG_PCD | paging::FLAG_PWT;
+        }
     }
     if (vmm_flags & FLAG_EXEC) == 0 {
         f |= paging::FLAG_NX;
@@ -351,6 +383,153 @@ fn translate_hw(virt: VirtAddr) -> Option<PhysAddr> {
     }
 
     pt.entries[l1].address().checked_add(off)
+}
+
+fn alloc_zeroed_table() -> Result<PhysAddr, &'static str> {
+    let phys = pmm::alloc_page().ok_or("vmm: out of memory allocating page table")?;
+    let table = unsafe { &mut *(phys as *mut paging::Table) };
+    table.clear();
+    Ok(phys)
+}
+
+fn map_kernel_page(
+    root: &mut paging::Table,
+    virt: u64,
+    phys: u64,
+    flags: u64,
+) -> Result<bool, &'static str> {
+    let (l4, l3, l2, l1, _) = level_indices(virt);
+
+    if !root.entries[l4].is_present() {
+        let pdpt_phys = alloc_zeroed_table()?;
+        root.entries[l4].set_page(pdpt_phys, paging::FLAG_WRITABLE);
+    }
+
+    let pdpt = unsafe { &mut *(root.entries[l4].address() as *mut paging::Table) };
+    if !pdpt.entries[l3].is_present() {
+        let pd_phys = alloc_zeroed_table()?;
+        pdpt.entries[l3].set_page(pd_phys, paging::FLAG_WRITABLE);
+    }
+
+    let pd = unsafe { &mut *(pdpt.entries[l3].address() as *mut paging::Table) };
+    if !pd.entries[l2].is_present() {
+        let pt_phys = alloc_zeroed_table()?;
+        pd.entries[l2].set_page(pt_phys, paging::FLAG_WRITABLE);
+    }
+
+    if (pd.entries[l2].0 & paging::FLAG_HUGE) != 0 {
+        let huge_phys = pd.entries[l2].address().saturating_add(virt & 0x1f_ffff);
+        if huge_phys == phys {
+            return Ok(false);
+        }
+        return Err("vmm: page already mapped");
+    }
+
+    let pt = unsafe { &mut *(pd.entries[l2].address() as *mut paging::Table) };
+    if pt.entries[l1].is_present() {
+        if pt.entries[l1].address() == phys {
+            return Ok(false);
+        }
+        return Err("vmm: page already mapped");
+    }
+
+    pt.entries[l1].set_page(phys, leaf_flags(flags) | paging::FLAG_PRESENT);
+    Ok(true)
+}
+
+fn map_identity_low_mem(root: &mut paging::Table) -> Result<(), &'static str> {
+    let pml4_entry = &mut root.entries[0];
+    let pdpt_phys = alloc_zeroed_table()?;
+    pml4_entry.set_page(pdpt_phys, paging::FLAG_WRITABLE);
+
+    let pdpt = unsafe { &mut *(pdpt_phys as *mut paging::Table) };
+    let pd_phys = alloc_zeroed_table()?;
+    pdpt.entries[0].set_page(pd_phys, paging::FLAG_WRITABLE);
+
+    let pd = unsafe { &mut *(pd_phys as *mut paging::Table) };
+    for index in 0..512usize {
+        let phys = (index as u64) * 0x200000;
+        pd.entries[index].set_page(
+            phys,
+            paging::FLAG_WRITABLE | paging::FLAG_PRESENT | paging::FLAG_GLOBAL | paging::FLAG_HUGE,
+        );
+    }
+
+    Ok(())
+}
+
+fn map_boot_stack(root: &mut paging::Table) -> Result<(), &'static str> {
+    let rsp: u64;
+    unsafe {
+        asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
+    }
+    let start = align_down(rsp, PAGE_SIZE as u64);
+    let end = align_up(
+        start.saturating_add(PAGE_SIZE.saturating_mul(4)),
+        PAGE_SIZE as u64,
+    );
+    map_range_identity(root, start, end, FLAG_WRITE | FLAG_GLOBAL)
+}
+
+fn map_range_identity(
+    root: &mut paging::Table,
+    start: u64,
+    end: u64,
+    flags: u64,
+) -> Result<(), &'static str> {
+    let mut current = align_down(start, PAGE_SIZE as u64);
+    let limit = align_up(end, PAGE_SIZE as u64);
+    while current < limit {
+        map_kernel_page(root, current, current, flags)?;
+        current = current.saturating_add(PAGE_SIZE);
+    }
+    Ok(())
+}
+
+pub fn bootstrap_kernel_page_tables(
+    framebuffer_base: u64,
+    framebuffer_size: usize,
+    boot_info_ptr: u64,
+    boot_info_size: usize,
+    kernel_start: u64,
+    kernel_end: u64,
+) -> Result<PhysAddr, &'static str> {
+    let root_phys = alloc_zeroed_table()?;
+    let root = unsafe { &mut *(root_phys as *mut paging::Table) };
+
+    map_identity_low_mem(root)?;
+
+    let ram_flags = FLAG_WRITE | FLAG_GLOBAL;
+    let framebuffer_flags = FLAG_WRITE | FLAG_GLOBAL | FLAG_WRITE_COMBINE;
+    let boot_info_flags = FLAG_WRITE | FLAG_GLOBAL;
+
+    if kernel_end > kernel_start {
+        map_range_identity(root, kernel_start, kernel_end, ram_flags)?;
+    }
+    if boot_info_size > 0 {
+        let start = align_down(boot_info_ptr, PAGE_SIZE as u64);
+        let end = align_up(
+            boot_info_ptr.saturating_add(boot_info_size as u64),
+            PAGE_SIZE as u64,
+        );
+        map_range_identity(root, start, end, boot_info_flags)?;
+    }
+    if framebuffer_size > 0 {
+        let start = align_down(framebuffer_base, PAGE_SIZE as u64);
+        let end = align_up(
+            framebuffer_base.saturating_add(framebuffer_size as u64),
+            PAGE_SIZE as u64,
+        );
+        map_range_identity(root, start, end, framebuffer_flags)?;
+    }
+    map_boot_stack(root)?;
+
+    root.entries[511].set_page(root_phys, paging::FLAG_WRITABLE);
+    unsafe {
+        paging::write_cr3(root_phys);
+    }
+
+    Ok(root_phys)
 }
 
 /// Initializes the VMM with the given physical PML4 address.

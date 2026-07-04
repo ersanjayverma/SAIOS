@@ -291,6 +291,11 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_verify,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "validate",
+        description: "Run kernel validation suite",
+        handler: cmd_validate,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "services",
         description: "List service objects",
         handler: cmd_services,
@@ -1572,6 +1577,24 @@ fn cmd_verify(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     Ok(())
+}
+
+fn cmd_validate(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    match crate::kernel::validation::ValidateOptions::parse(args) {
+        Ok(options) => {
+            let report = crate::kernel::validation::run(&options);
+            crate::kernel::validation::print_report(&report, &options);
+            Ok(())
+        }
+        Err("help") => {
+            crate::kernel::validation::print_help();
+            Ok(())
+        }
+        Err(e) => {
+            crate::kernel::validation::print_help();
+            Err(e)
+        }
+    }
 }
 
 fn cmd_services(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {

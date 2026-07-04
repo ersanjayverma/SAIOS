@@ -1,6 +1,8 @@
 use core::ptr;
 use efi_main::graphics::{FramebufferInfo, PixelFormat};
 
+use crate::vmm;
+
 /// Abstract drawing target that owns a linear framebuffer.
 ///
 /// A `Display` describes the geometry and pixel layout of a screen and knows
@@ -169,6 +171,15 @@ impl FramebufferDisplay {
             return None;
         }
 
+        let framebuffer_pages = ((info.size as u64).div_ceil(4096)).max(1) as usize;
+        let mapped_base = vmm::map_physical_anywhere(
+            info.base,
+            framebuffer_pages,
+            vmm::FLAG_READ | vmm::FLAG_WRITE | vmm::FLAG_GLOBAL | vmm::FLAG_WRITE_COMBINE,
+            "framebuffer",
+        )
+        .ok()?;
+
         let mut stride_pixels = info.stride;
         let pixels_layout_ok = stride_pixels
             .checked_mul(info.height)
@@ -212,7 +223,7 @@ impl FramebufferDisplay {
         );
 
         Some(Self {
-            base: info.base as *mut u8,
+            base: mapped_base as *mut u8,
             width: info.width,
             height: info.height,
             stride: stride_pixels,

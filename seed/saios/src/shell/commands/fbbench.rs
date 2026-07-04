@@ -47,7 +47,11 @@ fn cmd_fbbench(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     console::println!("Framebuffer benchmark");
     console::println!("  passes       : {}", result.passes);
     console::println!("  bytes written: {}", result.bytes_written);
-    console::println!("  elapsed      : {} ms ({} ticks)", elapsed, result.elapsed_ticks);
+    console::println!(
+        "  elapsed      : {} ms ({} ticks)",
+        elapsed,
+        result.elapsed_ticks
+    );
     console::println!("  throughput   : {} MiB/s", result.mib_per_sec);
 
     Ok(())

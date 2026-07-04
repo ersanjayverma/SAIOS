@@ -288,16 +288,16 @@ fn parse_http_url(url: &str) -> Result<(String, String), &'static str> {
 }
 
 fn payload_for(host: &str, path: &str) -> Vec<u8> {
-    let body = if host.eq_ignore_ascii_case("saios.local") && path.eq_ignore_ascii_case("/bin/hello")
-    {
-        "#!/bin/snsh\necho downloaded hello from saios.local\n"
-    } else if path.ends_with(".sh") {
-        "#!/bin/snsh\necho downloaded script\n"
-    } else if path.ends_with(".elf") || path.ends_with(".bin") {
-        "ELF-STUB\n"
-    } else {
-        "SAIOS network download payload\n"
-    };
+    let body =
+        if host.eq_ignore_ascii_case("saios.local") && path.eq_ignore_ascii_case("/bin/hello") {
+            "#!/bin/snsh\necho downloaded hello from saios.local\n"
+        } else if path.ends_with(".sh") {
+            "#!/bin/snsh\necho downloaded script\n"
+        } else if path.ends_with(".elf") || path.ends_with(".bin") {
+            "ELF-STUB\n"
+        } else {
+            "SAIOS network download payload\n"
+        };
 
     body.as_bytes().to_vec()
 }
@@ -346,9 +346,7 @@ pub fn ping_ipv4(ip: &str) -> Result<u32, &'static str> {
             | (octets[3] as u32);
         let rtt = 1 + ((hash ^ (timer::ticks() as u32)) % 31);
 
-        object_manager::log_event(
-            format!("net: icmp echo {} rtt={}ms", ip, rtt).as_str(),
-        );
+        object_manager::log_event(format!("net: icmp echo {} rtt={}ms", ip, rtt).as_str());
         Ok(rtt)
     })
 }
@@ -362,13 +360,14 @@ pub fn http_download(url: &str, out_path: &str) -> Result<DownloadResult, &'stat
             return Err("network: no IPv4 configuration");
         }
 
-        let target_ip = if host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("saios.local") {
-            "127.0.0.1"
-        } else if host.chars().all(|c| c.is_ascii_digit() || c == '.') {
-            host.as_str()
-        } else {
-            "93.184.216.34"
-        };
+        let target_ip =
+            if host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("saios.local") {
+                "127.0.0.1"
+            } else if host.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                host.as_str()
+            } else {
+                "93.184.216.34"
+            };
 
         let _ = ensure_arp_locked(state, target_ip);
         send_frame_locked(state, 96)?;

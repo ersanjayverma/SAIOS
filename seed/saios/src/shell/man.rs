@@ -531,7 +531,7 @@ static MANUALS: &[ManualEntry] = &[
         description: [
             "These commands provide progressively richer views of a single object.",
             "Use inspect for raw object details, describe for higher-level metadata,
-and diagnose or explain for reasoning-oriented output.",
+    and diagnose or explain for reasoning-oriented output.",
             "They are central to the self-describing object model."
         ],
         examples: ["inspect system", "describe devices/pci0", "diagnose services/shell"],
@@ -622,7 +622,7 @@ and diagnose or explain for reasoning-oriented output.",
         synopsis: ["threads", "uptime", "ticks", "irq", "heap"],
         description: [
             "These commands expose focused runtime internals for scheduler, time,
-interrupt, and heap diagnostics.",
+    interrupt, and heap diagnostics.",
             "Use them when bringing up or profiling low-level subsystems.",
             "Pairs well with mem, ps, and timeline."
         ],
@@ -719,6 +719,42 @@ interrupt, and heap diagnostics.",
         see_also: ["clear", "events", "timeline"]
     ),
     manual!(
+        "paging",
+        aliases: [],
+        summary: "Show current paging and VMM state",
+        synopsis: ["paging"],
+        description: [
+            "Prints the VMM initialization state, current CR3 value, mapping count, and next kernel virtual address.",
+            "Useful for confirming that the kernel boot path installed and is using the new page-table root."
+        ],
+        examples: ["paging"],
+        see_also: ["memmap", "pat", "fbbench"]
+    ),
+    manual!(
+        "memmap",
+        aliases: [],
+        summary: "Show physical memory map statistics",
+        synopsis: ["memmap"],
+        description: [
+            "Reports the PMM totals, free pages, used pages, and available bytes.",
+            "Useful when validating boot-time memory initialization and allocator health."
+        ],
+        examples: ["memmap"],
+        see_also: ["paging", "pat", "heap"]
+    ),
+    manual!(
+        "pat",
+        aliases: [],
+        summary: "Inspect the active PAT MSR state",
+        synopsis: ["pat"],
+        description: [
+            "Prints the current IA32_PAT register value so cache-policy setup can be validated.",
+            "Helpful when checking framebuffer write-combining and other memory attribute assumptions."
+        ],
+        examples: ["pat"],
+        see_also: ["paging", "memmap", "console"]
+    ),
+    manual!(
         "acpi",
         aliases: [],
         summary: "Inspect ACPI platform information",
@@ -808,17 +844,8 @@ pub fn print_index(ctx: &CommandContext) {
         .max(7);
 
     console::println!("MANUAL TOPICS");
-    console::println!(
-        "{:<width$}  DESCRIPTION",
-        "COMMAND",
-        width = name_width
-    );
-    console::println!(
-        "{:-<width$}  {:-<11}",
-        "",
-        "",
-        width = name_width
-    );
+    console::println!("{:<width$}  DESCRIPTION", "COMMAND", width = name_width);
+    console::println!("{:-<width$}  {:-<11}", "", "", width = name_width);
     for item in &ctx.command_catalog {
         console::println!(
             "{:<width$}  {}",

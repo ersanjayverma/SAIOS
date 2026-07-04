@@ -201,11 +201,7 @@ fn atom_matches(atom: Atom<'_>, ch: u8) -> bool {
         Atom::Any => true,
         Atom::Class { negated, body } => {
             let contains = class_contains(body, ch);
-            if negated {
-                !contains
-            } else {
-                contains
-            }
+            if negated { !contains } else { contains }
         }
     }
 }

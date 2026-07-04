@@ -1,7 +1,7 @@
-use super::backend::ConsoleBackend;
 use super::FramebufferBenchResult;
+use super::backend::ConsoleBackend;
 use crate::graphics::display::{Display, FramebufferDisplay};
-use crate::graphics::font::{glyph_bitmap, FONT_HEIGHT, FONT_WIDTH};
+use crate::graphics::font::{FONT_HEIGHT, FONT_WIDTH, glyph_bitmap};
 use crate::graphics::framebuffer::Color;
 use crate::timer;
 use alloc::collections::VecDeque;

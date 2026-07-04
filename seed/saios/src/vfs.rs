@@ -657,7 +657,10 @@ fn storage_node_name(path: &str) -> String {
     if path == "/" {
         return "/".to_string();
     }
-    path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("/").to_string()
+    path.rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("/")
+        .to_string()
 }
 
 fn storage_inode(path: &str) -> u64 {

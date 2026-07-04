@@ -2,7 +2,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use super::command::ShellResult;
-use super::parser::{self, ParsedCommand, RedirectKind};
+use super::parser::{self, ControlOperator, ParsedCommand, RedirectKind};
 use super::registry::CommandRegistry;
 use super::session::CommandContext;
 use crate::console;
@@ -23,9 +23,33 @@ impl CommandDispatcher {
         ctx: &mut CommandContext,
         line: &str,
     ) -> ShellResult {
-        let pipelines = parser::parse_line(line);
-        for pipeline in pipelines {
-            self.dispatch_pipeline(registry, ctx, pipeline.commands)?;
+        let statements = parser::parse_line(line);
+        let mut previous_ok = true;
+        for statement in statements {
+            for pipeline in statement.pipelines {
+                let ok = self.dispatch_pipeline(registry, ctx, pipeline.commands)?;
+                if !ok {
+                    previous_ok = false;
+                    break;
+                }
+            }
+
+            match statement.operator {
+                ControlOperator::AndAnd => {
+                    if !previous_ok {
+                        break;
+                    }
+                }
+                ControlOperator::OrOr => {
+                    if previous_ok {
+                        break;
+                    }
+                }
+                ControlOperator::Background => {
+                    previous_ok = true;
+                }
+                ControlOperator::Sequential => {}
+            }
         }
         Ok(())
     }
@@ -35,13 +59,14 @@ impl CommandDispatcher {
         registry: &CommandRegistry,
         ctx: &mut CommandContext,
         mut commands: Vec<ParsedCommand>,
-    ) -> ShellResult {
+    ) -> Result<bool, &'static str> {
         if commands.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
 
         let mut pipe_input: Option<String> = None;
         let len = commands.len();
+        let mut ok = true;
 
         for (idx, cmd) in commands.iter_mut().enumerate() {
             self.expand_alias_and_env(ctx, cmd);
@@ -73,8 +98,11 @@ impl CommandDispatcher {
             }
 
             let suppress_console = idx + 1 < len || out_redirect.is_some();
-            let (_exit, captured) =
+            let (exit_code, captured) =
                 self.execute_command(registry, ctx, cmd, stdin_data.as_deref(), suppress_console)?;
+            if exit_code != 0 {
+                ok = false;
+            }
 
             if let Some((path, append)) = out_redirect {
                 self.write_redirect(path.as_str(), captured.as_str(), append)?;
@@ -83,7 +111,7 @@ impl CommandDispatcher {
             }
         }
 
-        Ok(())
+        Ok(ok)
     }
 
     fn execute_command(

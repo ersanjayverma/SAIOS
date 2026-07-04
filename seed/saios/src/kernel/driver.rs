@@ -237,7 +237,10 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
                 controller.name.as_str(),
                 "usb",
                 "bus/usb-host",
-                if matches!(controller.state, crate::driver::usb::UsbControllerState::Faulted) {
+                if matches!(
+                    controller.state,
+                    crate::driver::usb::UsbControllerState::Faulted
+                ) {
                     device::DeviceStatus::Faulted
                 } else {
                     device::DeviceStatus::Online

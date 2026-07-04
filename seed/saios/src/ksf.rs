@@ -161,7 +161,11 @@ impl ServiceManager {
                     }
                     Err(e) => {
                         self.states[idx] = ServiceState::Failed;
-                        crate::console::println!("[BOOTCHK] init fail {}: {}", self.services[idx].name(), e);
+                        crate::console::println!(
+                            "[BOOTCHK] init fail {}: {}",
+                            self.services[idx].name(),
+                            e
+                        );
                         Err(e)
                     }
                 }
@@ -197,7 +201,11 @@ impl ServiceManager {
             }
             Err(e) => {
                 self.states[idx] = ServiceState::Failed;
-                crate::console::println!("[BOOTCHK] start fail {}: {}", self.services[idx].name(), e);
+                crate::console::println!(
+                    "[BOOTCHK] start fail {}: {}",
+                    self.services[idx].name(),
+                    e
+                );
                 Err(e)
             }
         }

@@ -1,4 +1,4 @@
-use super::font::{glyph_bitmap, FONT_HEIGHT, FONT_WIDTH};
+use super::font::{FONT_HEIGHT, FONT_WIDTH, glyph_bitmap};
 use super::framebuffer::Color;
 use super::surface::Surface;
 

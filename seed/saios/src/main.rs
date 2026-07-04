@@ -34,11 +34,16 @@ pub mod taskman;
 pub mod timer;
 pub mod vfs;
 pub mod vmm;
+use core::mem::size_of;
 use efi_main::SaiosBootInfo;
 use graphics::display::FramebufferDisplay;
-use hal::arch::paging;
 use hal::arch::x86_64::{cpuid, gdt, idt, interrupt, msr};
 use seed::Seed;
+
+unsafe extern "C" {
+    static _kernel_start: u8;
+    static _kernel_end: u8;
+}
 
 const BOOT_STAGE_COLOR_DIAGNOSTICS: bool = false;
 const LATE_MICROCODE_PROBE_ENABLED: bool = true;
@@ -136,12 +141,24 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     hal::arch::x86_64::console::_print(format_args!("kernel: pmm init ok\n"));
     mark_boot_stage(framebuffer_info, STAGE_MEMORY_READY);
 
-    // Use the active CR3 root as VMM root; do not dereference raw physical pointers here.
-    let pml4_phys = paging::read_cr3() & 0x000F_FFFF_FFFF_F000;
+    let kernel_start = unsafe { &_kernel_start as *const u8 as u64 };
+    let kernel_end = unsafe { &_kernel_end as *const u8 as u64 };
+    let boot_info_ptr = boot_info as *const SaiosBootInfo as u64;
+    let boot_info_size = size_of::<SaiosBootInfo>();
+
+    let pml4_phys = vmm::bootstrap_kernel_page_tables(
+        framebuffer_info.base,
+        framebuffer_info.size,
+        boot_info_ptr,
+        boot_info_size,
+        kernel_start,
+        kernel_end,
+    )
+    .expect("VMM: failed to install kernel page tables");
 
     vmm::init(pml4_phys).expect("VMM: failed to initialize kernel virtual memory manager");
     mark_boot_stage(framebuffer_info, STAGE_VMM_OK);
-    hal::arch::x86_64::console::_print(format_args!("kernel: vmm init ok\n"));
+    hal::arch::x86_64::console::_print(format_args!("kernel: vmm init ok cr3={:#x}\n", pml4_phys));
 
     heap::init();
     hal::arch::x86_64::console::_print(format_args!("kernel: heap init ok\n"));

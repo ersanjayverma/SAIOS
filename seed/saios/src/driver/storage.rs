@@ -363,9 +363,7 @@ fn probe_fat(image: &[u8]) -> Option<ProbeResult> {
         FilesystemKind::Fat32
     };
 
-    Some(ProbeResult {
-        fs,
-    })
+    Some(ProbeResult { fs })
 }
 
 fn probe_filesystem(image: &[u8]) -> Option<ProbeResult> {
@@ -597,18 +595,16 @@ fn deserialize_tree(bytes: &[u8]) -> Option<Vec<FsNode>> {
         at += 4;
 
         let p_end = at.checked_add(path_len)?;
-        let path = core::str::from_utf8(bytes.get(at..p_end)?).ok()?.to_string();
+        let path = core::str::from_utf8(bytes.get(at..p_end)?)
+            .ok()?
+            .to_string();
         at = p_end;
 
         let d_end = at.checked_add(data_len)?;
         let data = bytes.get(at..d_end)?.to_vec();
         at = d_end;
 
-        nodes.push(FsNode {
-            path,
-            kind,
-            data,
-        });
+        nodes.push(FsNode { path, kind, data });
     }
 
     Some(nodes)
@@ -686,7 +682,10 @@ fn save_mounted_volume(state: &mut StorageState, volume: &str) -> Result<(), &'s
     write_partition_bytes(disk, &part, bytes.as_slice())
 }
 
-fn resolve_volume_owner(state: &StorageState, volume: &str) -> Result<(String, String), &'static str> {
+fn resolve_volume_owner(
+    state: &StorageState,
+    volume: &str,
+) -> Result<(String, String), &'static str> {
     for disk in &state.disks {
         for part in &disk.partitions {
             if part.name.eq_ignore_ascii_case(volume) {
@@ -750,7 +749,10 @@ fn seed_default_mbr_fat32(dev: &mut RamBlockDevice) {
 
     let mut mbr = [0u8; MBR_SECTOR];
     let start_lba = 2048u32;
-    let sectors = (dev.sectors.saturating_sub(start_lba as u64).min(u32::MAX as u64)) as u32;
+    let sectors = (dev
+        .sectors
+        .saturating_sub(start_lba as u64)
+        .min(u32::MAX as u64)) as u32;
 
     let p0 = 446usize;
     mbr[p0 + 4] = 0x0C;
@@ -949,7 +951,9 @@ fn rebuild_volume_registry(state: &mut StorageState) {
                 name: part.name.clone(),
                 filesystem: part.fs_hint,
                 backing: format!("{}:{}", disk.name, part.name),
-                total_bytes: part.sector_count.saturating_mul(disk.block.sector_size as u64),
+                total_bytes: part
+                    .sector_count
+                    .saturating_mul(disk.block.sector_size as u64),
                 sector_size: disk.block.sector_size,
                 mounted_at: None,
                 writable: true,
@@ -1160,10 +1164,14 @@ pub fn umount_volume(path: &str) -> Result<(), &'static str> {
         if state.volumes[idx].filesystem == FilesystemKind::Fat32 {
             let name = state.volumes[idx].name.clone();
             let _ = save_mounted_volume(state, name.as_str());
-            state.mounted.retain(|m| !m.volume.eq_ignore_ascii_case(name.as_str()));
+            state
+                .mounted
+                .retain(|m| !m.volume.eq_ignore_ascii_case(name.as_str()));
         } else {
             let name = state.volumes[idx].name.clone();
-            state.mounted.retain(|m| !m.volume.eq_ignore_ascii_case(name.as_str()));
+            state
+                .mounted
+                .retain(|m| !m.volume.eq_ignore_ascii_case(name.as_str()));
         }
 
         state.volumes[idx].mounted_at = None;
@@ -1474,7 +1482,8 @@ pub fn fs_write(path: &str, data: &[u8]) -> Result<(), &'static str> {
             });
         }
 
-        let node = find_node_mut(mounted.nodes.as_mut_slice(), rel.as_str()).ok_or("path not found")?;
+        let node =
+            find_node_mut(mounted.nodes.as_mut_slice(), rel.as_str()).ok_or("path not found")?;
         if node.kind != FsNodeKind::File {
             return Err("not a file");
         }
@@ -1546,7 +1555,9 @@ pub fn read_sector(device_name: &str, lba: u64, out: &mut [u8]) -> Result<(), &'
                     if lba >= part.sector_count {
                         return Err("storage: lba out of partition range");
                     }
-                    return disk.block.read_sector(part.start_lba.saturating_add(lba), out);
+                    return disk
+                        .block
+                        .read_sector(part.start_lba.saturating_add(lba), out);
                 }
             }
         }
@@ -1587,13 +1598,10 @@ pub fn flush(device_name: &str) -> Result<(), &'static str> {
         for disk in &mut state.disks {
             if disk.name.eq_ignore_ascii_case(device_name)
                 || format!("/dev/{}", disk.name).eq_ignore_ascii_case(device_name)
-                || disk
-                    .partitions
-                    .iter()
-                    .any(|p| {
-                        p.name.eq_ignore_ascii_case(device_name)
-                            || format!("/dev/{}", p.name).eq_ignore_ascii_case(device_name)
-                    })
+                || disk.partitions.iter().any(|p| {
+                    p.name.eq_ignore_ascii_case(device_name)
+                        || format!("/dev/{}", p.name).eq_ignore_ascii_case(device_name)
+                })
             {
                 disk.block.flush();
                 return Ok(());

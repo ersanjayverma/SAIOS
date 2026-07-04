@@ -17,9 +17,9 @@ use alloc::string::String as AllocString;
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
 
+use crate::driver::usb;
 use crate::kernel::device;
 use crate::kernel::driver;
-use crate::driver::usb;
 use backend::{ConsoleBackend, MirrorConsole};
 use core::sync::atomic::{AtomicBool, Ordering};
 use cursor::Cursor;
@@ -739,7 +739,8 @@ pub fn poll_input() -> Option<String<256>> {
     }
 
     // SAFETY: single-core early kernel context.
-    if let Some(mouse_event) = unsafe { (*MOUSE.get()).poll_event() }.or_else(usb::poll_mouse_event) {
+    if let Some(mouse_event) = unsafe { (*MOUSE.get()).poll_event() }.or_else(usb::poll_mouse_event)
+    {
         match mouse_event {
             MouseEvent::Wheel { delta, .. } => {
                 if delta > 0 {
