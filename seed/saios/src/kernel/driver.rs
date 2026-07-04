@@ -67,9 +67,9 @@ impl DriverRegistry {
         }
 
         let state = match status {
-            DriverStatus::Loaded | DriverStatus::Running => kom::ObjectState::Running,
-            DriverStatus::Stopped => kom::ObjectState::Stopped,
-            DriverStatus::Faulted => kom::ObjectState::Faulted,
+            DriverStatus::Loaded | DriverStatus::Running => kom::ObjectState::Ready,
+            DriverStatus::Stopped => kom::ObjectState::Stopping,
+            DriverStatus::Faulted => kom::ObjectState::Stopping,
         };
 
         let handle = kom::register(kom::ObjectType::Driver, name, state)?;

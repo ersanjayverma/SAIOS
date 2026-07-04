@@ -57,9 +57,9 @@ pub fn init() {
             return;
         }
 
-        let _ = r.register(ObjectType::Kernel, "saios", ObjectState::Running);
-        let _ = r.register(ObjectType::Process, "sish", ObjectState::Running);
-        let _ = r.register(ObjectType::Mount, "/", ObjectState::Running);
+        let _ = r.register(ObjectType::Kernel, "saios", ObjectState::Ready);
+        let _ = r.register(ObjectType::Process, "sish", ObjectState::Ready);
+        let _ = r.register(ObjectType::Mount, "/", ObjectState::Ready);
     });
 }
 
@@ -73,6 +73,34 @@ pub fn register(
 
 pub fn unregister(handle: ObjectHandle) -> bool {
     with_registry_mut(|r| r.unregister(handle.id()))
+}
+
+pub fn transition(handle: ObjectHandle, state: ObjectState) -> Result<(), &'static str> {
+    with_registry_mut(|r| r.transition(handle.id(), state))
+}
+
+pub fn acquire(handle: ObjectHandle) -> Result<u32, &'static str> {
+    with_registry_mut(|r| r.acquire(handle.id()))
+}
+
+pub fn release(handle: ObjectHandle) -> Result<u32, &'static str> {
+    with_registry_mut(|r| r.release(handle.id()))
+}
+
+pub fn set_parent(handle: ObjectHandle, parent: Option<ObjectHandle>) -> Result<(), &'static str> {
+    with_registry_mut(|r| r.set_parent(handle.id(), parent.map(|p| p.id())))
+}
+
+pub fn set_owner(handle: ObjectHandle, owner: Option<ObjectHandle>) -> Result<(), &'static str> {
+    with_registry_mut(|r| r.set_owner(handle.id(), owner.map(|o| o.id())))
+}
+
+pub fn set_property(handle: ObjectHandle, key: &str, value: &str) -> Result<(), &'static str> {
+    with_registry_mut(|r| r.set_property(handle.id(), key, value))
+}
+
+pub fn clone_object(handle: ObjectHandle, new_name: &str) -> Result<ObjectHandle, &'static str> {
+    with_registry_mut(|r| r.clone_object(handle.id(), new_name).map(ObjectHandle::new))
 }
 
 pub fn find(id: ObjectId) -> Option<ObjectRecord> {
@@ -107,9 +135,17 @@ pub fn inspect(id: ObjectId) -> Option<Vec<String>> {
     find(id).map(|record| {
         let mut out = Vec::new();
         out.push(alloc::format!("Id: {}", record.id.0));
+        out.push(alloc::format!("Label: {}", record.id.label(record.object_type)));
         out.push(alloc::format!("Type: {}", record.object_type.as_str()));
         out.push(alloc::format!("Name: {}", record.name));
-        out.push(alloc::format!("State: {:?}", record.state));
+        out.push(alloc::format!("State: {}", record.state.as_str()));
+        out.push(alloc::format!("Flags: 0x{:X}", record.flags));
+        out.push(alloc::format!("Parent: {}", record.parent.map(|p| p.0).unwrap_or(0)));
+        out.push(alloc::format!("Owner: {}", record.owner.map(|p| p.0).unwrap_or(0)));
+        out.push(alloc::format!("Children: {}", record.children.len()));
+        out.push(alloc::format!("RefCount: {}", record.reference_count));
+        out.push(alloc::format!("CreatedTick: {}", record.created_tick));
+        out.push(alloc::format!("ModifiedTick: {}", record.last_modified_tick));
         out
     })
 }

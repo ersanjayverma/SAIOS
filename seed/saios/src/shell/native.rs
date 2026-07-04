@@ -1477,17 +1477,28 @@ fn cmd_stats(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
 fn cmd_objects(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     if args.first().copied() == Some("types") {
         console::println!("Kernel");
+        console::println!("Service");
         console::println!("Process");
         console::println!("Thread");
         console::println!("Driver");
         console::println!("Device");
+        console::println!("Timer");
+        console::println!("Event");
+        console::println!("Surface");
+        console::println!("Window");
+        console::println!("File");
+        console::println!("Directory");
+        console::println!("Volume");
+        console::println!("Filesystem");
         console::println!("Mount");
+        console::println!("Socket");
+        console::println!("Pipe");
         return Ok(());
     }
 
     let records = if let Some(filter) = args.first().copied() {
         let object_type = kom::ObjectType::parse(filter)
-            .ok_or("objects: expected kernel|process|thread|driver|device|mount|types")?;
+            .ok_or("objects: expected one of object types; run 'objects types'")?;
         kom::find_by_type(object_type)
     } else {
         kom::enumerate()
@@ -2236,14 +2247,15 @@ fn print_storage_pci_detail() {
 fn print_storage_scan_status(prefix: &str) {
     let status = disk::scan_status();
     console::println!(
-        "{}: scan {} epoch={} queued={} running={} disks={} volumes={}",
+        "{}: scan {} epoch={} queued={} running={} disks={} volumes={} failures={}",
         prefix,
         status.phase,
         status.epoch,
         if status.queued { "yes" } else { "no" },
         if status.running { "yes" } else { "no" },
         status.disks,
-        status.volumes
+        status.volumes,
+        status.failures
     );
 }
 
@@ -2391,7 +2403,7 @@ fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             console::println!("volumes: scan requested");
             disk::request_rescan();
             print_storage_scan_status("volumes");
-            print_cached_volumes();
+            console::println!("volumes: scan complete");
             Ok(())
         }
         "disks" | "disk" => {
@@ -2660,6 +2672,20 @@ fn cmd_storage(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
                         m.fs_name,
                         if m.read_only { "ro" } else { "rw" }
                     );
+                }
+            }
+
+            console::println!("\n[9] Scan Diagnostics");
+            let diagnostics = if live_probe {
+                disk::scan_diagnostics()
+            } else {
+                disk::scan_diagnostics_cached()
+            };
+            if diagnostics.is_empty() {
+                console::println!("  none");
+            } else {
+                for diag in diagnostics {
+                    console::println!("  {}", diag);
                 }
             }
 

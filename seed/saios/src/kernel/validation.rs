@@ -222,6 +222,20 @@ impl ValidationReport {
         })
     }
 
+    pub fn total(&self) -> usize {
+        self.results.len()
+    }
+
+    pub fn readiness_passed(&self) -> usize {
+        REQUIRED_GATES
+            .iter()
+            .filter(|gate| {
+                self.find(gate.category, gate.name)
+                    .is_some_and(|result| result.status == TestStatus::Pass)
+            })
+            .count()
+    }
+
     pub fn readiness_gate_statuses(&self) -> Vec<ReadinessGateStatus> {
         REQUIRED_GATES
             .iter()
@@ -355,6 +369,7 @@ pub fn print_report(report: &ValidationReport, options: &ValidateOptions) {
     console::println!("Summary");
     console::println!("--------------------------------");
     console::newline();
+    console::println!("Total  : {}", report.total());
     console::println!("Passed : {}", report.passed);
     console::println!("Failed : {}", report.failed);
     console::println!("Skipped: {}", report.skipped);
@@ -362,7 +377,16 @@ pub fn print_report(report: &ValidationReport, options: &ValidateOptions) {
         console::println!("Time   : {} ms", report.time_ms);
     }
     console::newline();
+    console::println!(
+        "Validation Status: {}",
+        if report.failed == 0 { "PASS" } else { "FAIL" }
+    );
     console::println!("Kernel Health: {}%", report.health);
+    console::println!(
+        "Readiness Gates: {}/{}",
+        report.readiness_passed(),
+        REQUIRED_GATES.len()
+    );
     console::println!(
         "Kernel Status: {}",
         if report.kernel_ready() {

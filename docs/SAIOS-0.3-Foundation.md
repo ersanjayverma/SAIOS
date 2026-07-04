@@ -2,13 +2,29 @@
 
 Status: Active milestone
 Owner: Kernel correctness and reliability
-Last updated: 2026-07-04
+Last updated: 2026-07-05
 
 ## Milestone Goal
 
 Stabilize kernel correctness primitives before user-space expansion.
 
 This milestone treats interrupting, timing, fault containment, I/O streams, and core filesystem operations as non-optional readiness gates. New feature work for ELF/Linux ABI/network/filesystem expansion should wait until these gates are green.
+
+## Single-Core Execution Policy (Current)
+
+SAIOS currently runs in a single-core bring-up posture. Until SMP scheduling is fully enabled and validated, kernel paths must not depend on background workers for critical correctness behavior.
+
+Rules:
+
+- Critical kernel scans and initialization paths must be deterministic and foreground-safe.
+- Storage discovery and publication must complete in the caller thread.
+- User-facing commands must not rely on deferred worker completion to report correctness status.
+- Concurrency assumptions must be explicit and feature-gated before enabling background jobs.
+
+Current application:
+
+- Storage rescan executes synchronously.
+- Diagnostics and object publication are completed before command return.
 
 ## Exit Criteria (Required)
 
@@ -199,6 +215,9 @@ Every boot must run and report these checks:
 - PASS move
 - PASS keyboard
 - PASS mouse
+- PASS storage controller scan timeout behavior
+- PASS storage scan graceful degradation (reports 0 disks, no stall)
+- PASS object namespace publication for discovered storage devices
 
 If any required gate fails, kernel status must be reported as not ready and the system must not claim healthy runtime readiness.
 
@@ -217,6 +236,8 @@ Expected operator-facing summary format:
 - Move: PASS or FAIL
 - Keyboard: PASS or FAIL
 - Mouse: PASS or FAIL
+- Storage Scan: PASS or FAIL
+- Storage Objects: PASS or FAIL
 - Kernel READY or Kernel NOT READY
 
 Rule:
@@ -237,6 +258,8 @@ A v0.3 kernel is done when it can:
 - support file and directory rename/move through VFS
 - accept reliable keyboard and functional mouse input
 - pass automated kernel self-tests for all required gates on every boot
+- complete storage scans without shell stalls in single-core mode
+- publish discovered storage devices consistently under object namespace views
 
 ## Out of Scope for v0.3
 

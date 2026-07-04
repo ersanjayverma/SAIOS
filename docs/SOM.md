@@ -2,7 +2,7 @@
 
 Status: Frozen foundational contract
 Owner: Kernel architecture
-Last updated: 2026-07-02
+Last updated: 2026-07-05
 
 ## Why SOM Exists
 
@@ -15,6 +15,23 @@ SOM defines what an object is in SAIOS before namespace or filesystem concerns. 
 3. SAIFS exposes namespace views of objects and never owns object identity.
 4. Objects advertise capabilities and operations instead of being identified only by concrete type.
 5. Every object participates in health, diagnostics, events, and relationships by default.
+
+## Stable Object ID Contract
+
+SAIOS ObjectId values are stable during object lifetime and never expose raw pointers.
+
+Encoding:
+
+- Type: 16 bits
+- Namespace: 16 bits
+- Sequence: 32 bits
+
+Display labels are generated from object type prefixes, for example:
+
+- `PROC-00000015`
+- `DRV-00000003`
+- `DEV-00000007`
+- `VOL-00000001`
 
 ## Layer 0: Universal Object Header
 
@@ -146,11 +163,20 @@ Forbidden internal identity references:
 All objects share lifecycle states:
 
 - Created
-- Initialized
-- Running
-- Paused
+- Initializing
+- Ready
 - Stopping
 - Destroyed
+
+Transition policy:
+
+- Created -> Initializing
+- Initializing -> Ready
+- Initializing -> Stopping
+- Ready -> Stopping
+- Stopping -> Destroyed
+
+No subsystem-specific lifecycle aliases should replace this core contract.
 
 ## Layer 8: Event Integration
 

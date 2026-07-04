@@ -214,15 +214,14 @@ fn cmd_umount(path: &str) -> DiskpartResult {
 
 fn cmd_scan() -> DiskpartResult {
     storage::request_rescan();
-    let vols = storage::volumes_cached();
     let scan = storage::scan_status();
     console::println!(
-        "diskpart: scan {} epoch={} queued={} running={} — cached: {} volume(s)",
+        "diskpart: scan {} epoch={} queued={} running={} failures={} — completed",
         scan.phase,
         scan.epoch,
         if scan.queued { "yes" } else { "no" },
         if scan.running { "yes" } else { "no" },
-        vols.len()
+        scan.failures
     );
     Ok(0)
 }

@@ -52,9 +52,9 @@ impl DeviceRegistry {
         }
 
         let state = match status {
-            DeviceStatus::Online => kom::ObjectState::Running,
-            DeviceStatus::Offline => kom::ObjectState::Stopped,
-            DeviceStatus::Faulted => kom::ObjectState::Faulted,
+            DeviceStatus::Online => kom::ObjectState::Ready,
+            DeviceStatus::Offline => kom::ObjectState::Stopping,
+            DeviceStatus::Faulted => kom::ObjectState::Stopping,
         };
 
         let handle = kom::register(kom::ObjectType::Device, name, state)?;

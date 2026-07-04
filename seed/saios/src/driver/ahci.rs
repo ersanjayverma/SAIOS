@@ -2,7 +2,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{compiler_fence, fence, AtomicBool, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
@@ -147,6 +147,7 @@ struct AhciState {
     runtimes: Vec<AhciControllerRuntime>,
     disks: Vec<AhciDisk>,
     bindings: Vec<AhciDiskBinding>,
+    diagnostics: Vec<String>,
     next_disk_id: u32,
 }
 
@@ -158,6 +159,7 @@ impl AhciState {
             runtimes: Vec::new(),
             disks: Vec::new(),
             bindings: Vec::new(),
+            diagnostics: Vec::new(),
             next_disk_id: 1,
         }
     }
@@ -216,13 +218,51 @@ fn looks_like_ahci(dev: &pci::PciDevice) -> bool {
 }
 
 fn read32(base: *mut u8, offset: usize) -> u32 {
-    unsafe { ptr::read_volatile(base.add(offset).cast::<u32>()) }
+    compiler_fence(Ordering::SeqCst);
+    let value = unsafe { ptr::read_volatile(base.add(offset).cast::<u32>()) };
+    fence(Ordering::SeqCst);
+    value
 }
 
 fn write32(base: *mut u8, offset: usize, value: u32) {
+    compiler_fence(Ordering::SeqCst);
     unsafe {
         ptr::write_volatile(base.add(offset).cast::<u32>(), value);
     }
+    fence(Ordering::SeqCst);
+}
+
+fn record_diag(
+    state: &mut AhciState,
+    stage: &str,
+    dev: &pci::PciDevice,
+    port: Option<u8>,
+    detail: &str,
+) {
+    let location = format!("{:02x}:{:02x}.{}", dev.bus, dev.device, dev.function);
+    let entry = if let Some(port_idx) = port {
+        format!(
+            "stage={} controller={} port={} vendor={:04x} device={:04x} detail={}",
+            stage, location, port_idx, dev.vendor_id, dev.device_id, detail
+        )
+    } else {
+        format!(
+            "stage={} controller={} vendor={:04x} device={:04x} detail={}",
+            stage, location, dev.vendor_id, dev.device_id, detail
+        )
+    };
+    state.diagnostics.push(entry);
+}
+
+fn resolve_abar(dev: &pci::PciDevice) -> Result<u64, &'static str> {
+    let bar = pci::read_bar(dev, 5).ok_or("ahci: missing BAR5")?;
+    if bar.is_io {
+        return Err("ahci: BAR5 is I/O, MMIO required");
+    }
+    if bar.base < 0x1000 {
+        return Err("ahci: BAR5 base appears invalid");
+    }
+    Ok(bar.base)
 }
 
 fn map_mmio_window(phys_base: u64, size_bytes: usize, owner: &str) -> Result<(u64, *mut u8), &'static str> {
@@ -279,11 +319,17 @@ fn port_write32(mmio: *mut u8, port: u8, reg: usize, value: u32) {
 }
 
 fn wait_until_port_timeout(mmio: *mut u8, port: u8, reg: usize, mask: u32, set: bool, iters: usize) -> bool {
-    for _ in 0..iters {
+    for i in 0..iters {
         let value = port_read32(mmio, port, reg);
         let matches = (value & mask) != 0;
         if matches == set {
             return true;
+        }
+        if (i & 0x3FF) == 0 {
+            crate::scheduler::maybe_preempt();
+            if (i & 0x3FFF) == 0 {
+                crate::scheduler::yield_now();
+            }
         }
         core::hint::spin_loop();
     }
@@ -361,10 +407,16 @@ fn init_port_runtime(mmio: *mut u8, port: u8, owner: &str) -> Result<AhciPortRun
 }
 
 fn wait_port_ready(mmio: *mut u8, port: u8) -> Result<(), &'static str> {
-    for _ in 0..AHCI_WAIT_ITERS {
+    for i in 0..AHCI_WAIT_ITERS {
         let tfd = port_read32(mmio, port, AHCI_PX_TFD);
         if (tfd & (AHCI_TFD_BSY | AHCI_TFD_DRQ)) == 0 {
             return Ok(());
+        }
+        if (i & 0x3FF) == 0 {
+            crate::scheduler::maybe_preempt();
+            if (i & 0x3FFF) == 0 {
+                crate::scheduler::yield_now();
+            }
         }
         core::hint::spin_loop();
     }
@@ -420,7 +472,7 @@ fn issue_ata_command(
 
     port_write32(mmio, runtime.port, AHCI_PX_CI, 1);
 
-    for _ in 0..AHCI_WAIT_ITERS {
+    for i in 0..AHCI_WAIT_ITERS {
         let ci = port_read32(mmio, runtime.port, AHCI_PX_CI);
         let is = port_read32(mmio, runtime.port, AHCI_PX_IS);
         if (is & AHCI_PXIS_TFES) != 0 {
@@ -428,6 +480,12 @@ fn issue_ata_command(
         }
         if (ci & 1) == 0 {
             return Ok(());
+        }
+        if (i & 0x3FF) == 0 {
+            crate::scheduler::maybe_preempt();
+            if (i & 0x3FFF) == 0 {
+                crate::scheduler::yield_now();
+            }
         }
         core::hint::spin_loop();
     }
@@ -510,17 +568,26 @@ fn rescan_locked(state: &mut AhciState) {
     state.runtimes.clear();
     state.disks.clear();
     state.bindings.clear();
+    state.diagnostics.clear();
     state.next_disk_id = 1;
 
     let mut index = 0usize;
+    let mut detected_any = false;
     for dev in pci::devices() {
         if !looks_like_ahci(&dev) {
             continue;
         }
+        detected_any = true;
 
-        let abar = pci::read_bar(&dev, 5)
-            .filter(|bar| !bar.is_io)
-            .map(|bar| bar.base);
+        record_diag(state, "pci_detection", &dev, None, "ahci class device discovered");
+
+        let abar = match resolve_abar(&dev) {
+            Ok(phys) => Some(phys),
+            Err(err) => {
+                record_diag(state, "bar_mapping", &dev, None, err);
+                None
+            }
+        };
 
         let mut controller_state = AhciControllerState::Discovered;
         let mut last_error = None;
@@ -531,6 +598,13 @@ fn rescan_locked(state: &mut AhciState) {
                 Ok((mapping, mmio)) => {
                     let ghc = read32(mmio, AHCI_REG_GHC);
                     write32(mmio, AHCI_REG_GHC, ghc | AHCI_GHC_AE);
+                    let ghc_now = read32(mmio, AHCI_REG_GHC);
+                    if (ghc_now & AHCI_GHC_AE) == 0 {
+                        controller_state = AhciControllerState::Faulted;
+                        let detail = "ahci: controller enable bit did not latch".to_string();
+                        record_diag(state, "controller_init", &dev, None, detail.as_str());
+                        last_error = Some(detail);
+                    }
 
                     let pi = read32(mmio, AHCI_REG_PI);
                     let mut runtime = AhciControllerRuntime {
@@ -538,6 +612,16 @@ fn rescan_locked(state: &mut AhciState) {
                         mmio,
                         ports: Vec::new(),
                     };
+
+                    if pi == 0 {
+                        record_diag(
+                            state,
+                            "port_scan",
+                            &dev,
+                            None,
+                            "ahci: no implemented ports in PI register",
+                        );
+                    }
 
                     for port in 0u8..32u8 {
                         if (pi & (1u32 << port)) == 0 {
@@ -547,23 +631,30 @@ fn rescan_locked(state: &mut AhciState) {
                             continue;
                         }
 
-                        let owner = format!("ahci-port-{}-{}", index, port);
-                        let mut port_runtime = match init_port_runtime(mmio, port, owner.as_str()) {
+                        let mut port_runtime = match init_port_runtime(mmio, port, "ahci-port") {
                             Ok(p) => p,
                             Err(e) => {
                                 controller_state = AhciControllerState::Faulted;
-                                last_error = Some(e.to_string());
+                                let detail = e.to_string();
+                                record_diag(state, "port_scan", &dev, Some(port), detail.as_str());
+                                last_error = Some(detail);
                                 continue;
                             }
                         };
 
                         if let Err(e) = identify_port(mmio, &mut port_runtime) {
                             controller_state = AhciControllerState::Faulted;
-                            last_error = Some(e.to_string());
+                            let detail = e.to_string();
+                            record_diag(state, "identify", &dev, Some(port), detail.as_str());
+                            last_error = Some(detail);
                             continue;
                         }
 
                         if port_runtime.total_sectors == 0 {
+                            controller_state = AhciControllerState::Faulted;
+                            let detail = "ahci: IDENTIFY returned zero sectors".to_string();
+                            record_diag(state, "identify", &dev, Some(port), detail.as_str());
+                            last_error = Some(detail);
                             continue;
                         }
 
@@ -595,12 +686,15 @@ fn rescan_locked(state: &mut AhciState) {
                 }
                 Err(err) => {
                     controller_state = AhciControllerState::Faulted;
-                    last_error = Some(err.to_string());
+                    let detail = err.to_string();
+                    record_diag(state, "bar_mapping", &dev, None, detail.as_str());
+                    last_error = Some(detail);
                 }
             }
         } else {
             controller_state = AhciControllerState::Faulted;
-            last_error = Some("ahci: missing ABAR MMIO window".to_string());
+            let detail = "ahci: missing ABAR MMIO window".to_string();
+            last_error = Some(detail);
         }
 
         state.controllers.push(AhciController {
@@ -616,6 +710,12 @@ fn rescan_locked(state: &mut AhciState) {
             last_error,
         });
         index = index.saturating_add(1);
+    }
+
+    if !detected_any {
+        state
+            .diagnostics
+            .push("stage=pci_detection detail=no AHCI controllers discovered".to_string());
     }
 }
 
@@ -657,6 +757,15 @@ pub fn disks() -> Vec<AhciDisk> {
 
 pub fn disks_cached() -> Vec<AhciDisk> {
     with_state(|state| state.disks.clone())
+}
+
+pub fn diagnostics() -> Vec<String> {
+    init();
+    with_state(|state| state.diagnostics.clone())
+}
+
+pub fn diagnostics_cached() -> Vec<String> {
+    with_state(|state| state.diagnostics.clone())
 }
 
 pub fn read_sector(disk_id: u32, lba: u64, out: &mut [u8]) -> Result<(), &'static str> {

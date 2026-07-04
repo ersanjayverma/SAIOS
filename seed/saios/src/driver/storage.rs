@@ -17,10 +17,8 @@ use crate::driver::ahci;
 use crate::kernel::device::{self, DeviceStatus};
 use crate::pci;
 
-const MBR_SECTOR: usize = 512;
 const FAT_STORE_MAGIC: &[u8; 8] = b"SAFAT32\0";
 const FAT_STORE_VERSION: u32 = 1;
-const SYNTHETIC_DISK_SECTORS: u64 = 4_096;
 const PARTITION_PROBE_WINDOW_BYTES: usize = 4096;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -122,108 +120,39 @@ struct Partition {
     fs_hint: FilesystemKind,
 }
 
-#[derive(Clone)]
-struct RamBlockDevice {
-    sector_size: u16,
-    sectors: u64,
-    bytes: Vec<u8>,
-    dirty: bool,
-}
-
-impl RamBlockDevice {
-    fn new(sectors: u64, sector_size: u16) -> Self {
-        let total = (sectors as usize).saturating_mul(sector_size as usize);
-        let mut dev = Self {
-            sector_size,
-            sectors,
-            bytes: vec![0u8; total],
-            dirty: false,
-        };
-        seed_default_mbr_fat32(&mut dev);
-        dev
-    }
-
-    fn read_sector(&self, lba: u64, out: &mut [u8]) -> Result<(), &'static str> {
-        if lba >= self.sectors {
-            return Err("storage: lba out of range");
-        }
-        if out.len() != self.sector_size as usize {
-            return Err("storage: invalid read buffer size");
-        }
-
-        let start = (lba as usize).saturating_mul(self.sector_size as usize);
-        let end = start.saturating_add(self.sector_size as usize);
-        if end > self.bytes.len() {
-            return Err("storage: read past device end");
-        }
-
-        out.copy_from_slice(&self.bytes[start..end]);
-        Ok(())
-    }
-
-    fn write_sector(&mut self, lba: u64, data: &[u8]) -> Result<(), &'static str> {
-        if lba >= self.sectors {
-            return Err("storage: lba out of range");
-        }
-        if data.len() != self.sector_size as usize {
-            return Err("storage: invalid write buffer size");
-        }
-
-        let start = (lba as usize).saturating_mul(self.sector_size as usize);
-        let end = start.saturating_add(self.sector_size as usize);
-        if end > self.bytes.len() {
-            return Err("storage: write past device end");
-        }
-
-        self.bytes[start..end].copy_from_slice(data);
-        self.dirty = true;
-        Ok(())
-    }
-
-    fn flush(&mut self) {
-        self.dirty = false;
-    }
-}
-
-/// Block device backing - either RAM or real AHCI hardware.
+/// Block device backing for real AHCI hardware.
 #[derive(Clone)]
 enum BlockBacking {
-    Ram(RamBlockDevice),
     Ahci { disk_id: u32, sector_size: u16, sectors: u64 },
 }
 
 impl BlockBacking {
     fn sector_size(&self) -> u16 {
         match self {
-            BlockBacking::Ram(r) => r.sector_size,
             BlockBacking::Ahci { sector_size, .. } => *sector_size,
         }
     }
 
     fn sectors(&self) -> u64 {
         match self {
-            BlockBacking::Ram(r) => r.sectors,
             BlockBacking::Ahci { sectors, .. } => *sectors,
         }
     }
 
     fn read_sector(&self, lba: u64, out: &mut [u8]) -> Result<(), &'static str> {
         match self {
-            BlockBacking::Ram(r) => r.read_sector(lba, out),
             BlockBacking::Ahci { disk_id, .. } => ahci::read_sector(*disk_id, lba, out),
         }
     }
 
     fn write_sector(&mut self, lba: u64, data: &[u8]) -> Result<(), &'static str> {
         match self {
-            BlockBacking::Ram(r) => r.write_sector(lba, data),
             BlockBacking::Ahci { disk_id, .. } => ahci::write_sector(*disk_id, lba, data),
         }
     }
 
     fn flush(&mut self) {
         match self {
-            BlockBacking::Ram(r) => r.flush(),
             BlockBacking::Ahci { disk_id, .. } => { let _ = ahci::flush(*disk_id); }
         }
     }
@@ -253,6 +182,7 @@ struct StorageState {
     volumes: Vec<DetectedVolume>,
     disks: Vec<DiskDevice>,
     mounted: Vec<MountedFs>,
+    diagnostics: Vec<String>,
 }
 
 impl StorageState {
@@ -262,13 +192,13 @@ impl StorageState {
             volumes: Vec::new(),
             disks: Vec::new(),
             mounted: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 }
 
 static STATE: StaticCell<Option<StorageState>> = StaticCell::new(None);
 static LOCK: AtomicBool = AtomicBool::new(false);
-static SCAN_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static SCAN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static SCAN_RUNNING: AtomicBool = AtomicBool::new(false);
 static SCAN_COMPLETED: AtomicBool = AtomicBool::new(false);
@@ -293,6 +223,7 @@ pub struct StorageScanStatus {
     pub phase: &'static str,
     pub disks: usize,
     pub volumes: usize,
+    pub failures: usize,
 }
 
 fn lock() {
@@ -841,47 +772,6 @@ fn probe_partition_filesystem(disk: &DiskDevice, part: &Partition) -> Option<Fil
     probe_filesystem(image.as_slice()).map(|p| p.fs)
 }
 
-fn seed_default_mbr_fat32(dev: &mut RamBlockDevice) {
-    if dev.sector_size as usize != MBR_SECTOR {
-        return;
-    }
-
-    let mut mbr = [0u8; MBR_SECTOR];
-    let start_lba = 2048u32;
-    let sectors = (dev
-        .sectors
-        .saturating_sub(start_lba as u64)
-        .min(u32::MAX as u64)) as u32;
-
-    let p0 = 446usize;
-    mbr[p0 + 4] = 0x0C;
-    mbr[p0 + 8..p0 + 12].copy_from_slice(&start_lba.to_le_bytes());
-    mbr[p0 + 12..p0 + 16].copy_from_slice(&sectors.to_le_bytes());
-    mbr[510] = 0x55;
-    mbr[511] = 0xAA;
-
-    let _ = dev.write_sector(0, &mbr);
-
-    let mut bpb = [0u8; MBR_SECTOR];
-    bpb[0] = 0xEB;
-    bpb[1] = 0x58;
-    bpb[2] = 0x90;
-    bpb[3..11].copy_from_slice(b"MSWIN4.1");
-    bpb[11..13].copy_from_slice(&(512u16).to_le_bytes());
-    bpb[13] = 8;
-    bpb[14..16].copy_from_slice(&(32u16).to_le_bytes());
-    bpb[16] = 2;
-    bpb[32..36].copy_from_slice(&sectors.to_le_bytes());
-    bpb[36..40].copy_from_slice(&(128u32).to_le_bytes());
-    bpb[44..48].copy_from_slice(&(2u32).to_le_bytes());
-    bpb[71..82].copy_from_slice(b"NO NAME    ");
-    bpb[82..90].copy_from_slice(b"FAT32   ");
-    bpb[510] = 0x55;
-    bpb[511] = 0xAA;
-    let _ = dev.write_sector(start_lba as u64, &bpb);
-    dev.flush();
-}
-
 fn parse_mbr_partitions(disk: &DiskDevice) -> Vec<Partition> {
     let mut mbr = vec![0u8; disk.block.sector_size() as usize];
     if disk.block.read_sector(0, mbr.as_mut_slice()).is_err() || !has_mbr_signature(&mbr) {
@@ -999,24 +889,40 @@ fn detect_partitions_for_disk(disk: &mut DiskDevice) {
     disk.partitions = parts;
 }
 
-fn register_devices(state: &StorageState) {
+fn register_devices(state: &StorageState) -> Vec<String> {
+    let mut diagnostics = Vec::new();
     for disk in &state.disks {
-        let _ = device::ensure_device(
+        if let Err(err) = device::ensure_device(
             format!("/dev/{}", disk.name).as_str(),
             "storage",
             "block/disk",
             DeviceStatus::Online,
-        );
+        ) {
+            diagnostics.push(format!(
+                "stage=registration target=/dev/{} detail={}"
+                ,
+                disk.name,
+                err
+            ));
+        }
 
         for part in &disk.partitions {
-            let _ = device::ensure_device(
+            if let Err(err) = device::ensure_device(
                 format!("/dev/{}", part.name).as_str(),
                 "storage",
                 "block/partition",
                 DeviceStatus::Online,
-            );
+            ) {
+                diagnostics.push(format!(
+                    "stage=registration target=/dev/{} detail={}"
+                    ,
+                    part.name,
+                    err
+                ));
+            }
         }
     }
+    diagnostics
 }
 
 fn rebuild_volume_registry(state: &mut StorageState) {
@@ -1063,12 +969,19 @@ fn rebuild_volume_registry(state: &mut StorageState) {
 }
 
 /// Discover disks - first from AHCI driver (real hardware), then PCI fallback.
-fn discover_disks_from_pci() -> Vec<DiskDevice> {
+fn discover_disks_from_pci(diagnostics: &mut Vec<String>) -> Vec<DiskDevice> {
     let mut disks = Vec::new();
 
     // First: Query AHCI driver for real disks (uses cached list, won't stall)
     let ahci_disks = ahci::disks_cached();
     for (idx, adisk) in ahci_disks.iter().enumerate() {
+        if adisk.total_sectors == 0 || adisk.sector_size == 0 {
+            diagnostics.push(format!(
+                "stage=controller_init target={} detail=skip invalid geometry sectors={} sector_size={}",
+                adisk.name, adisk.total_sectors, adisk.sector_size
+            ));
+            continue;
+        }
         let mut disk = DiskDevice {
             name: format!("sata{}", idx),
             backing: format!(
@@ -1086,35 +999,23 @@ fn discover_disks_from_pci() -> Vec<DiskDevice> {
         disks.push(disk);
     }
 
-    // Second: For non-AHCI PCI storage controllers, create synthetic fallback
-    let mut idx = ahci_disks.len();
+    // Report unsupported controllers but do not fabricate synthetic disks.
     for dev in pci::devices() {
         if dev.class != 0x01 {
             continue;
         }
-        // Skip AHCI controllers - already handled above
+        // Skip AHCI controllers - already handled above.
         if dev.subclass == 0x06 && dev.prog_if == 0x01 {
             continue;
         }
+        diagnostics.push(format!(
+            "stage=pci_detection controller={:02x}:{:02x}.{} vendor={:04x} device={:04x} detail=unsupported storage controller skipped",
+            dev.bus, dev.device, dev.function, dev.vendor_id, dev.device_id
+        ));
+    }
 
-        let controller = match (dev.vendor_id, dev.device_id) {
-            (0x1AF4, _) => "virtio-blk",
-            _ if dev.subclass == 0x01 => "ata",
-            _ => "storage-generic",
-        };
-
-        let mut disk = DiskDevice {
-            name: format!("disk{}", idx),
-            backing: format!(
-                "{} pci {:02x}:{:02x}.{}",
-                controller, dev.bus, dev.device, dev.function
-            ),
-            block: BlockBacking::Ram(RamBlockDevice::new(SYNTHETIC_DISK_SECTORS, 512)),
-            partitions: Vec::new(),
-        };
-        detect_partitions_for_disk(&mut disk);
-        disks.push(disk);
-        idx = idx.saturating_add(1);
+    if disks.is_empty() {
+        diagnostics.push("stage=controller_init detail=0 disks detected".to_string());
     }
 
     disks
@@ -1202,33 +1103,41 @@ pub fn init() {
     });
 }
 
-fn publish_disks(disks: Vec<DiskDevice>) {
+fn publish_disks(disks: Vec<DiskDevice>, diagnostics: Vec<String>) {
     with_state_mut(|state| {
         state.disks = disks;
         rebuild_volume_registry(state);
         state.mounted.clear();
-        register_devices(state);
+        state.diagnostics = diagnostics;
+        let registration_diags = register_devices(state);
+        state.diagnostics.extend(registration_diags);
         state.initialized = true;
     });
     crate::object_manager::refresh_storage_provider_if_ready();
 }
 
 fn perform_rescan() {
+    let mut diagnostics = Vec::new();
+
     SCAN_RUNNING.store(true, Ordering::Release);
     SCAN_REQUESTED.store(false, Ordering::Release);
     SCAN_COMPLETED.store(false, Ordering::Release);
 
     SCAN_PHASE.store(SCAN_PCI, Ordering::Release);
     pci::init();
+    diagnostics.push("stage=pci_detection detail=pci enumeration complete".to_string());
 
     SCAN_PHASE.store(SCAN_AHCI, Ordering::Release);
     ahci::rescan();
+    for diag in ahci::diagnostics_cached() {
+        diagnostics.push(format!("{}", diag));
+    }
 
     SCAN_PHASE.store(SCAN_PARTITIONS, Ordering::Release);
-    let disks = discover_disks_from_pci();
+    let disks = discover_disks_from_pci(&mut diagnostics);
 
     SCAN_PHASE.store(SCAN_PUBLISH, Ordering::Release);
-    publish_disks(disks);
+    publish_disks(disks, diagnostics);
 
     SCAN_EPOCH.fetch_add(1, Ordering::AcqRel);
     SCAN_COMPLETED.store(true, Ordering::Release);
@@ -1236,30 +1145,15 @@ fn perform_rescan() {
     SCAN_PHASE.store(SCAN_DONE, Ordering::Release);
 }
 
-fn scan_worker_entry() {
-    loop {
-        if SCAN_REQUESTED.swap(false, Ordering::AcqRel) {
-            perform_rescan();
-        } else {
-            crate::scheduler::sleep_ticks(2);
-        }
-    }
-}
-
 pub fn start_scan_worker() {
-    if SCAN_WORKER_STARTED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
-        let _ = crate::scheduler::spawn(scan_worker_entry);
-    }
+    // Single-core mode: keep scanning deterministic and foreground-only.
 }
 
 pub fn request_rescan() {
     init();
-    start_scan_worker();
     SCAN_PHASE.store(SCAN_QUEUED, Ordering::Release);
     SCAN_REQUESTED.store(true, Ordering::Release);
+    perform_rescan();
 }
 
 pub fn rescan() {
@@ -1267,7 +1161,13 @@ pub fn rescan() {
 }
 
 pub fn scan_status() -> StorageScanStatus {
-    let (disks, volumes) = with_state(|state| (state.disks.len(), state.volumes.len()));
+    let (disks, volumes, failures) = with_state(|state| {
+        (
+            state.disks.len(),
+            state.volumes.len(),
+            state.diagnostics.len(),
+        )
+    });
     StorageScanStatus {
         queued: SCAN_REQUESTED.load(Ordering::Acquire),
         running: SCAN_RUNNING.load(Ordering::Acquire),
@@ -1276,7 +1176,17 @@ pub fn scan_status() -> StorageScanStatus {
         phase: scan_phase_name(SCAN_PHASE.load(Ordering::Acquire)),
         disks,
         volumes,
+        failures,
     }
+}
+
+pub fn scan_diagnostics() -> Vec<String> {
+    init();
+    with_state(|state| state.diagnostics.clone())
+}
+
+pub fn scan_diagnostics_cached() -> Vec<String> {
+    with_state(|state| state.diagnostics.clone())
 }
 
 pub fn supported_filesystems() -> &'static [FilesystemKind] {

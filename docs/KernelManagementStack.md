@@ -41,16 +41,40 @@ SAIRU
 
 ### Core model
 
-- `ObjectId`
-- `ObjectType`: `Kernel`, `Process`, `Thread`, `Driver`, `Device`, `Mount`
-- `ObjectState`: `Created`, `Running`, `Stopped`, `Faulted`
+- `ObjectId` (encoded): Type(16) + Namespace(16) + Sequence(32)
+- Stable labels: `PROC-XXXXXXXX`, `DRV-XXXXXXXX`, `DEV-XXXXXXXX`, `VOL-XXXXXXXX`, ...
+- `ObjectType`: `Kernel`, `Service`, `Process`, `Thread`, `Driver`, `Device`, `Timer`, `Event`, `Surface`, `Window`, `File`, `Directory`, `Volume`, `Filesystem`, `Mount`, `Socket`, `Pipe`
+- `ObjectState`: `Created`, `Initializing`, `Ready`, `Stopping`, `Destroyed`
 - `ObjectHandle` references objects by id
 - `KernelObject` trait exists as the common interface
+
+Common metadata tracked per object:
+
+- id
+- object_type
+- name
+- state
+- flags
+- parent
+- children
+- owner
+- reference_count
+- created_tick
+- last_modified_tick
+- capabilities
+- properties
 
 ### Registry APIs
 
 - `register(...)`
 - `unregister(...)`
+- `transition(...)`
+- `acquire(...)`
+- `release(...)`
+- `set_parent(...)`
+- `set_owner(...)`
+- `set_property(...)`
+- `clone_object(...)`
 - `find(id)`
 - `find_by_name(...)`
 - `find_by_type(...)`
@@ -64,6 +88,9 @@ SAIRU
 
 - KOM is now the source of truth for driver/device object presence.
 - Static object seeding is minimal (kernel/process/mount). Driver/device objects are registered by their managers.
+- Lifecycle transitions are validated against a unified state machine.
+- Parent-child relationships are updated consistently in registry operations.
+- Reference counting operations are centralized in KOM.
 
 ## 3. KSM (Implemented)
 
@@ -128,6 +155,15 @@ Device Manager is implemented in `kernel/device.rs`.
 - Runtime idempotent registration (`ensure_device`) from subsystem bring-up
   - COM1 and keyboard during console init
   - framebuffer device when framebuffer attaches
+- Storage block devices and partitions are surfaced in device views through provider enumeration of device-manager records.
+
+## 4.1 Single-Core Storage Scan Mode
+
+Current kernel mode is single-core correctness-first.
+
+- Storage scan execution is synchronous (foreground) and deterministic.
+- No background storage worker is required to complete object publication.
+- Shell commands can rely on scan completion semantics before returning.
 
 ## 5. Driver Manager (Phase 4 Advanced)
 

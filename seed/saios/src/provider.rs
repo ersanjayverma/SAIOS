@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 
 use crate::driver::storage;
 use crate::driver::{dhcp, ethernet, loopback, wifi};
+use crate::kernel::device;
 use crate::object_manager::{Health, ObjectStatus, ObjectType, Property, PropertyMap};
 use crate::som::{ObjectId, ProviderId};
 use crate::{pci, scheduler};
@@ -360,6 +361,49 @@ impl Provider for DeviceProvider {
     /// Enumerates PCI devices already known to the kernel without probing.
     fn enumerate(&self) -> Vec<ProviderObject> {
         let mut out = Vec::new();
+
+        for dev in device::devices() {
+            let (status, health) = match dev.status {
+                device::DeviceStatus::Online => (ObjectStatus::Online, Health::Healthy),
+                device::DeviceStatus::Offline => (ObjectStatus::Offline, Health::Warning),
+                device::DeviceStatus::Faulted => (ObjectStatus::Faulted, Health::Critical),
+            };
+
+            let short_name = dev
+                .name
+                .trim_start_matches('/')
+                .trim_start_matches("dev/")
+                .to_string();
+            let path_name = if short_name.is_empty() {
+                dev.name.trim_start_matches('/').replace('/', "_")
+            } else {
+                short_name.replace('/', "_")
+            };
+
+            out.push(ProviderObject {
+                path: format!("devices/{}", path_name),
+                name: dev.name.clone(),
+                object_type: ObjectType::Device,
+                status,
+                health,
+                parent_path: Some("devices".to_string()),
+                properties: vec![
+                    Property {
+                        key: "Driver".to_string(),
+                        value: dev.driver,
+                    },
+                    Property {
+                        key: "Class".to_string(),
+                        value: dev.class,
+                    },
+                    Property {
+                        key: "ObjectId".to_string(),
+                        value: dev.object_id.0.to_string(),
+                    },
+                ],
+            });
+        }
+
         for (idx, dev) in pci::devices_snapshot().into_iter().enumerate() {
             out.push(ProviderObject {
                 path: format!("devices/pci{}", idx),

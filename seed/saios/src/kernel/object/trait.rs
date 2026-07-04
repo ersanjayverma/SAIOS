@@ -7,4 +7,9 @@ pub trait KernelObject {
     fn object_type(&self) -> ObjectType;
     fn name(&self) -> &str;
     fn state(&self) -> ObjectState;
+    fn parent(&self) -> Option<ObjectId>;
+    fn owner(&self) -> Option<ObjectId>;
+    fn reference_count(&self) -> u32;
+    fn created_tick(&self) -> u64;
+    fn last_modified_tick(&self) -> u64;
 }

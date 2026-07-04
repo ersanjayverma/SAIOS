@@ -5,6 +5,15 @@
 - Supersedes: none
 - Complements: ADR-0010
 
+## Amendment (2026-07-05)
+
+The foundational SOM decision remains accepted. The following clarifications are now part of the contract:
+
+- Object lifecycle canonical states are `Created -> Initializing -> Ready -> Stopping -> Destroyed`.
+- Stable ObjectId encoding is `Type(16) + Namespace(16) + Sequence(32)`.
+- Human-readable object labels are type-prefixed forms such as `PROC-XXXXXXXX` and `DEV-XXXXXXXX`.
+- Reference counting and parent/owner relationships are treated as first-class object metadata in the core registry contract.
+
 ## Context
 
 SAIFS and namespace architecture were defined in ADR-0010. The next risk is ambiguity in what an object is across kernel subsystems.
