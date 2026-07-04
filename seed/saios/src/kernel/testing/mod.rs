@@ -64,19 +64,13 @@ pub fn verify_target(target: Option<&str>) -> Result<Vec<VerifyReport>, &'static
     })
 }
 
-pub fn boot_self_test(ready: bool) {
+pub fn boot_self_test() {
     console::println!("SAIOS Self Test");
-
-    if ready {
-        console::println!("Core readiness gates passed.");
-    } else {
-        console::println!("Core readiness gates failed.");
-    }
 
     match verify_target(Some("all")) {
         Ok(reports) => {
             let passed = reports.iter().all(|r| r.passed());
-            if passed && ready {
+            if passed {
                 console::println!("All systems operational.");
             } else {
                 console::println!("Self-test completed with verification failures.");

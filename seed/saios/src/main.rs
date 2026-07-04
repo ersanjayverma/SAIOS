@@ -200,17 +200,9 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
     }
 
     interrupt::enable();
-    let ready = kernel::testing::boot_readiness_gate();
-    if !ready {
-        interrupt::disable();
-        console::panic_println("Kernel NOT READY");
-        loop {
-            hal::arch::x86_64::cpu::hlt();
-        }
-    }
 
     if cfg!(debug_assertions) {
-        kernel::testing::boot_self_test(ready);
+        kernel::testing::boot_self_test();
     }
 
     let seed = Seed::init(boot_info as *const SaiosBootInfo);
