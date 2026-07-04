@@ -15,6 +15,8 @@ Unlike traditional operating systems that treat observability as an afterthought
 
 **Current Generation:** SAIOS Next
 
+**Current Milestone Contract:** [docs/SAIOS-0.3-Foundation.md](docs/SAIOS-0.3-Foundation.md)
+
 This repository is a complete architectural restart.
 
 No previous implementation is considered authoritative.

@@ -9,26 +9,68 @@ use crate::arch::x86_64::sync::StaticCell;
 
 const IDT_ENTRY_COUNT: usize = 256;
 const IDT_INTERRUPT_GATE_ATTRIBUTES: u8 = 0x8E;
+const ERROR_CODE_VECTORS: &[u8] = &[8, 10, 11, 12, 13, 14, 17, 21, 29, 30];
 
 static IDT: StaticCell<InterruptDescriptorTable> = StaticCell::new(InterruptDescriptorTable::new());
 
 global_asm!(
     ".global saios_default_interrupt_stub",
     "saios_default_interrupt_stub:",
-    "push rax",
-    "push rdx",
-    "mov al, 0x20",
-    "mov dx, 0xA0",
-    "out dx, al",
-    "mov dx, 0x20",
-    "out dx, al",
-    "pop rdx",
-    "pop rax",
     "iretq",
+    ".global saios_default_interrupt_stub_with_error",
+    "saios_default_interrupt_stub_with_error:",
+    "add rsp, 8",
+    "iretq",
+    ".global saios_divide_error_stub",
+    "saios_divide_error_stub:",
+    "call divide_error",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    ".global saios_breakpoint_stub",
+    "saios_breakpoint_stub:",
+    "call breakpoint",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    ".global saios_invalid_opcode_stub",
+    "saios_invalid_opcode_stub:",
+    "call invalid_opcode",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    ".global saios_double_fault_stub",
+    "saios_double_fault_stub:",
+    "mov rdi, [rsp]",
+    "call double_fault",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    ".global saios_general_protection_stub",
+    "saios_general_protection_stub:",
+    "mov rdi, [rsp]",
+    "call general_protection",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    ".global saios_page_fault_stub",
+    "saios_page_fault_stub:",
+    "mov rdi, [rsp]",
+    "call page_fault",
+    "2:",
+    "hlt",
+    "jmp 2b",
 );
 
 unsafe extern "C" {
     fn saios_default_interrupt_stub();
+    fn saios_default_interrupt_stub_with_error();
+    fn saios_divide_error_stub();
+    fn saios_breakpoint_stub();
+    fn saios_invalid_opcode_stub();
+    fn saios_double_fault_stub();
+    fn saios_general_protection_stub();
+    fn saios_page_fault_stub();
 }
 
 #[repr(C, packed)]
@@ -129,39 +171,52 @@ pub fn load() {
     }
 }
 pub fn init() {
-    for vector in 32u8..=255 {
+    for vector in 0u8..=255 {
         register_raw(vector, saios_default_interrupt_stub as *const () as usize);
     }
 
-    register(0, divide_error);
-    register(3, breakpoint);
-    register(6, invalid_opcode);
-    register(8, double_fault);
-    register(13, general_protection);
-    register(14, page_fault);
+    for &vector in ERROR_CODE_VECTORS {
+        register_raw(
+            vector,
+            saios_default_interrupt_stub_with_error as *const () as usize,
+        );
+    }
+
+    register_raw(0, saios_divide_error_stub as *const () as usize);
+    register_raw(3, saios_breakpoint_stub as *const () as usize);
+    register_raw(6, saios_invalid_opcode_stub as *const () as usize);
+    register_raw(8, saios_double_fault_stub as *const () as usize);
+    register_raw(13, saios_general_protection_stub as *const () as usize);
+    register_raw(14, saios_page_fault_stub as *const () as usize);
 
     load();
 }
-extern "C" fn divide_error() {
+#[unsafe(no_mangle)]
+extern "C" fn divide_error() -> ! {
     panic!("Divide Error");
 }
 
-extern "C" fn breakpoint() {
+#[unsafe(no_mangle)]
+extern "C" fn breakpoint() -> ! {
     panic!("Breakpoint");
 }
 
-extern "C" fn invalid_opcode() {
+#[unsafe(no_mangle)]
+extern "C" fn invalid_opcode() -> ! {
     panic!("Invalid Opcode");
 }
 
-extern "C" fn double_fault() {
-    panic!("Double Fault");
+#[unsafe(no_mangle)]
+extern "C" fn double_fault(error_code: usize) -> ! {
+    panic!("Double Fault (error={:#x})", error_code);
 }
 
-extern "C" fn general_protection() {
-    panic!("General Protection Fault");
+#[unsafe(no_mangle)]
+extern "C" fn general_protection(error_code: usize) -> ! {
+    panic!("General Protection Fault (error={:#x})", error_code);
 }
 
-extern "C" fn page_fault() {
-    panic!("Page Fault");
+#[unsafe(no_mangle)]
+extern "C" fn page_fault(error_code: usize) -> ! {
+    panic!("Page Fault (error={:#x})", error_code);
 }

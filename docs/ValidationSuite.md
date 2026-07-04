@@ -12,6 +12,7 @@ SISH> validate -v
 SISH> validate --perf
 SISH> validate --stress
 SISH> validate --json
+SISH> validate --ready
 SISH> validate --help
 ```
 
@@ -19,6 +20,9 @@ The default run executes non-destructive subsystem checks and prints a stable
 human-readable summary. `--json` emits CI-friendly structured output. `--perf`
 adds measurement-oriented tests. `--stress` adds bounded stress loops that keep
 running after individual failures.
+
+`--ready` runs the v0.3 required kernel-readiness gates only and emits a
+`Kernel READY` or `Kernel NOT READY` status based on those required checks.
 
 ## Subsystems
 
@@ -40,6 +44,25 @@ The suite currently covers:
 
 Unsupported or intentionally destructive checks return `SKIP` with a reason.
 They do not panic the kernel.
+
+## v0.3 Readiness Gate
+
+During the v0.3 milestone, a core subset of validation checks is treated as a
+boot readiness contract, not optional diagnostics.
+
+Required gates:
+
+- interrupt delivery
+- timer ticks and monotonic uptime
+- scheduler sleep and wake queue behavior
+- page fault and invalid pointer handling policy
+- stderr path availability
+- rename and move behavior in VFS
+- keyboard input path
+- mouse input path
+
+If required gates fail, the kernel must report `Kernel NOT READY` and must not
+claim a healthy runtime state.
 
 ## Extending
 

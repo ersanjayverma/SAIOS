@@ -2,11 +2,75 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use hal::arch::x86_64::cpuid;
+use hal::arch::x86_64::{cpuid, interrupt};
 
 use crate::console;
 use crate::kernel::{device, process, telemetry, testing};
-use crate::{heap, object_manager, pmm, saifs, scheduler, timer};
+use crate::{heap, object_manager, pmm, saifs, scheduler, timer, vfs};
+
+struct RequiredGate {
+    label: &'static str,
+    category: &'static str,
+    name: &'static str,
+}
+
+const REQUIRED_GATES: &[RequiredGate] = &[
+    RequiredGate {
+        label: "Interrupts",
+        category: "CPU",
+        name: "interrupt enable/disable",
+    },
+    RequiredGate {
+        label: "Timer",
+        category: "Timer",
+        name: "monotonic ticks",
+    },
+    RequiredGate {
+        label: "Sleep",
+        category: "Scheduler",
+        name: "sleep",
+    },
+    RequiredGate {
+        label: "Wake",
+        category: "Scheduler",
+        name: "wake",
+    },
+    RequiredGate {
+        label: "Page Fault",
+        category: "Memory",
+        name: "page faults",
+    },
+    RequiredGate {
+        label: "Invalid Pointer",
+        category: "Memory",
+        name: "invalid pointer handling",
+    },
+    RequiredGate {
+        label: "stderr",
+        category: "Console",
+        name: "stderr",
+    },
+    RequiredGate {
+        label: "Rename",
+        category: "Filesystem",
+        name: "rename",
+    },
+    RequiredGate {
+        label: "Move",
+        category: "Filesystem",
+        name: "move",
+    },
+    RequiredGate {
+        label: "Keyboard",
+        category: "Drivers",
+        name: "keyboard",
+    },
+    RequiredGate {
+        label: "Mouse",
+        category: "Drivers",
+        name: "mouse",
+    },
+];
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum TestStatus {
@@ -30,6 +94,7 @@ pub struct ValidateOptions {
     pub perf: bool,
     pub stress: bool,
     pub json: bool,
+    pub ready: bool,
 }
 
 impl ValidateOptions {
@@ -39,6 +104,7 @@ impl ValidateOptions {
             perf: false,
             stress: false,
             json: false,
+            ready: false,
         };
 
         for arg in args {
@@ -47,6 +113,7 @@ impl ValidateOptions {
                 "--perf" => options.perf = true,
                 "--stress" => options.stress = true,
                 "--json" => options.json = true,
+                "--ready" => options.ready = true,
                 "--help" | "-h" => return Err("help"),
                 _ => return Err("validate: unknown option"),
             }
@@ -135,6 +202,19 @@ impl ValidationReport {
             (self.passed * 100) / checked
         };
     }
+
+    fn find(&self, category: &str, name: &str) -> Option<&TestResult> {
+        self.results
+            .iter()
+            .find(|result| result.category == category && result.name == name)
+    }
+
+    pub fn kernel_ready(&self) -> bool {
+        REQUIRED_GATES.iter().all(|gate| {
+            self.find(gate.category, gate.name)
+                .is_some_and(|result| result.status == TestStatus::Pass)
+        })
+    }
 }
 
 type TestFn = fn() -> Result<(), &'static str>;
@@ -199,12 +279,18 @@ pub fn run(options: &ValidateOptions) -> ValidationReport {
     let mut report = ValidationReport::new();
     let suite_start = now_ms();
 
-    let mut tests = core_tests();
-    if options.perf {
-        tests.extend(perf_tests());
-    }
-    if options.stress {
-        tests.extend(stress_tests());
+    let mut tests = if options.ready {
+        readiness_tests()
+    } else {
+        core_tests()
+    };
+    if !options.ready {
+        if options.perf {
+            tests.extend(perf_tests());
+        }
+        if options.stress {
+            tests.extend(stress_tests());
+        }
     }
 
     for test in tests {
@@ -259,6 +345,29 @@ pub fn print_report(report: &ValidationReport, options: &ValidateOptions) {
     }
     console::newline();
     console::println!("Kernel Health: {}%", report.health);
+    console::println!(
+        "Kernel Status: {}",
+        if report.kernel_ready() {
+            "Kernel READY"
+        } else {
+            "Kernel NOT READY"
+        }
+    );
+    console::newline();
+    console::println!("Readiness Gates");
+    console::println!("--------------------------------");
+    console::newline();
+    for gate in REQUIRED_GATES {
+        let status = if report
+            .find(gate.category, gate.name)
+            .is_some_and(|result| result.status == TestStatus::Pass)
+        {
+            "PASS"
+        } else {
+            "FAIL"
+        };
+        console::println!("{:<16} {}", gate.label, status);
+    }
     console::newline();
     console::println!("=========================================");
 }
@@ -270,6 +379,7 @@ pub fn print_help() {
     console::println!("  -v          verbose per-test diagnostics");
     console::println!("  --perf      include performance measurements");
     console::println!("  --stress    include stress tests");
+    console::println!("  --ready     run required kernel-readiness gates only");
     console::println!("  --json      emit machine-readable JSON");
     console::println!("  --help      show this help text");
 }
@@ -280,6 +390,7 @@ fn print_json(report: &ValidationReport) {
     console::println!("  \"failed\": {},", report.failed);
     console::println!("  \"skipped\": {},", report.skipped);
     console::println!("  \"health\": {},", report.health);
+    console::println!("  \"kernel_ready\": {},", report.kernel_ready());
     console::println!("  \"time_ms\": {},", report.time_ms);
     console::println!("  \"tests\": [");
     for (idx, result) in report.results.iter().enumerate() {
@@ -299,7 +410,41 @@ fn print_json(report: &ValidationReport) {
         );
     }
     console::println!("  ]");
+    console::println!(", \"readiness\": [");
+    for (idx, gate) in REQUIRED_GATES.iter().enumerate() {
+        let comma = if idx + 1 == REQUIRED_GATES.len() {
+            ""
+        } else {
+            ","
+        };
+        let passed = report
+            .find(gate.category, gate.name)
+            .is_some_and(|result| result.status == TestStatus::Pass);
+        console::println!(
+            "    {{ \"name\": \"{}\", \"passed\": {} }}{}",
+            json_escape(gate.label),
+            passed,
+            comma
+        );
+    }
+    console::println!("  ]");
     console::println!("}}");
+}
+
+fn readiness_tests() -> Vec<TestCase> {
+    alloc::vec![
+        TestCase::new("CPU", "interrupt enable/disable", test_interrupt_toggle),
+        TestCase::new("Timer", "monotonic ticks", test_timer_monotonic),
+        TestCase::new("Scheduler", "sleep", test_sleep),
+        TestCase::new("Scheduler", "wake", test_wake),
+        TestCase::new("Memory", "page faults", test_page_faults),
+        TestCase::new("Memory", "invalid pointer handling", test_invalid_pointer),
+        TestCase::new("Console", "stderr", test_console_stderr),
+        TestCase::new("Filesystem", "rename", test_fs_rename),
+        TestCase::new("Filesystem", "move", test_fs_move),
+        TestCase::new("Drivers", "keyboard", test_driver_keyboard),
+        TestCase::new("Drivers", "mouse", test_driver_mouse),
+    ]
 }
 
 fn json_escape(input: &str) -> String {
@@ -365,6 +510,7 @@ fn core_tests() -> Vec<TestCase> {
         TestCase::new("Filesystem", "read", test_fs_read),
         TestCase::new("Filesystem", "append", test_fs_append),
         TestCase::new("Filesystem", "rename", test_fs_rename),
+        TestCase::new("Filesystem", "move", test_fs_move),
         TestCase::new("Filesystem", "delete", test_fs_delete),
         TestCase::new("Filesystem", "directory creation", test_fs_directory_create),
         TestCase::new(
@@ -377,6 +523,7 @@ fn core_tests() -> Vec<TestCase> {
         TestCase::new("Timer", "monotonic ticks", test_timer_monotonic),
         TestCase::new("Timer", "sleep advances ticks", test_timer_sleep),
         TestCase::new("Drivers", "keyboard", test_driver_keyboard),
+        TestCase::new("Drivers", "mouse", test_driver_mouse),
         TestCase::new("Drivers", "timer", test_driver_timer),
         TestCase::new("Drivers", "serial", test_driver_serial),
         TestCase::new("Drivers", "framebuffer", test_driver_framebuffer),
@@ -434,7 +581,21 @@ fn test_64bit() -> Result<(), &'static str> {
 }
 
 fn test_interrupt_toggle() -> Result<(), &'static str> {
-    Err("skip: destructive privilege-sensitive interrupt toggling disabled")
+    let was_enabled = interrupt::are_enabled();
+
+    interrupt::disable();
+    if interrupt::are_enabled() {
+        return Err("interrupt disable did not clear IF");
+    }
+
+    if was_enabled {
+        interrupt::enable();
+        if !interrupt::are_enabled() {
+            return Err("interrupt enable did not set IF");
+        }
+    }
+
+    Ok(())
 }
 
 fn test_timer_accuracy() -> Result<(), &'static str> {
@@ -711,7 +872,47 @@ fn test_fs_append() -> Result<(), &'static str> {
 }
 
 fn test_fs_rename() -> Result<(), &'static str> {
-    Err("skip: SAIFS currently exposes create/remove but not rename")
+    saifs::init();
+    let from = temp_path("rename-src");
+    let to = temp_path("rename-dst");
+
+    saifs::touch(&from).map_err(|_| "touch failed")?;
+    vfs::rename(&from, &to).map_err(|_| "rename failed")?;
+
+    if vfs::open_node(&from).is_ok() {
+        return Err("source still exists after rename");
+    }
+    if vfs::open_node(&to).is_err() {
+        return Err("destination missing after rename");
+    }
+
+    saifs::remove(&to).map_err(|_| "cleanup failed")
+}
+
+fn test_fs_move() -> Result<(), &'static str> {
+    saifs::init();
+    let src_dir = temp_path("move-src-dir");
+    let dst_dir = temp_path("move-dst-dir");
+    let src_file = format!("{}/payload", src_dir);
+    let dst_file = format!("{}/payload", dst_dir);
+
+    saifs::mkdir(&src_dir).map_err(|_| "mkdir src failed")?;
+    saifs::mkdir(&dst_dir).map_err(|_| "mkdir dst failed")?;
+    saifs::touch(&src_file).map_err(|_| "touch failed")?;
+
+    vfs::rename(&src_file, &dst_file).map_err(|_| "move failed")?;
+
+    if vfs::open_node(&src_file).is_ok() {
+        return Err("source still exists after move");
+    }
+    if vfs::open_node(&dst_file).is_err() {
+        return Err("destination missing after move");
+    }
+
+    saifs::remove(&dst_file).map_err(|_| "cleanup moved file failed")?;
+    saifs::remove(&src_dir).map_err(|_| "cleanup src dir failed")?;
+    saifs::remove(&dst_dir).map_err(|_| "cleanup dst dir failed")?;
+    Ok(())
 }
 
 fn test_fs_delete() -> Result<(), &'static str> {
@@ -775,7 +976,11 @@ fn test_timer_sleep() -> Result<(), &'static str> {
 }
 
 fn test_driver_keyboard() -> Result<(), &'static str> {
-    driver_exists("keyboard")
+    driver_exists_any(&["keyboard", "hid-keyboard"], &["keyboard0"])
+}
+
+fn test_driver_mouse() -> Result<(), &'static str> {
+    driver_exists_any(&["mouse", "hid-mouse"], &["mouse0"])
 }
 
 fn test_driver_timer() -> Result<(), &'static str> {
@@ -805,6 +1010,25 @@ fn driver_exists(name: &str) -> Result<(), &'static str> {
     } else {
         Err("skip: driver not available on current hardware")
     }
+}
+
+fn driver_exists_any(drivers: &[&str], device_names: &[&str]) -> Result<(), &'static str> {
+    if drivers
+        .iter()
+        .any(|name| crate::kernel::driver::find(name).is_some())
+    {
+        return Ok(());
+    }
+
+    let records = device::devices();
+    if records.iter().any(|record| {
+        drivers.iter().any(|driver| record.driver == *driver)
+            || device_names.iter().any(|name| record.name == *name)
+    }) {
+        return Ok(());
+    }
+
+    Err("skip: driver not available on current hardware")
 }
 
 fn test_perf_memcpy() -> Result<(), &'static str> {
