@@ -257,11 +257,32 @@ fn cmd_cat(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     let path = resolve_relative_path(positionals[0]);
-    let text = saifs::read_text(path.as_str()).map_err(|_| "cat failed")?;
-    if !text.is_empty() {
-        console::println!("{}", text);
+    let data = vfs::read_path(path.as_str()).map_err(|_| "cat failed")?;
+    let text = String::from_utf8_lossy(data.as_slice());
+    let rendered = sanitize_for_terminal(text.as_ref());
+    if !rendered.is_empty() {
+        console::println!("{}", rendered);
     }
     Ok(())
+}
+
+fn sanitize_for_terminal(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        match ch {
+            '\n' | '\t' => out.push(ch),
+            '\r' => out.push('\n'),
+            c if c.is_control() => {
+                if (c as u32) <= 0xFF {
+                    out.push_str(format!("\\x{:02x}", c as u32).as_str());
+                } else {
+                    out.push_str(format!("\\u{{{:x}}}", c as u32).as_str());
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn cmd_rm(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {

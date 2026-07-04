@@ -5,6 +5,8 @@ use core::arch::x86_64::__cpuid_count;
 
 const CPUID_VENDOR: u32 = 0x0000_0000;
 const CPUID_FEATURES: u32 = 0x0000_0001;
+const CPUID_EXT_MAX: u32 = 0x8000_0000;
+const CPUID_EXT_FEATURES: u32 = 0x8000_0001;
 const CPUID_BRAND_START: u32 = 0x8000_0002;
 const FEATURE_EDX_APIC: u32 = 1 << 9;
 const FEATURE_EDX_X2APIC: u32 = 1 << 21;
@@ -12,7 +14,7 @@ const FEATURE_EDX_MSR: u32 = 1 << 5;
 const FEATURE_EDX_TSC: u32 = 1 << 4;
 const FEATURE_ECX_PAT: u32 = 1 << 12;
 const FEATURE_EDX_PAE: u32 = 1 << 6;
-const FEATURE_EDX_NX: u32 = 1 << 20;
+const FEATURE_EXT_EDX_NX: u32 = 1 << 20;
 const FEATURE_ECX_SMEP: u32 = 1 << 7;
 const FEATURE_ECX_SMAP: u32 = 1 << 20;
 const FEATURE_ECX_AVX: u32 = 1 << 28;
@@ -76,6 +78,13 @@ pub fn brand() -> [u8; 48] {
 
 pub fn features() -> CpuFeatures {
     let (_, _, ecx, edx) = cpuid(CPUID_FEATURES);
+    let (ext_max, _, _, _) = cpuid(CPUID_EXT_MAX);
+    let nx = if ext_max >= CPUID_EXT_FEATURES {
+        let (_, _, _, ext_edx) = cpuid(CPUID_EXT_FEATURES);
+        (ext_edx & FEATURE_EXT_EDX_NX) != 0
+    } else {
+        false
+    };
 
     CpuFeatures {
         apic: edx & FEATURE_EDX_APIC != 0,
@@ -84,7 +93,7 @@ pub fn features() -> CpuFeatures {
         tsc: edx & FEATURE_EDX_TSC != 0,
         pat: ecx & FEATURE_ECX_PAT != 0,
         pae: edx & FEATURE_EDX_PAE != 0,
-        nx: edx & FEATURE_EDX_NX != 0,
+        nx,
         smep: ecx & FEATURE_ECX_SMEP != 0,
         smap: ecx & FEATURE_ECX_SMAP != 0,
         avx: ecx & FEATURE_ECX_AVX != 0,

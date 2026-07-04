@@ -7,7 +7,7 @@ use core::sync::atomic::{compiler_fence, fence, AtomicBool, Ordering};
 use hal::arch::x86_64::sync::StaticCell;
 
 use crate::pci;
-use crate::{pmm, vmm};
+use crate::{heap, pmm, vmm};
 
 const PCI_COMMAND_OFFSET: u8 = 0x04;
 const PCI_COMMAND_MEMORY_SPACE: u16 = 1 << 1;
@@ -325,12 +325,7 @@ fn wait_until_port_timeout(mmio: *mut u8, port: u8, reg: usize, mask: u32, set: 
         if matches == set {
             return true;
         }
-        if (i & 0x3FF) == 0 {
-            crate::scheduler::maybe_preempt();
-            if (i & 0x3FFF) == 0 {
-                crate::scheduler::yield_now();
-            }
-        }
+        let _ = i;
         core::hint::spin_loop();
     }
     false
@@ -412,12 +407,7 @@ fn wait_port_ready(mmio: *mut u8, port: u8) -> Result<(), &'static str> {
         if (tfd & (AHCI_TFD_BSY | AHCI_TFD_DRQ)) == 0 {
             return Ok(());
         }
-        if (i & 0x3FF) == 0 {
-            crate::scheduler::maybe_preempt();
-            if (i & 0x3FFF) == 0 {
-                crate::scheduler::yield_now();
-            }
-        }
+        let _ = i;
         core::hint::spin_loop();
     }
     Err("ahci: port busy timeout")
@@ -481,12 +471,7 @@ fn issue_ata_command(
         if (ci & 1) == 0 {
             return Ok(());
         }
-        if (i & 0x3FF) == 0 {
-            crate::scheduler::maybe_preempt();
-            if (i & 0x3FFF) == 0 {
-                crate::scheduler::yield_now();
-            }
-        }
+        let _ = i;
         core::hint::spin_loop();
     }
 
@@ -570,6 +555,13 @@ fn rescan_locked(state: &mut AhciState) {
     state.bindings.clear();
     state.diagnostics.clear();
     state.next_disk_id = 1;
+
+    if heap::identity_mode_enabled() {
+        state
+            .diagnostics
+            .push("stage=controller_init detail=AHCI MMIO scan skipped in VMM fallback mode".to_string());
+        return;
+    }
 
     let mut index = 0usize;
     let mut detected_any = false;

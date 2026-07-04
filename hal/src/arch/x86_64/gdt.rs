@@ -23,13 +23,6 @@ const GDT_TSS_AVAILABLE_DESCRIPTOR_TYPE: u64 = 0x89;
 /// Global GDT storage.
 static GDT: StaticCell<GlobalDescriptorTable> = StaticCell::new(GlobalDescriptorTable::new());
 
-#[repr(C, packed)]
-#[derive(Copy, Clone)]
-struct GdtPointer {
-    limit: u16,
-    base: u64,
-}
-
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 struct SystemDescriptor {
@@ -56,11 +49,13 @@ impl GlobalDescriptorTable {
         Self { entries: [0; 7] }
     }
 
-    fn pointer(&self) -> GdtPointer {
-        GdtPointer {
-            limit: (size_of::<[u64; 7]>() - 1) as u16,
-            base: self.entries.as_ptr() as u64,
-        }
+    fn pointer_bytes(&self) -> [u8; 10] {
+        let limit = (size_of::<[u64; 7]>() - 1) as u16;
+        let base = self.entries.as_ptr() as u64;
+        let mut raw = [0u8; 10];
+        raw[0..2].copy_from_slice(&limit.to_le_bytes());
+        raw[2..10].copy_from_slice(&base.to_le_bytes());
+        raw
     }
 
     fn install_segments(&mut self) {
@@ -91,12 +86,12 @@ impl GlobalDescriptorTable {
     }
 
     unsafe fn load(&'static self) {
-        let ptr = self.pointer();
+        let ptr = self.pointer_bytes();
 
         unsafe {
             asm!(
                 "lgdt [{}]",
-                in(reg) &ptr,
+                in(reg) ptr.as_ptr(),
                 options(readonly, nostack, preserves_flags)
             );
         }

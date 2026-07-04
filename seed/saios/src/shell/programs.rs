@@ -205,11 +205,31 @@ fn cat_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let close_result = vfs::close(fd);
     let data = read_result.map_err(|_| "cat: read failed")?;
     close_result.map_err(|_| "cat: close failed")?;
-    let text = String::from_utf8_lossy(&data).into_owned();
-    if !text.is_empty() {
-        console::println!("{}", text);
+    let text = String::from_utf8_lossy(&data);
+    let rendered = sanitize_for_terminal(text.as_ref());
+    if !rendered.is_empty() {
+        console::println!("{}", rendered);
     }
     Ok(0)
+}
+
+fn sanitize_for_terminal(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        match ch {
+            '\n' | '\t' => out.push(ch),
+            '\r' => out.push('\n'),
+            c if c.is_control() => {
+                if (c as u32) <= 0xFF {
+                    out.push_str(format!("\\x{:02x}", c as u32).as_str());
+                } else {
+                    out.push_str(format!("\\u{{{:x}}}", c as u32).as_str());
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn mkdir_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {

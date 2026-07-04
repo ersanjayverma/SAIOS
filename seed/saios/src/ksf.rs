@@ -152,21 +152,14 @@ impl ServiceManager {
     fn init_at(&mut self, idx: usize) -> Result<(), &'static str> {
         match self.states[idx] {
             ServiceState::Registered | ServiceState::Stopped => {
-                crate::console::println!("[BOOTCHK] init {}", self.services[idx].name());
                 self.states[idx] = ServiceState::Initializing;
                 match self.services[idx].initialize() {
                     Ok(()) => {
                         self.states[idx] = ServiceState::Ready;
-                        crate::console::println!("[BOOTCHK] init ok {}", self.services[idx].name());
                         Ok(())
                     }
                     Err(e) => {
                         self.states[idx] = ServiceState::Failed;
-                        crate::console::println!(
-                            "[BOOTCHK] init fail {}: {}",
-                            self.services[idx].name(),
-                            e
-                        );
                         Err(e)
                     }
                 }
@@ -191,22 +184,14 @@ impl ServiceManager {
 
         self.init_at(idx)?;
 
-        crate::console::println!("[BOOTCHK] start {}", self.services[idx].name());
-
         match self.services[idx].start() {
             Ok(()) => {
                 self.states[idx] = ServiceState::Running;
                 crate::kernel::timeline::mark_service(self.services[idx].name());
-                crate::console::println!("[BOOTCHK] start ok {}", self.services[idx].name());
                 Ok(())
             }
             Err(e) => {
                 self.states[idx] = ServiceState::Failed;
-                crate::console::println!(
-                    "[BOOTCHK] start fail {}: {}",
-                    self.services[idx].name(),
-                    e
-                );
                 Err(e)
             }
         }
@@ -706,14 +691,11 @@ impl KernelService for UserSessionService {
     }
 
     fn initialize(&mut self) -> Result<(), &'static str> {
-        crate::console::println!("[BOOTCHK] user-session.initialize.enter");
         scheduler::prepare_default_user_session()?;
-        crate::console::println!("[BOOTCHK] user-session.initialize.ok");
         Ok(())
     }
 
     fn start(&mut self) -> Result<(), &'static str> {
-        crate::console::println!("[BOOTCHK] user-session.start.enter");
         scheduler::start_default_user_session()
     }
 
@@ -889,11 +871,20 @@ impl KernelService for StorageDiscoveryService {
 
     fn initialize(&mut self) -> Result<(), &'static str> {
         crate::driver::storage::init();
-        crate::driver::storage::start_scan_worker();
         Ok(())
     }
 
     fn start(&mut self) -> Result<(), &'static str> {
+        crate::console::println!("storage: foreground scan begin");
+        crate::driver::storage::request_rescan();
+        let status = crate::driver::storage::scan_status();
+        crate::console::println!(
+            "storage: foreground scan done phase={} disks={} volumes={} failures={}",
+            status.phase,
+            status.disks,
+            status.volumes,
+            status.failures
+        );
         Ok(())
     }
 

@@ -388,7 +388,6 @@ pub fn prepare_default_user_session() -> Result<(), &'static str> {
 }
 
 fn default_user_session_entry() {
-    crate::console::println!("[BOOTCHK] scheduler.user.entry");
     crate::shell::program_main();
 }
 
@@ -401,11 +400,8 @@ pub fn start_default_user_session() -> Result<(), &'static str> {
         return Ok(());
     }
 
-    crate::console::println!("[BOOTCHK] scheduler.user.spawn");
     let _ = spawn(default_user_session_entry);
-    crate::console::println!("[BOOTCHK] scheduler.user.spawned");
     yield_now();
-    crate::console::println!("[BOOTCHK] scheduler.user.yielded");
     Ok(())
 }
 

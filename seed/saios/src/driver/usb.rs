@@ -147,11 +147,27 @@ impl UsbState {
 
 static STATE: StaticCell<Option<UsbState>> = StaticCell::new(None);
 static LOCK: AtomicBool = AtomicBool::new(false);
+static FALLBACK_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
 static KEY_QUEUE: StaticCell<Deque<KeyEvent, 128>> = StaticCell::new(Deque::new());
 static KEY_QUEUE_LOCK: AtomicBool = AtomicBool::new(false);
 static MOUSE_QUEUE: StaticCell<Deque<MouseEvent, 64>> = StaticCell::new(Deque::new());
 static MOUSE_QUEUE_LOCK: AtomicBool = AtomicBool::new(false);
 static HID_KEYBOARD_STATE: StaticCell<HidKeyboardState> = StaticCell::new(HidKeyboardState::new());
+
+fn probing_allowed() -> bool {
+    !crate::heap::identity_mode_enabled()
+}
+
+fn log_fallback_probe_skip_once() {
+    if FALLBACK_SKIP_LOGGED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        hal::arch::x86_64::console::_print(format_args!(
+            "usb: probe skipped in fallback identity mode\n"
+        ));
+    }
+}
 
 fn lock() {
     while LOCK
@@ -664,6 +680,12 @@ pub fn init() {
         if state.initialized {
             return;
         }
+        if !probing_allowed() {
+            state.controllers.clear();
+            state.initialized = true;
+            log_fallback_probe_skip_once();
+            return;
+        }
         rescan_locked(state);
         state.initialized = true;
     });
@@ -671,6 +693,12 @@ pub fn init() {
 
 pub fn rescan() {
     with_state_mut(|state| {
+        if !probing_allowed() {
+            state.controllers.clear();
+            state.initialized = true;
+            log_fallback_probe_skip_once();
+            return;
+        }
         rescan_locked(state);
         state.initialized = true;
     });

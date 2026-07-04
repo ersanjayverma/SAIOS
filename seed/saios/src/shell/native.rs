@@ -552,6 +552,11 @@ pub fn register(registry: &mut CommandRegistry) {
         handler: cmd_volumes,
     }));
     registry.register(Box::new(StaticCommand {
+        name: "diskpart",
+        description: "Alias for volumes (disk/volume management)",
+        handler: cmd_volumes,
+    }));
+    registry.register(Box::new(StaticCommand {
         name: "volumes",
         description: "Manage storage volumes, disks, scan, and mounts",
         handler: cmd_volumes,
@@ -2382,6 +2387,27 @@ fn print_cached_mounts() {
     }
 }
 
+fn print_volume_info(name: &str) -> ShellResult {
+    let volume =
+        disk::find_volume_cached(name).ok_or("volumes: volume not found (run 'volumes scan')")?;
+    console::println!("Volume Info");
+    console::println!("===========");
+    console::println!("  name      : {}", volume.name);
+    console::println!("  fs        : {}", volume.filesystem.as_str());
+    console::println!("  size_mb   : {}", volume.total_bytes / (1024 * 1024));
+    console::println!("  sector    : {}", volume.sector_size);
+    console::println!(
+        "  access    : {}",
+        if volume.writable { "rw" } else { "ro" }
+    );
+    console::println!("  backing   : {}", volume.backing);
+    console::println!(
+        "  mounted   : {}",
+        volume.mounted_at.as_deref().unwrap_or("-")
+    );
+    Ok(())
+}
+
 fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let action = args.first().copied().unwrap_or("list");
 
@@ -2393,12 +2419,42 @@ fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             console::println!("volumes ahci            Show cached AHCI controllers/disks");
             console::println!("volumes mounts          Show VFS mounts and volumes");
             console::println!("volumes scan            Request background storage discovery");
+            console::println!("volumes info <vol>      Show volume details");
+            console::println!("volumes format <vol> <fs>  Format a volume (ext4/ntfs/fat16/fat32/fat64/fat128)");
+            console::println!("volumes mount <vol> <path> [ro]  Mount a volume");
+            console::println!("volumes umount <path>   Unmount a mounted path");
             console::println!("volumes check           Storage check summary");
             console::println!("volume                  Alias for volumes");
+            console::println!("diskpart                Alias for volumes");
             console::println!("disks                   Alias for volumes disks");
             console::println!("scan                    Alias for volumes scan");
             Ok(())
         }
+        "info" => {
+            let name = args
+                .get(1)
+                .copied()
+                .ok_or("volumes info: missing volume name")?;
+            print_volume_info(name)
+        }
+        "format" => {
+            let name = args
+                .get(1)
+                .copied()
+                .ok_or("volumes format: missing volume name")?;
+            let fs_str = args
+                .get(2)
+                .copied()
+                .ok_or("volumes format: missing filesystem type")?;
+            let fs = disk::FilesystemKind::from_str(fs_str).ok_or(
+                "volumes format: unknown filesystem; use ext4|ntfs|fat16|fat32|fat64|fat128",
+            )?;
+            disk::format_volume(name, fs)?;
+            console::println!("volumes: '{}' formatted as {}", name, fs.as_str());
+            Ok(())
+        }
+        "mount" => cmd_mount(_ctx, &args[1..]),
+        "umount" => cmd_umount(_ctx, &args[1..]),
         "scan" | "rescan" => {
             console::println!("volumes: scan requested");
             disk::request_rescan();
@@ -2418,7 +2474,7 @@ fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             print_cached_ahci();
             Ok(())
         }
-        "mounts" | "mount" => {
+        "mounts" => {
             print_cached_mounts();
             console::println!("");
             print_cached_volumes();
@@ -2444,6 +2500,12 @@ fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             Ok(())
         }
     }
+}
+
+pub fn run_diskpart_alias(args: &[&str], _env: &[(String, String)]) -> Result<i32, &'static str> {
+    let mut ctx = CommandContext::new();
+    cmd_volumes(&mut ctx, args)?;
+    Ok(0)
 }
 
 fn cmd_disks(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
@@ -2629,7 +2691,11 @@ fn cmd_storage(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
                 .filter(|v| v.name != "tmpfs")
                 .collect();
             if real_volumes.is_empty() {
-                console::println!("  FAIL: no non-tmpfs volumes");
+                if !storage_pci.is_empty() {
+                    console::println!("  INFO: no non-tmpfs volumes (controller present; driver support may be pending)");
+                } else {
+                    console::println!("  FAIL: no non-tmpfs volumes");
+                }
             } else {
                 for v in &real_volumes {
                     console::println!(

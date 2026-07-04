@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use core::mem;
 use core::ptr;
 
+use crate::heap;
 use crate::vmm;
 
 const PAGE_SIZE: u64 = 4096;
@@ -18,7 +19,7 @@ fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
 }
 
-fn map_pages_for_range(phys_addr: u64, len: usize) -> Result<(u64, u64, usize), &'static str> {
+fn map_pages_for_range(phys_addr: u64, len: usize) -> Result<(u64, u64, usize, bool), &'static str> {
     if len == 0 {
         return Err("ACPI: cannot map zero-length range");
     }
@@ -28,8 +29,13 @@ fn map_pages_for_range(phys_addr: u64, len: usize) -> Result<(u64, u64, usize), 
     let span = page_offset.saturating_add(len as u64);
     let pages = span.div_ceil(PAGE_SIZE) as usize;
 
+    if heap::identity_mode_enabled() {
+        // Fallback mode: rely on identity/direct visibility of physical memory.
+        return Ok((aligned_phys, page_offset, pages, false));
+    }
+
     let mapped_base = vmm::map_physical_anywhere(aligned_phys, pages, ACPI_MAP_FLAGS, "acpi")?;
-    Ok((mapped_base, page_offset, pages))
+    Ok((mapped_base, page_offset, pages, true))
 }
 
 fn with_physical_bytes<R>(
@@ -37,11 +43,13 @@ fn with_physical_bytes<R>(
     len: usize,
     f: impl FnOnce(&[u8]) -> Result<R, &'static str>,
 ) -> Result<R, &'static str> {
-    let (mapped_base, page_offset, _pages) = map_pages_for_range(phys_addr, len)?;
+    let (mapped_base, page_offset, _pages, mapped_via_vmm) = map_pages_for_range(phys_addr, len)?;
     let virt_ptr = (mapped_base.saturating_add(page_offset)) as *const u8;
     let bytes = unsafe { core::slice::from_raw_parts(virt_ptr, len) };
     let out = f(bytes);
-    let _ = vmm::unmap(mapped_base);
+    if mapped_via_vmm {
+        let _ = vmm::unmap(mapped_base);
+    }
     out
 }
 

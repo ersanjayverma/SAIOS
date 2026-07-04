@@ -20,6 +20,8 @@ use crate::pci;
 const FAT_STORE_MAGIC: &[u8; 8] = b"SAFAT32\0";
 const FAT_STORE_VERSION: u32 = 1;
 const PARTITION_PROBE_WINDOW_BYTES: usize = 4096;
+const MOUNT_TREE_READ_WINDOW_BYTES: usize = 256 * 1024;
+const MOUNT_TREE_WRITE_WINDOW_BYTES: usize = MOUNT_TREE_READ_WINDOW_BYTES;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum FilesystemKind {
@@ -544,8 +546,57 @@ fn default_ro_tree(fs: FilesystemKind) -> Vec<FsNode> {
     nodes
 }
 
+fn default_rw_tree(fs: FilesystemKind) -> Vec<FsNode> {
+    if fs == FilesystemKind::Fat32 {
+        return default_fat_tree();
+    }
+
+    let mut nodes = vec![
+        FsNode {
+            path: "/".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        },
+        FsNode {
+            path: "/boot".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        },
+        FsNode {
+            path: "/etc".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        },
+        FsNode {
+            path: "/home".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        },
+        FsNode {
+            path: "/mnt".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        },
+        FsNode {
+            path: "/tmp".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        },
+    ];
+
+    if fs == FilesystemKind::Ext4 {
+        nodes.push(FsNode {
+            path: "/lost+found".to_string(),
+            kind: FsNodeKind::Directory,
+            data: Vec::new(),
+        });
+    }
+
+    nodes
+}
+
 fn fs_supports_rw_tree(fs: FilesystemKind) -> bool {
-    fs == FilesystemKind::Fat32
+    fs == FilesystemKind::Fat32 || fs == FilesystemKind::Ext4
 }
 
 fn fs_supports_mount_tree(fs: FilesystemKind) -> bool {
@@ -649,7 +700,12 @@ fn write_partition_bytes(
     let mut lba = part.start_lba;
     let mut at = 0usize;
     let mut scratch = vec![0u8; sector_size];
-    let max_lba = part.start_lba.saturating_add(part.sector_count);
+    let window_sectors = MOUNT_TREE_WRITE_WINDOW_BYTES
+        .div_ceil(sector_size)
+        .max(1) as u64;
+    let max_lba = part
+        .start_lba
+        .saturating_add(core::cmp::min(part.sector_count, window_sectors));
 
     while lba < max_lba {
         if at >= bytes.len() {
@@ -674,7 +730,12 @@ fn write_partition_bytes(
 fn read_partition_bytes(disk: &DiskDevice, part: &Partition) -> Result<Vec<u8>, &'static str> {
     let sector_size = disk.block.sector_size() as usize;
     let mut lba = part.start_lba;
-    let max_lba = part.start_lba.saturating_add(part.sector_count);
+    let window_sectors = MOUNT_TREE_READ_WINDOW_BYTES
+        .div_ceil(sector_size)
+        .max(1) as u64;
+    let max_lba = part
+        .start_lba
+        .saturating_add(core::cmp::min(part.sector_count, window_sectors));
     let mut scratch = vec![0u8; sector_size];
     let mut out = Vec::new();
 
@@ -726,7 +787,11 @@ fn resolve_volume_owner(
     Err("storage: volume backend unavailable")
 }
 
-fn load_volume_tree(state: &StorageState, volume: &str) -> Result<Vec<FsNode>, &'static str> {
+fn load_volume_tree(
+    state: &StorageState,
+    volume: &str,
+    fs: FilesystemKind,
+) -> Result<Vec<FsNode>, &'static str> {
     let (disk_name, part_name) = resolve_volume_owner(state, volume)?;
     let disk = state
         .disks
@@ -740,7 +805,15 @@ fn load_volume_tree(state: &StorageState, volume: &str) -> Result<Vec<FsNode>, &
         .ok_or("storage: partition missing")?;
 
     let bytes = read_partition_bytes(disk, part)?;
-    Ok(deserialize_tree(bytes.as_slice()).unwrap_or_else(default_fat_tree))
+    if let Some(nodes) = deserialize_tree(bytes.as_slice()) {
+        return Ok(nodes);
+    }
+
+    if fs == FilesystemKind::Ext4 || fs == FilesystemKind::Ntfs {
+        return Err("storage: native filesystem parsing for this volume is not implemented yet");
+    }
+
+    Ok(default_rw_tree(fs))
 }
 
 fn probe_partition_filesystem(disk: &DiskDevice, part: &Partition) -> Option<FilesystemKind> {
@@ -1008,9 +1081,25 @@ fn discover_disks_from_pci(diagnostics: &mut Vec<String>) -> Vec<DiskDevice> {
         if dev.subclass == 0x06 && dev.prog_if == 0x01 {
             continue;
         }
+        let detail = if dev.subclass == 0x08 && dev.prog_if == 0x02 {
+            "NVMe controller detected; NVMe driver not implemented yet"
+        } else if dev.subclass == 0x04 {
+            "RAID controller detected; AHCI mode may be required in firmware"
+        } else if dev.subclass == 0x01 {
+            "IDE controller detected; legacy IDE path not implemented"
+        } else {
+            "storage controller class detected but no matching kernel driver"
+        };
         diagnostics.push(format!(
-            "stage=pci_detection controller={:02x}:{:02x}.{} vendor={:04x} device={:04x} detail=unsupported storage controller skipped",
-            dev.bus, dev.device, dev.function, dev.vendor_id, dev.device_id
+            "stage=pci_detection controller={:02x}:{:02x}.{} vendor={:04x} device={:04x} subclass={:02x} prog_if={:02x} detail={}",
+            dev.bus,
+            dev.device,
+            dev.function,
+            dev.vendor_id,
+            dev.device_id,
+            dev.subclass,
+            dev.prog_if,
+            detail
         ));
     }
 
@@ -1038,8 +1127,8 @@ fn ensure_volume_mounted(
         return Err("storage: filesystem backend not implemented");
     }
 
-    let nodes = if fs == FilesystemKind::Fat32 {
-        load_volume_tree(state, volume)?
+    let nodes = if fs_supports_rw_tree(fs) {
+        load_volume_tree(state, volume, fs)?
     } else {
         default_ro_tree(fs)
     };
@@ -1339,7 +1428,7 @@ pub fn umount_volume(path: &str) -> Result<(), &'static str> {
             .position(|v| v.mounted_at.as_deref() == Some(path))
             .ok_or("storage: no volume mounted at that path")?;
 
-        if state.volumes[idx].filesystem == FilesystemKind::Fat32 {
+        if fs_supports_rw_tree(state.volumes[idx].filesystem) {
             let name = state.volumes[idx].name.clone();
             let _ = save_mounted_volume(state, name.as_str());
             state
@@ -1375,7 +1464,7 @@ pub fn format_volume(name: &str, fs: FilesystemKind) -> Result<(), &'static str>
         }
 
         state.volumes[idx].filesystem = fs;
-        if fs == FilesystemKind::Fat32 {
+        if fs_supports_rw_tree(fs) {
             let (disk_name, part_name) = resolve_volume_owner(state, name)?;
             let disk = state
                 .disks
@@ -1389,7 +1478,8 @@ pub fn format_volume(name: &str, fs: FilesystemKind) -> Result<(), &'static str>
                 .ok_or("storage: partition missing")?
                 .clone();
 
-            let bytes = serialize_tree(default_fat_tree().as_slice());
+            let tree = default_rw_tree(fs);
+            let bytes = serialize_tree(tree.as_slice());
             write_partition_bytes(disk, &part, bytes.as_slice())?;
             disk.block.flush();
         }

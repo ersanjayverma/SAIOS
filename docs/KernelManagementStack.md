@@ -157,6 +157,13 @@ Device Manager is implemented in `kernel/device.rs`.
   - framebuffer device when framebuffer attaches
 - Storage block devices and partitions are surfaced in device views through provider enumeration of device-manager records.
 
+### Input/runtime hardening notes (2026-07-05)
+
+- Shell prompt stability takes priority over aggressive runtime input probing in fallback mode.
+- PS/2 input initialization remains in console bring-up.
+- USB HID can be used as fallback input when available, but continuous prompt-loop recovery/rescan behavior is avoided in fallback mode.
+- Prompt startup no longer auto-clears the screen; boot diagnostics remain visible until operator action.
+
 ## 4.1 Single-Core Storage Scan Mode
 
 Current kernel mode is single-core correctness-first.

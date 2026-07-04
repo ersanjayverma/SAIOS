@@ -7,7 +7,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{fence, AtomicBool, Ordering};
 
 use hal::arch::paging;
 use hal::arch::x86_64::sync::StaticCell;
@@ -24,9 +24,13 @@ pub type PhysAddr = u64;
 pub const PAGE_SIZE: u64 = 4096;
 /// Base of the kernel's higher-half virtual address space.
 pub const KERNEL_VIRT_BASE: VirtAddr = 0xFFFF_8000_0000_0000;
+/// Dedicated higher-half mirror window used for early kernel image mappings.
+pub const KERNEL_IMAGE_MIRROR_BASE: VirtAddr = 0xFFFF_9000_0000_0000;
 /// Page-table slot used for recursive mapping.
 const RECURSIVE_SLOT: u64 = 511;
+const EARLY_TABLE_MIN_PHYS: u64 = 0x0010_0000; // 1 MiB
 const EARLY_TABLE_MAX_PHYS: u64 = 0x4000_0000; // 1 GiB
+const EARLY_TABLE_FALLBACK_MIN_PHYS: u64 = 0x0000_1000; // avoid page 0
 
 /// Page-table flag: readable.
 pub const FLAG_READ: u64 = 1 << 0;
@@ -107,6 +111,15 @@ impl VmmState {
 
 static STATE: StaticCell<Option<VmmState>> = StaticCell::new(None);
 static LOCK: AtomicBool = AtomicBool::new(false);
+static NX_PAGE_PROTECTION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_nx_page_protection_enabled(enabled: bool) {
+    NX_PAGE_PROTECTION_ENABLED.store(enabled, Ordering::Release);
+}
+
+pub fn nx_page_protection_enabled() -> bool {
+    NX_PAGE_PROTECTION_ENABLED.load(Ordering::Acquire)
+}
 
 fn lock() {
     while LOCK
@@ -275,7 +288,7 @@ fn leaf_flags(vmm_flags: u64) -> u64 {
             f |= paging::FLAG_PCD | paging::FLAG_PWT;
         }
     }
-    if (vmm_flags & FLAG_EXEC) == 0 {
+    if nx_page_protection_enabled() && (vmm_flags & FLAG_EXEC) == 0 {
         f |= paging::FLAG_NX;
     }
     f
@@ -389,20 +402,43 @@ fn translate_hw(virt: VirtAddr) -> Option<PhysAddr> {
 fn alloc_zeroed_table() -> Result<PhysAddr, &'static str> {
     // Before we switch CR3, only low physical memory is guaranteed to be
     // identity-mapped on all firmware implementations.
-    let mut phys = None;
-    for _ in 0..4096usize {
+    let mut held = [0u64; 4096];
+    let mut held_count = 0usize;
+
+    let mut preferred: Option<u64> = None;
+    while held_count < held.len() {
         let candidate = pmm::alloc_page().ok_or("vmm: out of memory allocating page table")?;
-        if candidate < EARLY_TABLE_MAX_PHYS {
-            phys = Some(candidate);
+        held[held_count] = candidate;
+        held_count += 1;
+
+        if (EARLY_TABLE_MIN_PHYS..EARLY_TABLE_MAX_PHYS).contains(&candidate) {
+            preferred = Some(candidate);
             break;
         }
-        pmm::free_page(candidate);
     }
 
-    let phys = phys.ok_or("vmm: no low-memory page available for page table")?;
-    let table = unsafe { &mut *(phys as *mut paging::Table) };
+    let chosen = if let Some(p) = preferred {
+        p
+    } else {
+        let mut fallback = None;
+        for &candidate in held.iter().take(held_count) {
+            if (EARLY_TABLE_FALLBACK_MIN_PHYS..EARLY_TABLE_MAX_PHYS).contains(&candidate) {
+                fallback = Some(candidate);
+                break;
+            }
+        }
+        fallback.ok_or("vmm: no suitable low-memory page available for page table")?
+    };
+
+    for &candidate in held.iter().take(held_count) {
+        if candidate != chosen {
+            pmm::free_page(candidate);
+        }
+    }
+
+    let table = unsafe { &mut *(chosen as *mut paging::Table) };
     table.clear();
-    Ok(phys)
+    Ok(chosen)
 }
 
 fn map_kernel_page(
@@ -505,6 +541,83 @@ fn map_range_identity(
     Ok(())
 }
 
+fn map_range_higher_half_mirror(
+    root: &mut paging::Table,
+    start: u64,
+    end: u64,
+    flags: u64,
+) -> Result<(), &'static str> {
+    let mut current = align_down(start, PAGE_SIZE as u64);
+    let limit = align_up(end, PAGE_SIZE as u64);
+    while current < limit {
+        let virt = KERNEL_IMAGE_MIRROR_BASE
+            .checked_add(current)
+            .ok_or("vmm: higher-half mirror overflow")?;
+        match map_kernel_page(root, virt, current, flags) {
+            Ok(_) => {}
+            Err("vmm: page already mapped") => {
+                // Reuse existing mapping; this range can be re-entered during retries.
+            }
+            Err(e) => return Err(e),
+        }
+        current = current.saturating_add(PAGE_SIZE);
+    }
+    Ok(())
+}
+
+/// Performs structural validation of a prepared kernel PML4 root.
+pub fn validate_prepared_kernel_pml4(root_phys: PhysAddr) -> Result<(), &'static str> {
+    if !is_page_aligned(root_phys) {
+        return Err("vmm: pml4 root must be page aligned");
+    }
+
+    let pml4 = unsafe { &*(root_phys as *const paging::Table) };
+    let recursive = pml4.entries[RECURSIVE_SLOT as usize];
+    if !recursive.is_present() {
+        return Err("vmm: recursive pml4 entry missing");
+    }
+    if recursive.address() != root_phys {
+        return Err("vmm: recursive pml4 entry address mismatch");
+    }
+
+    Ok(())
+}
+
+/// Returns true when `virt` resolves to a present mapping in `root_phys` page tables.
+pub fn is_mapped_in_page_tables(root_phys: PhysAddr, virt: VirtAddr) -> Result<bool, &'static str> {
+    if !is_page_aligned(root_phys) {
+        return Err("vmm: root page table must be page aligned");
+    }
+
+    let (l4, l3, l2, l1, _) = level_indices(virt);
+    let pml4 = unsafe { &*(root_phys as *const paging::Table) };
+    let pml4e = pml4.entries[l4];
+    if !pml4e.is_present() {
+        return Ok(false);
+    }
+
+    let pdpt = unsafe { &*(pml4e.address() as *const paging::Table) };
+    let pdpte = pdpt.entries[l3];
+    if !pdpte.is_present() {
+        return Ok(false);
+    }
+    if (pdpte.0 & paging::FLAG_HUGE) != 0 {
+        return Ok(true);
+    }
+
+    let pd = unsafe { &*(pdpte.address() as *const paging::Table) };
+    let pde = pd.entries[l2];
+    if !pde.is_present() {
+        return Ok(false);
+    }
+    if (pde.0 & paging::FLAG_HUGE) != 0 {
+        return Ok(true);
+    }
+
+    let pt = unsafe { &*(pde.address() as *const paging::Table) };
+    Ok(pt.entries[l1].is_present())
+}
+
 pub fn bootstrap_kernel_page_tables(
     framebuffer_base: u64,
     framebuffer_size: usize,
@@ -524,6 +637,7 @@ pub fn bootstrap_kernel_page_tables(
 
     if kernel_end > kernel_start {
         map_range_identity(root, kernel_start, kernel_end, ram_flags)?;
+        map_range_higher_half_mirror(root, kernel_start, kernel_end, ram_flags)?;
     }
     if boot_info_size > 0 {
         let start = align_down(boot_info_ptr, PAGE_SIZE as u64);
@@ -550,12 +664,16 @@ pub fn bootstrap_kernel_page_tables(
 
 /// Activates a prepared PML4 by loading CR3.
 pub fn activate_kernel_page_tables(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
-    if !is_page_aligned(kernel_pml4_phys) {
-        return Err("vmm: cr3 physical address must be page aligned");
+    let target = kernel_pml4_phys & 0x000F_FFFF_FFFF_F000;
+    if target == 0 {
+        return Err("vmm: cr3 physical address must be non-zero");
     }
 
+    // Ensure page-table writes are globally visible before loading CR3.
+    fence(Ordering::SeqCst);
+
     unsafe {
-        paging::write_cr3(kernel_pml4_phys);
+        paging::write_cr3(target);
     }
     Ok(())
 }
@@ -574,6 +692,22 @@ pub fn init(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
         state.cr3 = kernel_pml4_phys;
         state.initialized = true;
         state.next_kernel_virt = KERNEL_VIRT_BASE;
+        Ok(())
+    })
+}
+
+/// Updates tracked CR3 after a successful page-table switch.
+pub fn set_active_cr3(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
+    let target = kernel_pml4_phys & 0x000F_FFFF_FFFF_F000;
+    if target == 0 {
+        return Err("vmm: cr3 physical address must be non-zero");
+    }
+
+    with_state_mut(|state| {
+        if !state.initialized {
+            return Err("vmm: not initialized");
+        }
+        state.cr3 = target;
         Ok(())
     })
 }

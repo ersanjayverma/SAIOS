@@ -4,6 +4,32 @@ Status: Active milestone
 Owner: Kernel correctness and reliability
 Last updated: 2026-07-05
 
+## Recent Findings (2026-07-05)
+
+Real-hardware bring-up produced additional correctness findings relevant to v0.3 gates:
+
+1. Late CR3 preflight must validate full descriptor-table ranges, not just bases.
+	- Checking only `idt_base`/`gdt_base` can miss cross-page gaps.
+	- Preflight now verifies IDT/GDT base plus end (`base + limit`) before switch.
+
+2. Packed descriptor-pointer access in low-level x86 paths is fragile.
+	- `sidt/sgdt/lgdt/lidt` handling was hardened by using raw 10-byte buffers with explicit decode/encode.
+	- This avoids alignment-sensitive packed-field access in critical descriptor-table paths.
+
+3. Prompt-time input recovery loops can fault in fallback-mode runtime.
+	- A prompt-time panic was observed with page fault `cr2=0xffff800000001014` after introducing aggressive runtime recovery logic.
+	- Recovery loops were removed from `poll_input`; fallback-safe init path is preferred.
+
+4. Fallback-mode input policy is stability-first.
+	- PS/2 remains primary in fallback mode.
+	- USB HID probing/rescan loops are not run continuously from the shell poll path in fallback mode.
+
+5. Shell startup should not erase triage context before first interaction.
+	- Automatic startup `clear` was removed so operators can retain visible boot/input diagnostics.
+
+6. Foreground storage scan remains required and validated.
+	- Storage discovery runs synchronously in boot service startup and reports completion status deterministically.
+
 ## Milestone Goal
 
 Stabilize kernel correctness primitives before user-space expansion.

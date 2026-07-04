@@ -348,13 +348,28 @@ pub fn on_timer_tick() {
 pub fn init() {
     SerialConsole::init();
     let keyboard_ready = unsafe { (*KEYBOARD.get()).init() };
+    let mut usb_input_ready = false;
     unsafe {
         (*MOUSE.get()).init();
     }
     if !keyboard_ready {
-        hal::arch::x86_64::console::_print(format_args!(
-            "console: PS/2 keyboard unavailable; USB probing deferred until explicit usb/rescan command\n"
-        ));
+        if crate::heap::identity_mode_enabled() {
+            hal::arch::x86_64::console::_print(format_args!(
+                "console: PS/2 keyboard unavailable; USB HID probe skipped in fallback mode\n"
+            ));
+        } else {
+            usb::init();
+            usb_input_ready = usb::hid_input_ready();
+            if usb_input_ready {
+                hal::arch::x86_64::console::_print(format_args!(
+                    "console: PS/2 keyboard unavailable; USB HID input fallback active\n"
+                ));
+            } else {
+                hal::arch::x86_64::console::_print(format_args!(
+                    "console: PS/2 keyboard unavailable; USB HID input not ready\n"
+                ));
+            }
+        }
     }
     let _ = driver::ensure_driver(
         "serial",
@@ -382,7 +397,7 @@ pub fn init() {
         "0.1.0",
         "SAIOS",
         &["hid"],
-        if keyboard_ready {
+        if keyboard_ready || usb_input_ready {
             driver::DriverStatus::Running
         } else {
             driver::DriverStatus::Stopped
@@ -408,7 +423,7 @@ pub fn init() {
         "keyboard0",
         "hid-keyboard",
         "hid-keyboard",
-        if keyboard_ready {
+        if keyboard_ready || usb_input_ready {
             device::DeviceStatus::Online
         } else {
             device::DeviceStatus::Offline

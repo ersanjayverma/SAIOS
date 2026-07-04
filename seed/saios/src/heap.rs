@@ -17,6 +17,8 @@ const FALLBACK_INITIAL_HEAP_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum virtual heap budget in bytes (1 GiB).
 const RESERVED_VIRTUAL_HEAP_BYTES: usize = 1024 * 1024 * 1024;
 const FALLBACK_MAX_HEAP_BYTES: usize = 32 * 1024 * 1024;
+/// Keep heap pages in the low 1 GiB identity-mapped window.
+const HEAP_IDENTITY_MAX_PHYS: u64 = 0x4000_0000;
 /// Small grow step in bytes (2 MiB).
 const HEAP_GROW_STEP_SMALL_BYTES: usize = 2 * 1024 * 1024;
 /// Large grow step in bytes (4 MiB).
@@ -109,13 +111,17 @@ pub fn configure_identity_mode(max_phys: Option<u64>) {
     IDENTITY_HEAP_MAX_PHYS.store(max_phys.unwrap_or(0), Ordering::Relaxed);
 }
 
+pub fn identity_mode_enabled() -> bool {
+    IDENTITY_HEAP_MAX_PHYS.load(Ordering::Relaxed) != 0
+}
+
 fn alloc_best_effort_pages(max_pages: usize) -> Option<(usize, usize)> {
     let mut pages = max_pages;
     while pages > 0 {
         let allocation = if let Some(max_phys) = identity_heap_max_phys() {
             pmm::alloc_pages_below(pages, max_phys)
         } else {
-            pmm::alloc_pages(pages)
+            pmm::alloc_pages_below(pages, HEAP_IDENTITY_MAX_PHYS)
         };
 
         if let Some(base) = allocation {

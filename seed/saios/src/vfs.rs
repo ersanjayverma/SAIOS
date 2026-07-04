@@ -150,6 +150,7 @@ struct TmpFs {
     nodes: Vec<Option<Node>>,
     root: u64,
     cwd: u64,
+    cwd_override: Option<String>,
 }
 
 impl TmpFs {
@@ -168,6 +169,7 @@ impl TmpFs {
             nodes,
             root: 1,
             cwd: 1,
+            cwd_override: None,
         }
     }
 
@@ -328,12 +330,16 @@ impl TmpFs {
 
         if self.cwd == inode {
             self.cwd = self.root;
+            self.cwd_override = None;
         }
 
         Ok(())
     }
 
     fn cwd_path(&self) -> String {
+        if let Some(path) = self.cwd_override.as_ref() {
+            return path.clone();
+        }
         self.path_for_inode(self.cwd)
     }
 
@@ -1027,12 +1033,23 @@ pub fn rename(from: &str, to: &str) -> Result<(), &'static str> {
 /// Changes the current working directory to `path`.
 pub fn cd(path: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
-        let inode = vfs.fs.resolve(path)?;
+        let abs = vfs.fs.normalized_path(path);
+        if is_storage_backed(&abs) {
+            let stat = storage::fs_stat(&abs)?;
+            if stat.kind != storage::FsNodeKind::Directory {
+                return Err("not a directory");
+            }
+            vfs.fs.cwd_override = Some(abs);
+            return Ok(());
+        }
+
+        let inode = vfs.fs.resolve(abs.as_str())?;
         let node = vfs.fs.node(inode)?;
         if node.kind != FileType::Directory {
             return Err("not a directory");
         }
         vfs.fs.cwd = inode;
+        vfs.fs.cwd_override = None;
         Ok(())
     })
 }

@@ -146,17 +146,17 @@ pub fn run() -> ! {
     }
 }
 
+pub fn run_diskpart_alias(args: &[&str], env: &[(String, String)]) -> Result<i32, &'static str> {
+    native::run_diskpart_alias(args, env)
+}
+
 /// Entry point for the interactive shell user program.
 pub fn program_main() {
-    console::println!("[BOOTCHK] shell.program.entry");
-    console::println!("[BOOTCHK] shell.program.pid1.start");
     let _ = process::start_pid1("/system/init");
-    console::println!("[BOOTCHK] shell.program.pid1.started");
     let mut engine = engine::ShellEngine::new();
     let _ = engine.execute_line("source /system/init");
     let _ = process::finish_pid1(0);
     let _ = process::ensure_shell_process("snsh");
     console::println!("Launching SNSH...");
-    let _ = engine.execute_line("clear");
     engine.run();
 }

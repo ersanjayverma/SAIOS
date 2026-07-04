@@ -73,13 +73,6 @@ unsafe extern "C" {
     fn saios_page_fault_stub();
 }
 
-#[repr(C, packed)]
-#[derive(Debug, Copy, Clone)]
-struct IdtPointer {
-    limit: u16,
-    base: u64,
-}
-
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct IdtEntry {
@@ -131,11 +124,13 @@ impl InterruptDescriptorTable {
         }
     }
 
-    fn pointer(&self) -> IdtPointer {
-        IdtPointer {
-            limit: (size_of::<Self>() - 1) as u16,
-            base: self.entries.as_ptr() as u64,
-        }
+    fn pointer_bytes(&self) -> [u8; 10] {
+        let limit = (size_of::<Self>() - 1) as u16;
+        let base = self.entries.as_ptr() as u64;
+        let mut raw = [0u8; 10];
+        raw[0..2].copy_from_slice(&limit.to_le_bytes());
+        raw[2..10].copy_from_slice(&base.to_le_bytes());
+        raw
     }
 }
 
@@ -161,11 +156,11 @@ pub fn load() {
     unsafe {
         let idt = &*IDT.get();
 
-        let ptr = idt.pointer();
+        let ptr = idt.pointer_bytes();
 
         asm!(
             "lidt [{}]",
-            in(reg) &ptr,
+            in(reg) ptr.as_ptr(),
             options(readonly, nostack, preserves_flags),
         );
     }
@@ -208,19 +203,55 @@ extern "C" fn invalid_opcode() -> ! {
 
 #[unsafe(no_mangle)]
 extern "C" fn double_fault(error_code: usize) -> ! {
-    panic!("Double Fault (error={:#x})", error_code);
+    panic!(
+        "Double Fault (error={:#x}, reason={})",
+        error_code,
+        if error_code == 0 {
+            "task-state/stack/descriptor escalation"
+        } else {
+            "unexpected non-zero error code"
+        }
+    );
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn general_protection(error_code: usize) -> ! {
-    panic!("General Protection Fault (error={:#x})", error_code);
+    let ext = (error_code & 0x1) != 0;
+    let idt = (error_code & 0x2) != 0;
+    let ti = (error_code & 0x4) != 0;
+    let selector_index = (error_code >> 3) & 0x1FFF;
+    panic!(
+        "General Protection Fault (error={:#x}, ext={}, idt={}, table={}, selector_index={})",
+        error_code,
+        ext,
+        idt,
+        if ti { "ldt" } else { "gdt" },
+        selector_index
+    );
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn page_fault(error_code: usize) -> ! {
     let fault_addr = crate::arch::x86_64::cpu::read_cr2();
+    let present = (error_code & (1 << 0)) != 0;
+    let write = (error_code & (1 << 1)) != 0;
+    let user = (error_code & (1 << 2)) != 0;
+    let reserved_bit_violation = (error_code & (1 << 3)) != 0;
+    let instruction_fetch = (error_code & (1 << 4)) != 0;
+    let protection_key = (error_code & (1 << 5)) != 0;
+    let shadow_stack = (error_code & (1 << 6)) != 0;
+    let sgx = (error_code & (1 << 15)) != 0;
     panic!(
-        "Page Fault (error={:#x}, cr2={:#x})",
-        error_code, fault_addr
+        "Page Fault (error={:#x}, cr2={:#x}, present={}, write={}, user={}, rsvd={}, ifetch={}, pkey={}, sstk={}, sgx={})",
+        error_code,
+        fault_addr,
+        present,
+        write,
+        user,
+        reserved_bit_violation,
+        instruction_fetch,
+        protection_key,
+        shadow_stack,
+        sgx
     );
 }

@@ -172,7 +172,12 @@ impl CommandDispatcher {
             None => ctx.env_unset("SISH_STDIN"),
         }
 
-        result?;
+        if let Err(e) = result {
+            if !suppress_console {
+                console::println!("{}", e);
+            }
+        }
+
         ctx.session.last_exit_code = exit_code;
         Ok((exit_code, captured))
     }
