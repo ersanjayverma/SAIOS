@@ -40,6 +40,7 @@ fn print_help() {
     console::println!("panic");
     console::println!("reboot");
     console::println!("shutdown");
+    console::println!("fbbench");
 }
 
 fn print_uptime() {

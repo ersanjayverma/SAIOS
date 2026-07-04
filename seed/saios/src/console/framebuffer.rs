@@ -1,7 +1,9 @@
 use super::backend::ConsoleBackend;
+use super::FramebufferBenchResult;
 use crate::graphics::display::{Display, FramebufferDisplay};
 use crate::graphics::font::{glyph_bitmap, FONT_HEIGHT, FONT_WIDTH};
 use crate::graphics::framebuffer::Color;
+use crate::timer;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use core::ptr;
@@ -743,6 +745,42 @@ impl FramebufferConsole {
             bytes_per_pixel: d.bytes_per_pixel(),
             pixel_format: d.pixel_format(),
             framebuffer_size: d.framebuffer_size(),
+        })
+    }
+
+    /// Benchmark full-screen clear throughput using the current display path.
+    pub fn benchmark_clears(&mut self, passes: usize) -> Option<FramebufferBenchResult> {
+        let display = self.display.as_mut()?;
+        let passes = core::cmp::max(1, passes);
+
+        let bytes_per_clear = display.framebuffer_size();
+        let start_ticks = timer::ticks();
+        for i in 0..passes {
+            let color = if (i & 1) == 0 {
+                0x0000_0000
+            } else {
+                0x00FF_FFFF
+            };
+            display.clear_color(color);
+        }
+        let end_ticks = timer::ticks();
+
+        let elapsed_ticks = end_ticks.saturating_sub(start_ticks);
+        let elapsed_ms = (elapsed_ticks * 1000) / 100;
+        let bytes_written = bytes_per_clear.saturating_mul(passes);
+
+        let mib_per_sec = if elapsed_ms == 0 {
+            0
+        } else {
+            ((bytes_written as u128) * 1000 / (elapsed_ms as u128) / (1024 * 1024) as u128) as u64
+        };
+
+        Some(FramebufferBenchResult {
+            passes,
+            bytes_written,
+            elapsed_ticks,
+            elapsed_ms,
+            mib_per_sec,
         })
     }
 }

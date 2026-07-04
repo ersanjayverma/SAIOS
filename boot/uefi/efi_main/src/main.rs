@@ -12,8 +12,27 @@ use uefi::proto::media::file::{File, FileAttribute, FileMode, FileType};
 use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::*;
 
+const COM1_PORT: u16 = 0x3F8;
+
+#[inline(always)]
+fn io_in8(port: u16) -> u8 {
+    let value: u8;
+    unsafe {
+        asm!(
+            "in al, dx",
+            in("dx") port,
+            out("al") value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    value
+}
+
 fn boot_log(message: &str) {
     println!("[boot] {}", message);
+    serial_write_str("[boot] ");
+    serial_write_str(message);
+    serial_write_str("\n");
 }
 
 #[inline(always)]
@@ -28,6 +47,32 @@ fn io_out8(port: u16, value: u8) {
     }
 }
 
+fn init_serial_com1() {
+    // 16550 init: 38400 8N1, FIFO enabled.
+    io_out8(COM1_PORT + 1, 0x00); // disable interrupts
+    io_out8(COM1_PORT + 3, 0x80); // DLAB on
+    io_out8(COM1_PORT, 0x03); // divisor low byte
+    io_out8(COM1_PORT + 1, 0x00); // divisor high byte
+    io_out8(COM1_PORT + 3, 0x03); // 8N1
+    io_out8(COM1_PORT + 2, 0xC7); // FIFO enable, clear, 14-byte threshold
+    io_out8(COM1_PORT + 4, 0x0B); // IRQs enabled, RTS/DSR set
+}
+
+#[inline(always)]
+fn serial_write_byte(byte: u8) {
+    while (io_in8(COM1_PORT + 5) & 0x20) == 0 {}
+    io_out8(COM1_PORT, byte);
+}
+
+fn serial_write_str(s: &str) {
+    for b in s.bytes() {
+        if b == b'\n' {
+            serial_write_byte(b'\r');
+        }
+        serial_write_byte(b);
+    }
+}
+
 #[inline(always)]
 fn trace_marker(marker: u8) {
     // Emit a raw byte to COM1 for handoff-stage tracing.
@@ -36,8 +81,11 @@ fn trace_marker(marker: u8) {
 
 #[entry]
 fn main() -> Status {
+    init_serial_com1();
+    serial_write_str("[boot] serial online\n");
     if let Err(e) = uefi::helpers::init() {
         println!("UEFI init failed: {:?}", e);
+        serial_write_str("[boot] UEFI init failed\n");
         return Status::LOAD_ERROR;
     }
     boot_log("uefi init ok");

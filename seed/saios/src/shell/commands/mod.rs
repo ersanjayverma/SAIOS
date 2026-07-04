@@ -2,6 +2,7 @@ pub mod acpi;
 pub mod clear;
 pub mod console;
 pub mod display;
+pub mod fbbench;
 pub mod health;
 pub mod help;
 pub mod inspect;
@@ -17,6 +18,7 @@ pub fn register(registry: &mut CommandRegistry) {
     clear::register(registry);
     console::register(registry);
     display::register(registry);
+    fbbench::register(registry);
     health::register(registry);
     help::register(registry);
     inspect::register(registry);

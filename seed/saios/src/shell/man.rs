@@ -701,15 +701,16 @@ interrupt, and heap diagnostics.",
     ),
     manual!(
         "console",
-        aliases: ["display", "fb"],
+        aliases: ["display", "fb", "fbbench"],
         summary: "Inspect console and framebuffer state",
-        synopsis: ["console", "console clear", "display", "fb"],
+        synopsis: ["console", "console clear", "display", "fb", "fbbench [passes]"],
         description: [
             "console shows terminal geometry, cursor state, scrollback, and framebuffer attachment.",
             "display/fb show framebuffer geometry and flush-path details.",
+            "fbbench measures full-screen framebuffer clear throughput for cache-policy validation.",
             "Useful during early bring-up and rendering regression work."
         ],
-        examples: ["console", "console clear", "display", "fb"],
+        examples: ["console", "console clear", "display", "fb", "fbbench", "fbbench 300"],
         see_also: ["clear", "events", "timeline"]
     ),
     manual!(

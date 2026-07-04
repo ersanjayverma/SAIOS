@@ -40,10 +40,8 @@ use hal::arch::paging;
 use hal::arch::x86_64::{cpuid, gdt, idt, interrupt, msr};
 use seed::Seed;
 
-const KERNEL_SERIAL_LOGGING_ENABLED: bool = true;
 const BOOT_STAGE_COLOR_DIAGNOSTICS: bool = false;
 const LATE_MICROCODE_PROBE_ENABLED: bool = true;
-const EARLY_PAT_PROGRAMMING_ENABLED: bool = false;
 
 const STAGE_KERNEL_ENTRY: u32 = 0x00FF_0000;
 const STAGE_BOOTINFO_OK: u32 = 0x00FF_4000;
@@ -77,23 +75,6 @@ fn mark_boot_stage(framebuffer_info: efi_main::graphics::FramebufferInfo, color:
     }
 }
 
-/// Program IA32_PAT so framebuffer mappings can use write-combining on CPUs that support PAT.
-fn init_framebuffer_cache_policy() {
-    if !EARLY_PAT_PROGRAMMING_ENABLED {
-        return;
-    }
-
-    let features = cpuid::features();
-    if !features.msr || !features.pat {
-        return;
-    }
-
-    const IA32_PAT: u32 = 0x0000_0277;
-    // PAT entries: WB, WC, UC-, UC, WB, WC, UC-, UC.
-    const IA32_PAT_VALUE: u64 = 0x0007_0106_0007_0106;
-    msr::wrmsr(IA32_PAT, IA32_PAT_VALUE);
-}
-
 fn detect_microcode_revision() -> Result<u32, &'static str> {
     const CPUID_FEATURES_LEAF: u32 = 0x0000_0001;
     const IA32_BIOS_SIGN_ID: u32 = 0x0000_008B;
@@ -125,7 +106,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     // Bring up UART immediately so post-ExitBootServices progress is always visible.
     hal::arch::x86_64::console::init_serial();
     kernel_trace_byte(b'K');
-    hal::arch::x86_64::console::set_output_enabled(KERNEL_SERIAL_LOGGING_ENABLED);
+    hal::arch::x86_64::console::set_output_enabled(true);
     hal::arch::x86_64::console::_print(format_args!("kernel: _start enter\n"));
     interrupt::disable();
     kernel_trace_byte(b'0');
@@ -142,8 +123,6 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     idt::init();
     mark_boot_stage(framebuffer_info, STAGE_IDT_OK);
     hal::arch::x86_64::console::_print(format_args!("kernel: gdt+idt ok\n"));
-
-    init_framebuffer_cache_policy();
 
     // Convert the raw pointer and count into a temporary Rust slice
     let _entries_slice = unsafe {
@@ -189,7 +168,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     console::attach_framebuffer(framebuffer_info);
     hal::arch::x86_64::console::_print(format_args!("kernel: fb attach done\n"));
     driver::console::init();
-    console::set_serial_logging(KERNEL_SERIAL_LOGGING_ENABLED);
+    console::set_serial_logging(true);
     kernel::timeline::mark("Heap");
     let fb_ready = console::promote_framebuffer_renderer();
     hal::arch::x86_64::console::_print(format_args!("kernel: fb renderer ready={}\n", fb_ready));

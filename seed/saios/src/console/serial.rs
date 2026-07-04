@@ -94,7 +94,7 @@ impl Utf8Decoder {
 
 static UTF8_DECODER: StaticCell<Utf8Decoder> = StaticCell::new(Utf8Decoder::new());
 static ESC_STATE: StaticCell<EscState> = StaticCell::new(EscState::None);
-static SERIAL_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(false);
+static SERIAL_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// Polls COM1 for a single received byte, discarding bytes with line errors.
 fn poll_byte() -> Option<u8> {

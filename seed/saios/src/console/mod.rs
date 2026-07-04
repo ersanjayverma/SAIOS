@@ -532,6 +532,25 @@ pub fn framebuffer_properties() -> Option<framebuffer::DisplayProperties> {
     try_with_console(|console| console.backend.right_mut().display_properties()).flatten()
 }
 
+/// Snapshot result for the `fbbench` command.
+#[derive(Debug, Copy, Clone)]
+pub struct FramebufferBenchResult {
+    pub passes: usize,
+    pub bytes_written: usize,
+    pub elapsed_ticks: u64,
+    pub elapsed_ms: u64,
+    pub mib_per_sec: u64,
+}
+
+/// Benchmarks framebuffer full-screen clear throughput.
+pub fn benchmark_framebuffer_clears(passes: usize) -> Option<FramebufferBenchResult> {
+    if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
+        return None;
+    }
+
+    try_with_console(|console| console.backend.right_mut().benchmark_clears(passes)).flatten()
+}
+
 /// Enables or disables serial output logging.
 pub fn set_serial_logging(enabled: bool) {
     SerialConsole::set_output_enabled(enabled);

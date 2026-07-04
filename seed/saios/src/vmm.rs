@@ -236,7 +236,8 @@ fn leaf_flags(vmm_flags: u64) -> u64 {
         f |= paging::FLAG_GLOBAL;
     }
     if (vmm_flags & FLAG_WRITE_COMBINE) != 0 {
-        f |= paging::FLAG_PWT;
+        // Select PAT index 5 (PAT=1, PCD=0, PWT=1) for write-combining.
+        f |= paging::FLAG_PWT | paging::FLAG_PAT;
     }
     if (vmm_flags & FLAG_DEVICE) != 0 {
         f |= paging::FLAG_PCD | paging::FLAG_PWT;
