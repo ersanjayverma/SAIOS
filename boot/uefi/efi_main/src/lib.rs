@@ -18,6 +18,33 @@ pub mod memorymap;
 pub mod smbios;
 pub mod ui;
 use uefi::println;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootBlockDeviceInfo {
+    pub present: u8,
+    pub removable: u8,
+    pub read_only: u8,
+    pub _reserved0: u8,
+    pub block_size: u32,
+    pub io_align: u32,
+    pub last_block: u64,
+}
+
+impl BootBlockDeviceInfo {
+    pub const fn empty() -> Self {
+        Self {
+            present: 0,
+            removable: 0,
+            read_only: 0,
+            _reserved0: 0,
+            block_size: 0,
+            io_align: 0,
+            last_block: 0,
+        }
+    }
+}
+
 pub const R_X86_64_RELATIVE: u32 = 8;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +68,14 @@ pub struct SaiosBootInfo {
     pub cpu: cpu::CpuInfo,
     /// UEFI firmware vendor and revision information.
     pub firmware: firmware::FirmwareInfo,
+
+    /// Boot block-device metadata captured from UEFI Block I/O.
+    pub boot_block: BootBlockDeviceInfo,
+    /// Pointer to boot-device probe bytes (first sectors snapshot).
+    pub boot_probe_ptr: u64,
+    /// Length of probe bytes at `boot_probe_ptr`.
+    pub boot_probe_len: u32,
+    pub _boot_probe_reserved: u32,
 
     /// Reserved for future expansion.
     pub reserved: [u64; 16],
@@ -188,6 +223,10 @@ pub fn initialize_boot_info() -> SaiosBootInfo {
         smbios,
         cpu,
         firmware,
+        boot_block: BootBlockDeviceInfo::empty(),
+        boot_probe_ptr: 0,
+        boot_probe_len: 0,
+        _boot_probe_reserved: 0,
 
         reserved: [0; 16],
     }

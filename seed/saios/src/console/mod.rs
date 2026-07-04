@@ -56,6 +56,12 @@ struct OutputCapture {
     active: bool,
     suppress_console: bool,
     buffer: AllocString,
+    stack: Vec<CaptureFrame>,
+}
+
+struct CaptureFrame {
+    suppress_console: bool,
+    buffer: AllocString,
 }
 
 impl OutputCapture {
@@ -64,6 +70,7 @@ impl OutputCapture {
             active: false,
             suppress_console: false,
             buffer: AllocString::new(),
+            stack: Vec::new(),
         }
     }
 }
@@ -638,6 +645,20 @@ pub fn begin_output_capture(suppress_console: bool) {
     // SAFETY: guarded by capture lock.
     unsafe {
         let capture = &mut *OUTPUT_CAPTURE.get();
+        if capture.active {
+            // Nested captures are used by some subsystems (for diagnostics).
+            // Keep outer capture state so shell redirection remains intact.
+            let previous = CaptureFrame {
+                suppress_console: capture.suppress_console,
+                buffer: core::mem::take(&mut capture.buffer),
+            };
+            capture.stack.push(previous);
+            capture.suppress_console = suppress_console || capture.suppress_console;
+            capture.buffer.clear();
+            capture_unlock();
+            return;
+        }
+
         capture.active = true;
         capture.suppress_console = suppress_console;
         capture.buffer.clear();
@@ -651,9 +672,18 @@ pub fn end_output_capture() -> AllocString {
     // SAFETY: guarded by capture lock.
     let out = unsafe {
         let capture = &mut *OUTPUT_CAPTURE.get();
-        capture.active = false;
-        capture.suppress_console = false;
-        core::mem::take(&mut capture.buffer)
+        let current = core::mem::take(&mut capture.buffer);
+        if let Some(mut previous) = capture.stack.pop() {
+            // Nested capture output is still part of the outer command output.
+            previous.buffer.push_str(current.as_str());
+            capture.active = true;
+            capture.suppress_console = previous.suppress_console;
+            capture.buffer = previous.buffer;
+        } else {
+            capture.active = false;
+            capture.suppress_console = false;
+        }
+        current
     };
     capture_unlock();
     out

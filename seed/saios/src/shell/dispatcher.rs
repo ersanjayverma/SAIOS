@@ -297,11 +297,12 @@ impl CommandDispatcher {
 
     fn write_redirect(&self, path: &str, data: &str, append: bool) -> ShellResult {
         let path = self.resolve_shell_path(path);
+        let text = normalize_lf_text(data);
 
         if append {
             let fd = vfs::open(path.as_str(), vfs::OpenOptions::append_create())
                 .map_err(|_| "redirect: output open failed")?;
-            let write_result = vfs::write(fd, data.as_bytes())
+            let write_result = vfs::write(fd, text.as_bytes())
                 .map(|_| ())
                 .map_err(|_| "redirect: output write failed");
             let close_result = vfs::close(fd).map_err(|_| "redirect: output close failed");
@@ -309,7 +310,7 @@ impl CommandDispatcher {
             write_result?;
             close_result
         } else {
-            vfs::write_path(path.as_str(), data.as_bytes())
+            vfs::write_path(path.as_str(), text.as_bytes())
                 .map_err(|_| "redirect: output write failed")
         }
     }
@@ -326,4 +327,22 @@ impl CommandDispatcher {
             alloc::format!("{}/{}", cwd, path)
         }
     }
+}
+
+fn normalize_lf_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                let _ = chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(ch);
+        }
+    }
+
+    out
 }

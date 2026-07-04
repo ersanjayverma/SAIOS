@@ -1,3 +1,4 @@
+pub mod ahci;
 pub mod console;
 pub mod dhcp;
 pub mod dns;

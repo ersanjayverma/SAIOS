@@ -248,6 +248,25 @@ fn run_start_hook(name: &str) -> Result<(), &'static str> {
             );
         }
         Ok(())
+    } else if name.eq_ignore_ascii_case("ahci") {
+        crate::driver::ahci::rescan();
+        let controllers = crate::driver::ahci::controllers();
+        for controller in controllers {
+            let _ = device::ensure_device(
+                controller.name.as_str(),
+                "ahci",
+                "block/ahci-host",
+                if matches!(
+                    controller.state,
+                    crate::driver::ahci::AhciControllerState::Faulted
+                ) {
+                    device::DeviceStatus::Faulted
+                } else {
+                    device::DeviceStatus::Online
+                },
+            );
+        }
+        Ok(())
     } else if name.eq_ignore_ascii_case("storage")
         || name.eq_ignore_ascii_case("ext4")
         || name.eq_ignore_ascii_case("ntfs")
