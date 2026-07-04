@@ -517,9 +517,9 @@ fn core_tests() -> Vec<TestCase> {
         TestCase::new("Console", "Unicode", test_console_unicode),
         TestCase::new("Framebuffer", "attached", test_framebuffer_attached),
         TestCase::new(
-            "Framebuffer",
-            "surface allocation",
-            test_framebuffer_surface
+            "Surface Manager",
+            "lifecycle",
+            test_surface_manager_lifecycle
         ),
         TestCase::new("Filesystem", "create", test_fs_create),
         TestCase::new("Filesystem", "open", test_fs_open),
@@ -542,6 +542,8 @@ fn core_tests() -> Vec<TestCase> {
         TestCase::new("Timer", "sleep advances ticks", test_timer_sleep),
         TestCase::new("Drivers", "keyboard", test_driver_keyboard),
         TestCase::new("Drivers", "mouse", test_driver_mouse),
+        TestCase::new("Drivers", "keyboard input behavior", test_driver_keyboard_behavior),
+        TestCase::new("Drivers", "mouse input behavior", test_driver_mouse_behavior),
         TestCase::new("Drivers", "timer", test_driver_timer),
         TestCase::new("Drivers", "serial", test_driver_serial),
         TestCase::new("Drivers", "framebuffer", test_driver_framebuffer),
@@ -865,8 +867,8 @@ fn test_framebuffer_attached() -> Result<(), &'static str> {
     Ok(())
 }
 
-fn test_framebuffer_surface() -> Result<(), &'static str> {
-    Err("skip: framebuffer validation is covered by fbbench/display commands")
+fn test_surface_manager_lifecycle() -> Result<(), &'static str> {
+    Err("skip: surface manager lifecycle validation is pending")
 }
 
 fn temp_path(name: &str) -> String {
@@ -1040,6 +1042,14 @@ fn test_driver_keyboard() -> Result<(), &'static str> {
 
 fn test_driver_mouse() -> Result<(), &'static str> {
     driver_exists_any(&["mouse", "hid-mouse"], &["mouse0"])
+}
+
+fn test_driver_keyboard_behavior() -> Result<(), &'static str> {
+    Err("skip: keyboard input behavior validation is pending")
+}
+
+fn test_driver_mouse_behavior() -> Result<(), &'static str> {
+    Err("skip: mouse input behavior validation is pending")
 }
 
 fn test_driver_timer() -> Result<(), &'static str> {

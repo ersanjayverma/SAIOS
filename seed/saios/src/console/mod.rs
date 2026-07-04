@@ -576,11 +576,17 @@ pub fn serial_logging_enabled() -> bool {
 /// Writes a single character to the console.
 pub fn put_char(c: char) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
+        if capture_char(c) && should_suppress_output() {
+            return;
+        }
         SerialConsole::emergency_put_char(c);
         return;
     }
 
     if try_with_console(|console| console.put_char(c)).is_none() {
+        if capture_char(c) && should_suppress_output() {
+            return;
+        }
         SerialConsole::emergency_put_char(c);
     }
 }
@@ -588,11 +594,17 @@ pub fn put_char(c: char) {
 /// Writes a string to the console.
 pub fn write_str(s: &str) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
+        if capture_str(s) && should_suppress_output() {
+            return;
+        }
         emergency_write_str(s);
         return;
     }
 
     if try_with_console(|console| console.write_str(s)).is_none() {
+        if capture_str(s) && should_suppress_output() {
+            return;
+        }
         emergency_write_str(s);
     }
 }
@@ -702,17 +714,30 @@ pub fn stderr_println(s: &str) {
 /// Writes formatted arguments to the console.
 pub fn print_fmt(args: fmt::Arguments) {
     if !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
-        hal::arch::x86_64::console::_print(args);
+        let rendered = alloc::format!("{}", args);
+        if capture_str(rendered.as_str()) && should_suppress_output() {
+            return;
+        }
+        hal::arch::x86_64::console::_print(format_args!("{}", rendered));
         return;
     }
 
-    if try_with_console(|console| {
-        let _ = console.write_fmt(args);
-    })
-    .is_none()
+    if CONSOLE_LOCKED
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
     {
-        hal::arch::x86_64::console::_print(args);
+        with_console(|console| {
+            let _ = console.write_fmt(args);
+        });
+        CONSOLE_LOCKED.store(false, Ordering::Release);
+        return;
     }
+
+    let rendered = alloc::format!("{}", args);
+    if capture_str(rendered.as_str()) && should_suppress_output() {
+        return;
+    }
+    hal::arch::x86_64::console::_print(format_args!("{}", rendered));
 }
 
 /// Emergency string output used during panics.

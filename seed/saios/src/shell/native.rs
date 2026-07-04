@@ -627,10 +627,67 @@ fn cmd_cpu(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
+fn thread_state_label(state: scheduler::ThreadState) -> &'static str {
+    match state {
+        scheduler::ThreadState::Ready => "ready",
+        scheduler::ThreadState::Running => "running",
+        scheduler::ThreadState::Sleeping => "sleeping",
+        scheduler::ThreadState::Blocked => "blocked",
+        scheduler::ThreadState::Dead => "dead",
+    }
+}
+
+fn process_state_label(state: process::ProcessState) -> &'static str {
+    match state {
+        process::ProcessState::Running => "running",
+        process::ProcessState::Waiting => "waiting",
+        process::ProcessState::Exited => "exited",
+    }
+}
+
+fn device_status_label(status: device::DeviceStatus) -> &'static str {
+    match status {
+        device::DeviceStatus::Online => "online",
+        device::DeviceStatus::Offline => "offline",
+        device::DeviceStatus::Faulted => "faulted",
+    }
+}
+
+fn driver_status_label(status: driver::DriverStatus) -> &'static str {
+    match status {
+        driver::DriverStatus::Loaded => "loaded",
+        driver::DriverStatus::Running => "running",
+        driver::DriverStatus::Stopped => "stopped",
+        driver::DriverStatus::Faulted => "faulted",
+    }
+}
+
+fn service_state_label(state: ksf::ServiceState) -> &'static str {
+    match state {
+        ksf::ServiceState::Registered => "registered",
+        ksf::ServiceState::Initializing => "init",
+        ksf::ServiceState::Ready => "ready",
+        ksf::ServiceState::Running => "running",
+        ksf::ServiceState::Paused => "paused",
+        ksf::ServiceState::Stopping => "stopping",
+        ksf::ServiceState::Stopped => "stopped",
+        ksf::ServiceState::Failed => "failed",
+    }
+}
+
+fn health_state_label(state: crate::som::HealthState) -> &'static str {
+    match state {
+        crate::som::HealthState::Healthy => "healthy",
+        crate::som::HealthState::Warning => "warning",
+        crate::som::HealthState::Critical => "critical",
+        crate::som::HealthState::Offline => "offline",
+    }
+}
+
 fn cmd_ps(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
-    console::println!("ID   State");
+    console::println!("{:<8}  {:<10}", "ID", "STATE");
     for t in scheduler::threads() {
-        console::println!("{}    {:?}", t.id, t.state);
+        console::println!("{:<8}  {:<10}", t.id, thread_state_label(t.state));
     }
     Ok(())
 }
@@ -660,7 +717,7 @@ fn cmd_jobs(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         records.reverse();
     }
 
-    console::println!("PID   STATE     NAME");
+    console::println!("{:<8}  {:<10}  {:<24}", "PID", "STATE", "NAME");
     for p in records {
         if let Some(f) = filter {
             let keep = if f.eq_ignore_ascii_case("running") {
@@ -676,7 +733,12 @@ fn cmd_jobs(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
                 continue;
             }
         }
-        console::println!("{}    {:?}    {}", p.pid, p.state, p.name);
+        console::println!(
+            "{:<8}  {:<10}  {:<24.24}",
+            p.pid,
+            process_state_label(p.state),
+            p.name
+        );
     }
     Ok(())
 }
@@ -1220,14 +1282,9 @@ fn cmd_objects(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
         kom::enumerate()
     };
 
-    console::println!("ID   TYPE      NAME");
+    console::println!("{:<6}  {:<10}  {:<24}", "ID", "TYPE", "NAME");
     for obj in records {
-        console::println!(
-            "{}    {}    {}",
-            obj.id.0,
-            obj.object_type.as_str(),
-            obj.name
-        );
+        console::println!("{:<6}  {:<10.10}  {:<24.24}", obj.id.0, obj.object_type.as_str(), obj.name);
     }
     Ok(())
 }
@@ -1269,7 +1326,14 @@ fn cmd_devices(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         records.reverse();
     }
 
-    console::println!("NAME       DRIVER       CLASS      STATUS     OBJECT");
+    console::println!(
+        "{:<16}  {:<14}  {:<14}  {:<8}  {:>8}",
+        "NAME",
+        "DRIVER",
+        "CLASS",
+        "STATUS",
+        "OBJECT"
+    );
     for d in records {
         if let Some(f) = filter {
             let keep = if f.eq_ignore_ascii_case("online") {
@@ -1287,11 +1351,11 @@ fn cmd_devices(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         }
 
         console::println!(
-            "{}    {}    {}    {:?}    {}",
+            "{:<16.16}  {:<14.14}  {:<14.14}  {:<8}  {:>8}",
             d.name,
             d.driver,
             d.class,
-            d.status,
+            device_status_label(d.status),
             d.object_id.0
         );
     }
@@ -1325,7 +1389,18 @@ fn cmd_drivers(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         records.reverse();
     }
 
-    console::println!("NAME       VERSION   STATUS    DEVICES   START STOP RELOAD FAULT OBJECT");
+    console::println!(
+        "{:<16}  {:<8}  {:<8}  {:>7}  {:>5}  {:>5}  {:>6}  {:>5}  {:>8}",
+        "NAME",
+        "VERSION",
+        "STATUS",
+        "DEVICES",
+        "START",
+        "STOP",
+        "RELOAD",
+        "FAULT",
+        "OBJECT"
+    );
     for d in records {
         if let Some(f) = filter {
             let keep = if f.eq_ignore_ascii_case("running") {
@@ -1345,10 +1420,10 @@ fn cmd_drivers(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         }
 
         console::println!(
-            "{}    {}    {:?}    {}    {}    {}    {}    {}    {}",
+            "{:<16.16}  {:<8.8}  {:<8}  {:>7}  {:>5}  {:>5}  {:>6}  {:>5}  {:>8}",
             d.name,
             d.version,
-            d.status,
+            driver_status_label(d.status),
             d.devices.len(),
             d.start_count,
             d.stop_count,
@@ -1621,6 +1696,14 @@ fn cmd_services(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         records.reverse();
     }
 
+    console::println!(
+        "{:<16}  {:<8}  {:>6}  {:<8}  {:<8}",
+        "NAME",
+        "VERSION",
+        "ID",
+        "STATE",
+        "HEALTH"
+    );
     for svc in records {
         if let Some(f) = filter {
             let keep = if f.eq_ignore_ascii_case("running") {
@@ -1646,12 +1729,12 @@ fn cmd_services(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
         }
 
         console::println!(
-            "{} v{} id={} state={:?} health={:?}",
+            "{:<16.16}  {:<8.8}  {:>6}  {:<8}  {:<8}",
             svc.name,
             svc.version,
             svc.id.0,
-            svc.state,
-            svc.health
+            service_state_label(svc.state),
+            health_state_label(svc.health)
         );
     }
     Ok(())
@@ -1872,10 +1955,15 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             // Show VFS-level mounts first
             let vfs_mounts = vfs::mounts();
             console::println!("── VFS Mounts ──────────────────────────────────────────────────");
-            console::println!("  {:<20}  {:<10}  {}", "PATH", "FS", "FLAGS");
+            console::println!("  {:<24}  {:<10}  {:<5}", "PATH", "FS", "FLAGS");
             for m in &vfs_mounts {
                 let flags = if m.read_only { "ro" } else { "rw" };
-                console::println!("  {:<20}  {:<10}  {}", m.path, m.fs_name, flags);
+                console::println!(
+                    "  {:<24.24}  {:<10.10}  {:<5}",
+                    m.path,
+                    m.fs_name,
+                    flags
+                );
             }
             if vfs_mounts.is_empty() {
                 console::println!("  (none)");
@@ -1885,7 +1973,7 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             let volumes = disk::volumes();
             console::println!("── Storage Volumes ─────────────────────────────────────────────");
             console::println!(
-                "  {:<10}  {:<8}  {:>8}  {:<10}  {}",
+                "  {:<12}  {:<8}  {:>8}  {:<10}  {:<24}",
                 "NAME",
                 "FS",
                 "SIZE(MB)",
@@ -1896,7 +1984,7 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
                 let size_mb = v.total_bytes / (1024 * 1024);
                 let mounted = v.mounted_at.as_deref().unwrap_or("—");
                 console::println!(
-                    "  {:<10}  {:<8}  {:>8}  {:<10}  {}",
+                    "  {:<12.12}  {:<8.8}  {:>8}  {:<10.10}  {:<24.24}",
                     v.name,
                     v.filesystem.as_str(),
                     size_mb,
@@ -2007,9 +2095,16 @@ fn cmd_df(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let used = disk::used_bytes(path.as_str()).unwrap_or(0);
     let free = total.saturating_sub(used);
 
-    console::println!("Filesystem  Mounted on  Total(MB)  Used(MB)  Free(MB)");
     console::println!(
-        "{:<10}  {:<10}  {:>9}  {:>8}  {:>8}",
+        "{:<12}  {:<20}  {:>9}  {:>8}  {:>8}",
+        "FILESYSTEM",
+        "MOUNTED ON",
+        "TOTAL(MB)",
+        "USED(MB)",
+        "FREE(MB)"
+    );
+    console::println!(
+        "{:<12.12}  {:<20.20}  {:>9}  {:>8}  {:>8}",
         volume.name,
         volume.mounted_at.unwrap_or_else(|| "-".to_string()),
         total / (1024 * 1024),
@@ -2056,9 +2151,9 @@ fn cmd_tree(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_threads(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
-    console::println!("ID   State");
+    console::println!("{:<8}  {:<10}", "ID", "STATE");
     for t in scheduler::threads() {
-        console::println!("{}    {:?}", t.id, t.state);
+        console::println!("{:<8}  {:<10}", t.id, thread_state_label(t.state));
     }
     Ok(())
 }
