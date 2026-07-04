@@ -389,7 +389,9 @@ impl KeyboardDriver {
             return None;
         }
 
+        // The keypad Enter key sends the extended E0 1C scancode sequence.
         match code {
+            0x1C => Some(KeyEvent::Enter),
             0x47 => Some(KeyEvent::Home),
             0x48 => Some(self.apply_arrow_modifiers(KeyEvent::ArrowUp)),
             0x49 => Some(KeyEvent::PageUp),

@@ -12,6 +12,8 @@ pub const FLAG_PWT: u64 = 1 << 3;
 pub const FLAG_PCD: u64 = 1 << 4;
 pub const FLAG_ACCESSED: u64 = 1 << 5;
 pub const FLAG_DIRTY: u64 = 1 << 6;
+/// Page-table PAT bit for 4 KiB pages.
+pub const FLAG_PAT: u64 = 1 << 7;
 pub const FLAG_HUGE: u64 = 1 << 7;
 pub const FLAG_GLOBAL: u64 = 1 << 8;
 pub const FLAG_NX: u64 = 1 << 63;

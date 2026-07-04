@@ -39,6 +39,8 @@ pub const FLAG_USER: u64 = 1 << 3;
 pub const FLAG_GLOBAL: u64 = 1 << 4;
 /// Page-table flag: device memory (uncached).
 pub const FLAG_DEVICE: u64 = 1 << 5;
+/// Page-table flag: write-combining memory.
+pub const FLAG_WRITE_COMBINE: u64 = 1 << 6;
 
 /// A recorded virtual-to-physical mapping.
 #[derive(Clone, Debug)]
@@ -222,6 +224,7 @@ fn nonleaf_flags(vmm_flags: u64) -> u64 {
 }
 
 fn leaf_flags(vmm_flags: u64) -> u64 {
+    // Translate high-level VMM memory flags into leaf page-table bits.
     let mut f = 0u64;
     if (vmm_flags & FLAG_WRITE) != 0 {
         f |= paging::FLAG_WRITABLE;
@@ -232,8 +235,11 @@ fn leaf_flags(vmm_flags: u64) -> u64 {
     if (vmm_flags & FLAG_GLOBAL) != 0 {
         f |= paging::FLAG_GLOBAL;
     }
+    if (vmm_flags & FLAG_WRITE_COMBINE) != 0 {
+        f |= paging::FLAG_PWT;
+    }
     if (vmm_flags & FLAG_DEVICE) != 0 {
-        f |= paging::FLAG_PCD;
+        f |= paging::FLAG_PCD | paging::FLAG_PWT;
     }
     if (vmm_flags & FLAG_EXEC) == 0 {
         f |= paging::FLAG_NX;

@@ -1,6 +1,6 @@
 use super::backend::ConsoleBackend;
 use crate::graphics::display::{Display, FramebufferDisplay};
-use crate::graphics::font::{FONT_HEIGHT, FONT_WIDTH, glyph_row};
+use crate::graphics::font::{glyph_bitmap, FONT_HEIGHT, FONT_WIDTH};
 use crate::graphics::framebuffer::Color;
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -90,6 +90,7 @@ impl FramebufferConsole {
 
         let fg = self.fg.to_u32();
         let bg = self.bg.to_u32();
+        let glyph = glyph_bitmap(c);
 
         // OPTIMIZATION: Pre-pack colors once instead of per-pixel
         let (fg_packed, bg_packed) = if bytes_per_pixel == 4
@@ -122,7 +123,7 @@ impl FramebufferConsole {
 
             for row_idx in 0..draw_height {
                 let y = py + row_idx;
-                let row_bits = glyph_row(c, row_idx);
+                let row_bits = glyph[row_idx / 2];
                 let mut row_colors = [bg_packed; FONT_WIDTH];
                 let mut bits = row_bits;
                 for px in row_colors.iter_mut().take(draw_width) {
@@ -151,7 +152,7 @@ impl FramebufferConsole {
                 continue;
             }
 
-            let row_bits = glyph_row(c, row_idx);
+            let row_bits = glyph[row_idx / 2];
             for bit in 0..FONT_WIDTH {
                 let x = px.saturating_add(bit);
                 if x >= width {
@@ -802,6 +803,17 @@ impl ConsoleBackend for FramebufferConsole {
         }
     }
 
+    /// Write a whole string with a single cursor sync after all characters are applied.
+    fn put_str(&mut self, s: &str) {
+        let Some((_, _)) = self.text_bounds() else {
+            return;
+        };
+
+        for c in s.chars() {
+            self.put_char(c);
+        }
+    }
+
     /// Clear the screen and character model and home the cursor.
     fn clear(&mut self) {
         self.clear_direct();
@@ -853,9 +865,7 @@ impl ConsoleBackend for FramebufferConsole {
         self.screen[..row_count].copy_within(rows..row_count, 0);
 
         for y in row_count - rows..row_count {
-            for x in 0..cols {
-                self.screen[y][x] = ' ';
-            }
+            self.screen[y][..cols].fill(' ');
         }
 
         if self.view_offset_lines == 0 {

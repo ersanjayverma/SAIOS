@@ -87,37 +87,48 @@ impl<B: ConsoleBackend> Console<B> {
         self.clear();
     }
 
-    fn put_char_inner(&mut self, c: char) {
+    fn sync_cursor(&mut self) {
+        self.cursor.show();
+        self.backend.set_cursor(self.cursor.x, self.cursor.y);
+    }
+
+    fn put_char_inner(&mut self, c: char, sync_cursor: bool, emit_backend: bool) {
         match c {
             '\n' => self.newline(),
             '\r' => {
                 self.cursor.x = 0;
-                self.cursor.show();
-                self.backend.set_cursor(self.cursor.x, self.cursor.y);
+                if sync_cursor {
+                    self.sync_cursor();
+                }
             }
             '\t' => {
                 let spaces = TAB_WIDTH - (self.cursor.x % TAB_WIDTH);
                 for _ in 0..spaces {
-                    self.put_char_inner(' ');
+                    self.put_char_inner(' ', sync_cursor, emit_backend);
                 }
             }
             '\x08' => {
                 if self.cursor.x > 0 {
                     self.cursor.x -= 1;
                     self.buffer[self.cursor.y][self.cursor.x] = ' ';
-                    self.cursor.show();
-                    self.backend.set_cursor(self.cursor.x, self.cursor.y);
-                    self.backend.put_char(' ');
-                    self.backend.set_cursor(self.cursor.x, self.cursor.y);
+                    if emit_backend {
+                        self.backend.put_char(' ');
+                    }
+                    if sync_cursor {
+                        self.sync_cursor();
+                    }
                 }
             }
             ch => {
                 self.buffer[self.cursor.y][self.cursor.x] = ch;
-                self.backend.put_char(ch);
+                if emit_backend {
+                    self.backend.put_char(ch);
+                }
                 self.cursor.x += 1;
-                self.cursor.show();
                 if self.cursor.x >= self.cursor.width {
                     self.newline();
+                } else if sync_cursor {
+                    self.sync_cursor();
                 }
             }
         }
@@ -128,7 +139,7 @@ impl<B: ConsoleBackend> Console<B> {
             return;
         }
 
-        self.put_char_inner(c);
+        self.put_char_inner(c, true, true);
     }
 
     fn write_str(&mut self, s: &str) {
@@ -137,8 +148,12 @@ impl<B: ConsoleBackend> Console<B> {
         }
 
         for c in s.chars() {
-            self.put_char_inner(c);
+            self.put_char_inner(c, false, false);
         }
+
+        self.backend.put_str(s);
+
+        self.sync_cursor();
     }
 
     fn clear(&mut self) {
@@ -156,23 +171,20 @@ impl<B: ConsoleBackend> Console<B> {
     fn set_cursor(&mut self, x: usize, y: usize) {
         self.cursor.x = core::cmp::min(x, self.cursor.width.saturating_sub(1));
         self.cursor.y = core::cmp::min(y, self.cursor.height.saturating_sub(1));
-        self.cursor.show();
-        self.backend.set_cursor(self.cursor.x, self.cursor.y);
+        self.sync_cursor();
     }
 
     fn move_cursor_left(&mut self) {
         if self.cursor.x > 0 {
             self.cursor.x -= 1;
-            self.cursor.show();
-            self.backend.set_cursor(self.cursor.x, self.cursor.y);
+            self.sync_cursor();
         }
     }
 
     fn move_cursor_right(&mut self) {
         if self.cursor.x + 1 < self.cursor.width {
             self.cursor.x += 1;
-            self.cursor.show();
-            self.backend.set_cursor(self.cursor.x, self.cursor.y);
+            self.sync_cursor();
         }
     }
 
@@ -187,21 +199,14 @@ impl<B: ConsoleBackend> Console<B> {
             self.cursor.y = self.cursor.height - 1;
         }
 
-        self.cursor.show();
-        self.backend.set_cursor(self.cursor.x, self.cursor.y);
+        self.sync_cursor();
     }
 
     fn scroll(&mut self) {
-        for y in 1..self.cursor.height {
-            for x in 0..self.cursor.width {
-                self.buffer[y - 1][x] = self.buffer[y][x];
-            }
-        }
+        self.buffer[..self.cursor.height].copy_within(1..self.cursor.height, 0);
 
         let last = self.cursor.height - 1;
-        for x in 0..self.cursor.width {
-            self.buffer[last][x] = ' ';
-        }
+        self.buffer[last][..self.cursor.width].fill(' ');
 
         if self.backend.scroll_up(1) {
             self.backend.set_cursor(self.cursor.x, self.cursor.y);
@@ -331,7 +336,8 @@ pub fn on_timer_tick() {
     });
 }
 
-/// Initializes the serial port, input devices and console state.
+/// Initializes the serial port, input devices and console state, and only
+/// starts USB input probing when the PS/2 keyboard path fails.
 pub fn init() {
     SerialConsole::init();
     let keyboard_ready = unsafe { (*KEYBOARD.get()).init() };
@@ -339,6 +345,7 @@ pub fn init() {
         (*MOUSE.get()).init();
     }
     if !keyboard_ready {
+        let _ = driver::start("usb");
         let usb_hosts = usb::controller_count();
         if usb_hosts != 0 {
             if usb::hid_input_ready() {
@@ -456,9 +463,7 @@ fn framebuffer_scrollback_to_bottom() {
 
 /// Attaches a framebuffer as an additional console output backend.
 ///
-/// The framebuffer address is used as provided by the bootloader. The VMM
-/// remap path is temporarily disabled on this hardware due to early page
-/// faults, so no virtual-memory remapping is performed.
+/// The framebuffer address is used as provided by the bootloader.
 pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
     let mapped_info = info;
 
@@ -478,12 +483,12 @@ pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
                 "display",
                 device::DeviceStatus::Online,
             );
-            if let (Some(columns), Some(rows)) = (
-                console.backend.right_mut().text_columns(),
-                console.backend.right_mut().text_rows(),
-            ) {
-                console.resize(columns, rows);
-            }
+        }
+        if let (Some(columns), Some(rows)) = (
+            console.backend.right_mut().text_columns(),
+            console.backend.right_mut().text_rows(),
+        ) {
+            console.resize(columns, rows);
         }
     });
 }

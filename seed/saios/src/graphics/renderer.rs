@@ -1,4 +1,4 @@
-use super::font::{FONT_HEIGHT, FONT_WIDTH, glyph_row};
+use super::font::{glyph_bitmap, FONT_HEIGHT, FONT_WIDTH};
 use super::framebuffer::Color;
 use super::surface::Surface;
 
@@ -203,9 +203,10 @@ impl<'a> Renderer<'a> {
         let draw_width = core::cmp::min(FONT_WIDTH, surface_width - x);
         let draw_height = core::cmp::min(FONT_HEIGHT, surface_height - y);
         let pixels = self.surface.pixels_mut();
+        let glyph = glyph_bitmap(ch);
 
         for row_idx in 0..draw_height {
-            let row_bits = glyph_row(ch, row_idx);
+            let row_bits = glyph[row_idx / 2];
             let mut row_colors = [bg; FONT_WIDTH];
             let mut bits = row_bits;
             for px in row_colors.iter_mut().take(draw_width) {

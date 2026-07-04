@@ -1,5 +1,13 @@
 pub trait ConsoleBackend {
     fn put_char(&mut self, c: char);
+
+    /// Writes a whole string to the backend.
+    fn put_str(&mut self, s: &str) {
+        for c in s.chars() {
+            self.put_char(c);
+        }
+    }
+
     fn clear(&mut self);
     fn set_cursor(&mut self, x: usize, y: usize);
 
@@ -36,6 +44,12 @@ where
     fn put_char(&mut self, c: char) {
         self.left.put_char(c);
         self.right.put_char(c);
+    }
+
+    /// Mirrors a full string to both backends with a single call site.
+    fn put_str(&mut self, s: &str) {
+        self.left.put_str(s);
+        self.right.put_str(s);
     }
 
     fn clear(&mut self) {
