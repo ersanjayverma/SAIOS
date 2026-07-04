@@ -1,6 +1,9 @@
 //! Interrupt Descriptor Table setup for x86_64.
 
-use core::{arch::asm, mem::size_of};
+use core::{
+    arch::{asm, global_asm},
+    mem::size_of,
+};
 
 use crate::arch::x86_64::sync::StaticCell;
 
@@ -8,6 +11,25 @@ const IDT_ENTRY_COUNT: usize = 256;
 const IDT_INTERRUPT_GATE_ATTRIBUTES: u8 = 0x8E;
 
 static IDT: StaticCell<InterruptDescriptorTable> = StaticCell::new(InterruptDescriptorTable::new());
+
+global_asm!(
+    ".global saios_default_interrupt_stub",
+    "saios_default_interrupt_stub:",
+    "push rax",
+    "push rdx",
+    "mov al, 0x20",
+    "mov dx, 0xA0",
+    "out dx, al",
+    "mov dx, 0x20",
+    "out dx, al",
+    "pop rdx",
+    "pop rax",
+    "iretq",
+);
+
+unsafe extern "C" {
+    fn saios_default_interrupt_stub();
+}
 
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
@@ -107,6 +129,10 @@ pub fn load() {
     }
 }
 pub fn init() {
+    for vector in 32u8..=255 {
+        register_raw(vector, saios_default_interrupt_stub as *const () as usize);
+    }
+
     register(0, divide_error);
     register(3, breakpoint);
     register(6, invalid_opcode);

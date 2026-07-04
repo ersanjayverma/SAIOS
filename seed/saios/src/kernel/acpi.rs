@@ -9,6 +9,50 @@ use alloc::vec::Vec;
 use core::mem;
 use core::ptr;
 
+use crate::vmm;
+
+const PAGE_SIZE: u64 = 4096;
+const ACPI_MAP_FLAGS: u64 = vmm::FLAG_READ | vmm::FLAG_GLOBAL;
+
+fn align_down(value: u64, align: u64) -> u64 {
+    value & !(align - 1)
+}
+
+fn map_pages_for_range(phys_addr: u64, len: usize) -> Result<(u64, u64, usize), &'static str> {
+    if len == 0 {
+        return Err("ACPI: cannot map zero-length range");
+    }
+
+    let aligned_phys = align_down(phys_addr, PAGE_SIZE);
+    let page_offset = phys_addr.saturating_sub(aligned_phys);
+    let span = page_offset.saturating_add(len as u64);
+    let pages = span.div_ceil(PAGE_SIZE) as usize;
+
+    let mapped_base = vmm::map_physical_anywhere(aligned_phys, pages, ACPI_MAP_FLAGS, "acpi")?;
+    Ok((mapped_base, page_offset, pages))
+}
+
+fn with_physical_bytes<R>(
+    phys_addr: u64,
+    len: usize,
+    f: impl FnOnce(&[u8]) -> Result<R, &'static str>,
+) -> Result<R, &'static str> {
+    let (mapped_base, page_offset, _pages) = map_pages_for_range(phys_addr, len)?;
+    let virt_ptr = (mapped_base.saturating_add(page_offset)) as *const u8;
+    let bytes = unsafe { core::slice::from_raw_parts(virt_ptr, len) };
+    let out = f(bytes);
+    let _ = vmm::unmap(mapped_base);
+    out
+}
+
+fn read_physical_unaligned<T: Copy>(phys_addr: u64) -> Result<T, &'static str> {
+    with_physical_bytes(phys_addr, mem::size_of::<T>(), |bytes| {
+        let ptr = bytes.as_ptr() as *const T;
+        let value = unsafe { ptr::read_unaligned(ptr) };
+        Ok(value)
+    })
+}
+
 /// ACPI table signature constants (4-byte big-endian identifiers).
 pub const RSDT_SIGNATURE: &[u8; 4] = b"RSDT";
 pub const XSDT_SIGNATURE: &[u8; 4] = b"XSDT";
@@ -341,12 +385,11 @@ impl AcpiManager {
 
     /// Parse RSDP from physical address
     fn parse_rsdp(&self) -> Result<RsdpDescriptor, &'static str> {
-        let rsdp_ptr = self.rsdp_address as *const RsdpDescriptor;
-        if rsdp_ptr.is_null() {
+        if self.rsdp_address == 0 {
             return Err("ACPI: RSDP pointer is null");
         }
 
-        let rsdp = unsafe { ptr::read_unaligned(rsdp_ptr) };
+        let rsdp: RsdpDescriptor = read_physical_unaligned(self.rsdp_address)?;
 
         // Validate signature
         if rsdp.signature != *b"RSD PTR " {
@@ -354,11 +397,21 @@ impl AcpiManager {
         }
 
         // Validate checksum
-        let basic_bytes =
-            unsafe { core::slice::from_raw_parts(self.rsdp_address as *const u8, 20) };
-        let sum: u8 = basic_bytes.iter().fold(0, |acc, &x| acc.wrapping_add(x));
-        if sum != 0 {
-            return Err("ACPI: RSDP checksum validation failed");
+        with_physical_bytes(self.rsdp_address, 20, |basic_bytes| {
+            let sum: u8 = basic_bytes.iter().fold(0, |acc, &x| acc.wrapping_add(x));
+            if sum != 0 {
+                return Err("ACPI: RSDP checksum validation failed");
+            }
+            Ok(())
+        })?;
+
+        if rsdp.revision >= 2 {
+            with_physical_bytes(self.rsdp_address, rsdp.length as usize, |extended_bytes| {
+                if !Self::validate_checksum(extended_bytes) {
+                    return Err("ACPI: RSDP extended checksum validation failed");
+                }
+                Ok(())
+            })?;
         }
 
         Ok(rsdp)
@@ -366,12 +419,11 @@ impl AcpiManager {
 
     /// Parse root table (RSDT or XSDT)
     fn parse_root_table(&mut self, root_addr: u64, is_xsdt: bool) -> Result<(), &'static str> {
-        let header_ptr = root_addr as *const AcpiTableHeader;
-        if header_ptr.is_null() {
+        if root_addr == 0 {
             return Err("ACPI: Root table pointer is null");
         }
 
-        let header = unsafe { ptr::read_unaligned(header_ptr) };
+        let header: AcpiTableHeader = read_physical_unaligned(root_addr)?;
 
         // Validate signature
         let expected_sig = if is_xsdt {
@@ -384,29 +436,37 @@ impl AcpiManager {
         }
 
         // Validate checksum
-        let table_bytes =
-            unsafe { core::slice::from_raw_parts(root_addr as *const u8, header.length as usize) };
-        if !Self::validate_checksum(table_bytes) {
-            return Err("ACPI: Root table checksum validation failed");
-        }
+        with_physical_bytes(root_addr, header.length as usize, |table_bytes| {
+            if !Self::validate_checksum(table_bytes) {
+                return Err("ACPI: Root table checksum validation failed");
+            }
 
-        // Parse table entries
-        let entry_size = if is_xsdt { 8 } else { 4 };
-        let num_entries = (header.length as usize - mem::size_of::<AcpiTableHeader>()) / entry_size;
-        let entries_offset = root_addr + mem::size_of::<AcpiTableHeader>() as u64;
+            // Parse table entries
+            let entry_size = if is_xsdt { 8 } else { 4 };
+            let header_size = mem::size_of::<AcpiTableHeader>();
+            if table_bytes.len() < header_size {
+                return Err("ACPI: Root table too short");
+            }
 
-        for i in 0..num_entries {
-            let entry_addr = entries_offset + (i * entry_size) as u64;
-            let table_addr = if is_xsdt {
-                let ptr = entry_addr as *const u64;
-                unsafe { ptr::read_unaligned(ptr) }
-            } else {
-                let ptr = entry_addr as *const u32;
-                unsafe { ptr::read_unaligned(ptr) as u64 }
-            };
+            let entries = &table_bytes[header_size..];
+            let num_entries = entries.len() / entry_size;
 
-            self.process_table(table_addr);
-        }
+            for i in 0..num_entries {
+                let start = i * entry_size;
+                let table_addr = if is_xsdt {
+                    let mut raw = [0u8; 8];
+                    raw.copy_from_slice(&entries[start..start + 8]);
+                    u64::from_le_bytes(raw)
+                } else {
+                    let mut raw = [0u8; 4];
+                    raw.copy_from_slice(&entries[start..start + 4]);
+                    u32::from_le_bytes(raw) as u64
+                };
+                self.process_table(table_addr);
+            }
+
+            Ok(())
+        })?;
 
         Ok(())
     }
@@ -417,12 +477,10 @@ impl AcpiManager {
             return;
         }
 
-        let header_ptr = table_addr as *const AcpiTableHeader;
-        if header_ptr.is_null() {
+        let Ok(header): Result<AcpiTableHeader, &'static str> = read_physical_unaligned(table_addr)
+        else {
             return;
-        }
-
-        let header = unsafe { ptr::read_unaligned(header_ptr) };
+        };
 
         match header.signature {
             [b'D', b'S', b'D', b'T'] => self.dsdt_address = table_addr,
@@ -437,88 +495,88 @@ impl AcpiManager {
 
     /// Parse FADT (Fixed ACPI Description Table)
     fn parse_fadt(&mut self) -> Result<(), &'static str> {
-        let fadt_ptr = self.fadt_address as *const Fadt;
-        if fadt_ptr.is_null() {
+        if self.fadt_address == 0 {
             return Err("ACPI: FADT pointer is null");
         }
 
-        let fadt = unsafe { ptr::read_unaligned(fadt_ptr) };
+        let header: AcpiTableHeader = read_physical_unaligned(self.fadt_address)?;
 
         // Validate signature
-        if fadt.header.signature != *FADT_SIGNATURE {
+        if header.signature != *FADT_SIGNATURE {
             return Err("ACPI: Invalid FADT signature");
         }
 
         // Validate checksum
-        let fadt_bytes = unsafe {
-            core::slice::from_raw_parts(self.fadt_address as *const u8, fadt.header.length as usize)
-        };
-        if !Self::validate_checksum(fadt_bytes) {
-            return Err("ACPI: FADT checksum validation failed");
-        }
+        with_physical_bytes(self.fadt_address, header.length as usize, |fadt_bytes| {
+            if !Self::validate_checksum(fadt_bytes) {
+                return Err("ACPI: FADT checksum validation failed");
+            }
+            Ok(())
+        })?;
 
         Ok(())
     }
 
     /// Parse MADT (Multiple APIC Description Table)
     fn parse_madt(&mut self) -> Result<(), &'static str> {
-        let madt_ptr = self.madt_address as *const Madt;
-        if madt_ptr.is_null() {
+        if self.madt_address == 0 {
             return Err("ACPI: MADT pointer is null");
         }
 
-        let madt = unsafe { ptr::read_unaligned(madt_ptr) };
+        let header: AcpiTableHeader = read_physical_unaligned(self.madt_address)?;
 
-        // Validate signature
-        if madt.header.signature != *MADT_SIGNATURE {
-            return Err("ACPI: Invalid MADT signature");
-        }
+        with_physical_bytes(self.madt_address, header.length as usize, |madt_bytes| {
+            let madt = unsafe { ptr::read_unaligned(madt_bytes.as_ptr() as *const Madt) };
 
-        // Validate checksum
-        let madt_bytes = unsafe {
-            core::slice::from_raw_parts(self.madt_address as *const u8, madt.header.length as usize)
-        };
-        if !Self::validate_checksum(madt_bytes) {
-            return Err("ACPI: MADT checksum validation failed");
-        }
-
-        self.local_apic_addr = madt.local_apic_addr;
-
-        // Parse MADT entries
-        let mut offset = mem::size_of::<Madt>();
-        let madt_end = madt.header.length as usize;
-
-        while offset < madt_end {
-            let entry_ptr = (self.madt_address + offset as u64) as *const u8;
-            if entry_ptr.is_null() {
-                break;
+            // Validate signature
+            if madt.header.signature != *MADT_SIGNATURE {
+                return Err("ACPI: Invalid MADT signature");
             }
 
-            let entry_type = unsafe { *entry_ptr };
-            let entry_length = unsafe { *(entry_ptr.add(1)) };
-
-            if entry_length == 0 {
-                break;
+            // Validate checksum
+            if !Self::validate_checksum(madt_bytes) {
+                return Err("ACPI: MADT checksum validation failed");
             }
 
-            match entry_type {
-                0 => self.parse_madt_processor_local_apic(entry_ptr),
-                1 => self.parse_madt_io_apic(entry_ptr),
-                2 => self.parse_madt_interrupt_source_override(entry_ptr),
-                // NMI, local APIC address override, x2APIC, GIC and other
-                // entry types are not yet parsed.
-                _ => {}
+            self.local_apic_addr = madt.local_apic_addr;
+
+            // Parse MADT entries
+            let mut offset = mem::size_of::<Madt>();
+            let madt_end = madt.header.length as usize;
+
+            while offset + 2 <= madt_end {
+                let entry_type = madt_bytes[offset];
+                let entry_length = madt_bytes[offset + 1] as usize;
+
+                if entry_length < 2 || offset + entry_length > madt_end {
+                    break;
+                }
+
+                let entry_bytes = &madt_bytes[offset..offset + entry_length];
+                match entry_type {
+                    0 => self.parse_madt_processor_local_apic(entry_bytes),
+                    1 => self.parse_madt_io_apic(entry_bytes),
+                    2 => self.parse_madt_interrupt_source_override(entry_bytes),
+                    // NMI, local APIC address override, x2APIC, GIC and other
+                    // entry types are not yet parsed.
+                    _ => {}
+                }
+
+                offset += entry_length;
             }
 
-            offset += entry_length as usize;
-        }
+            Ok(())
+        })?;
 
         Ok(())
     }
 
     /// Parse Processor Local APIC entry in MADT
-    fn parse_madt_processor_local_apic(&mut self, entry_ptr: *const u8) {
-        let entry_ptr = entry_ptr as *const MadtProcessorLocalApic;
+    fn parse_madt_processor_local_apic(&mut self, entry_bytes: &[u8]) {
+        if entry_bytes.len() < mem::size_of::<MadtProcessorLocalApic>() {
+            return;
+        }
+        let entry_ptr = entry_bytes.as_ptr() as *const MadtProcessorLocalApic;
         let entry = unsafe { ptr::read_unaligned(entry_ptr) };
 
         // Only add if the processor is enabled
@@ -532,8 +590,11 @@ impl AcpiManager {
     }
 
     /// Parse IO APIC entry in MADT
-    fn parse_madt_io_apic(&mut self, entry_ptr: *const u8) {
-        let entry_ptr = entry_ptr as *const MadtIoApic;
+    fn parse_madt_io_apic(&mut self, entry_bytes: &[u8]) {
+        if entry_bytes.len() < mem::size_of::<MadtIoApic>() {
+            return;
+        }
+        let entry_ptr = entry_bytes.as_ptr() as *const MadtIoApic;
         let entry = unsafe { ptr::read_unaligned(entry_ptr) };
 
         self.io_apics.push(IoApicInfo {
@@ -544,8 +605,11 @@ impl AcpiManager {
     }
 
     /// Parse Interrupt Source Override entry in MADT
-    fn parse_madt_interrupt_source_override(&mut self, entry_ptr: *const u8) {
-        let entry_ptr = entry_ptr as *const MadtInterruptSourceOverride;
+    fn parse_madt_interrupt_source_override(&mut self, entry_bytes: &[u8]) {
+        if entry_bytes.len() < mem::size_of::<MadtInterruptSourceOverride>() {
+            return;
+        }
+        let entry_ptr = entry_bytes.as_ptr() as *const MadtInterruptSourceOverride;
         let entry = unsafe { ptr::read_unaligned(entry_ptr) };
 
         self.interrupt_overrides.push(InterruptSourceOverride {
@@ -629,8 +693,10 @@ impl AcpiManager {
             return self.platform_shutdown();
         }
 
-        let fadt_ptr = self.fadt_address as *const Fadt;
-        let fadt = unsafe { ptr::read_unaligned(fadt_ptr) };
+        let fadt: Fadt = match read_physical_unaligned(self.fadt_address) {
+            Ok(value) => value,
+            Err(_) => return self.platform_shutdown(),
+        };
 
         // Try to use PM1A_CNT register if available
         if fadt.pm1a_cnt_blk != 0 {
@@ -690,8 +756,10 @@ impl AcpiManager {
             return self.platform_reset();
         }
 
-        let fadt_ptr = self.fadt_address as *const Fadt;
-        let fadt = unsafe { ptr::read_unaligned(fadt_ptr) };
+        let fadt: Fadt = match read_physical_unaligned(self.fadt_address) {
+            Ok(value) => value,
+            Err(_) => return self.platform_reset(),
+        };
 
         // FADT reset register is in fadt.reset_reg (12 bytes = GAS structure)
         // Try to use reset register if available
@@ -778,8 +846,7 @@ impl AcpiManager {
             return Err("ACPI: No RSDP available");
         }
 
-        let rsdp_ptr = self.rsdp_address as *const RsdpDescriptor;
-        let rsdp = unsafe { ptr::read_unaligned(rsdp_ptr) };
+        let rsdp: RsdpDescriptor = read_physical_unaligned(self.rsdp_address)?;
 
         // Convert OEM ID to string (6 bytes, may have trailing spaces)
         let mut oem_id = alloc::string::String::new();

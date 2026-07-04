@@ -2,6 +2,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -517,11 +518,6 @@ fn default_read(path: &str) -> Result<Vec<u8>, SaifsError> {
     vfs::read_path(path).map_err(map_str_err)
 }
 
-fn default_write(path: &str, data: &[u8]) -> Result<usize, SaifsError> {
-    vfs::write_path(path, data).map_err(map_str_err)?;
-    Ok(data.len())
-}
-
 pub struct SaifsHandle {
     id: HandleId,
     path: String,
@@ -529,6 +525,7 @@ pub struct SaifsHandle {
     object_id: Option<ObjectId>,
     provider_id: ProviderId,
     kind: SaifsNodeKind,
+    offset: Cell<usize>,
 }
 
 impl SaifsHandle {
@@ -589,7 +586,18 @@ impl Handle for SaifsHandle {
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, SaifsError> {
-        default_write(&self.path, data)
+        let fd =
+            vfs::open(&self.path, vfs::OpenOptions::read_write_create()).map_err(map_str_err)?;
+        let seek_result = vfs::seek(fd, vfs::SeekFrom::Start(self.offset.get()));
+        let write_result = seek_result
+            .and_then(|_| vfs::write(fd, data))
+            .map_err(map_str_err);
+        let close_result = vfs::close(fd).map_err(map_str_err);
+
+        let written = write_result?;
+        close_result?;
+        self.offset.set(self.offset.get().saturating_add(written));
+        Ok(written)
     }
 
     fn query(&self, key: &str) -> Result<Property, SaifsError> {
@@ -895,6 +903,7 @@ pub fn open(path: &str) -> Result<SaifsHandle, SaifsError> {
         object_id: lookup.object_id,
         provider_id: resolved.provider,
         kind: lookup.kind,
+        offset: Cell::new(0),
     })
 }
 

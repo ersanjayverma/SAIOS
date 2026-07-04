@@ -13,6 +13,7 @@ use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::*;
 
 const COM1_PORT: u16 = 0x3F8;
+const HANDOFF_MAX_ADDRESS: u64 = 0x3FFF_FFFF;
 
 #[inline(always)]
 fn io_in8(port: u16) -> u8 {
@@ -172,8 +173,11 @@ fn main() -> Status {
     boot_log("segments copied");
     let stack_pages = 16;
 
-    let stack =
-        match boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, stack_pages) {
+    let stack = match boot::allocate_pages(
+        AllocateType::MaxAddress(HANDOFF_MAX_ADDRESS),
+        MemoryType::LOADER_DATA,
+        stack_pages,
+    ) {
             Ok(stack) => stack,
             Err(e) => {
                 println!("Stack allocation failed: {:?}", e.status());
@@ -197,7 +201,7 @@ fn main() -> Status {
 
     let boot_info_pages = (core::mem::size_of::<efi_main::SaiosBootInfo>() as u64).div_ceil(4096);
     let boot_info_storage = match boot::allocate_pages(
-        AllocateType::AnyPages,
+        AllocateType::MaxAddress(HANDOFF_MAX_ADDRESS),
         MemoryType::LOADER_DATA,
         boot_info_pages as usize,
     ) {
@@ -225,7 +229,7 @@ fn main() -> Status {
     let entries_pages = (entries_bytes as u64).div_ceil(4096);
 
     let entries_storage = match boot::allocate_pages(
-        AllocateType::AnyPages,
+        AllocateType::MaxAddress(HANDOFF_MAX_ADDRESS),
         MemoryType::LOADER_DATA,
         entries_pages as usize,
     ) {

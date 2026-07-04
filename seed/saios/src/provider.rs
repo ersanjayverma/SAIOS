@@ -216,16 +216,13 @@ impl Provider for DeviceProvider {
         "/devices"
     }
 
-    /// Probes the PCI bus so that subsequent enumerations reflect discovered
-    /// devices.
-    fn initialize(&mut self) {
-        pci::init();
-    }
+    /// Hardware probing is deferred until an explicit driver or shell command.
+    fn initialize(&mut self) {}
 
-    /// Enumerates PCI devices currently known to the kernel.
+    /// Enumerates PCI devices already known to the kernel without probing.
     fn enumerate(&self) -> Vec<ProviderObject> {
         let mut out = Vec::new();
-        for (idx, dev) in pci::devices().into_iter().enumerate() {
+        for (idx, dev) in pci::devices_snapshot().into_iter().enumerate() {
             out.push(ProviderObject {
                 path: format!("devices/pci{}", idx),
                 name: format!("pci{}", idx),

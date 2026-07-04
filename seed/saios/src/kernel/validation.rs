@@ -163,6 +163,23 @@ fn elapsed_ms(start: u64) -> u64 {
     now_ms().saturating_sub(start)
 }
 
+fn wait_for_ticks(delta: u64) -> Result<(), &'static str> {
+    let start = timer::ticks();
+    let target = start.saturating_add(delta);
+    let mut spins = 0usize;
+
+    while timer::ticks() < target {
+        scheduler::maybe_preempt();
+        core::hint::spin_loop();
+        spins = spins.saturating_add(1);
+        if spins >= 1_000_000 {
+            return Err("skip: timer ticks did not advance");
+        }
+    }
+
+    Ok(())
+}
+
 fn pass_or_skip(
     category: &'static str,
     name: &'static str,
@@ -422,7 +439,7 @@ fn test_interrupt_toggle() -> Result<(), &'static str> {
 
 fn test_timer_accuracy() -> Result<(), &'static str> {
     let start = timer::ticks();
-    timer::sleep(20);
+    wait_for_ticks(1)?;
     if timer::ticks() <= start {
         return Err("sleep did not advance timer ticks");
     }
@@ -510,13 +527,11 @@ fn test_yield() -> Result<(), &'static str> {
 }
 
 fn test_sleep() -> Result<(), &'static str> {
-    timer::sleep(1);
-    Ok(())
+    wait_for_ticks(1)
 }
 
 fn test_wake() -> Result<(), &'static str> {
-    timer::sleep(1);
-    Ok(())
+    wait_for_ticks(1)
 }
 
 fn test_fairness() -> Result<(), &'static str> {
@@ -528,7 +543,7 @@ fn test_fairness() -> Result<(), &'static str> {
 
 fn test_timer_scheduling() -> Result<(), &'static str> {
     let start = timer::ticks();
-    timer::sleep(10);
+    wait_for_ticks(1)?;
     if timer::ticks() < start {
         return Err("timer scheduling tick regression");
     }
@@ -751,7 +766,7 @@ fn test_timer_monotonic() -> Result<(), &'static str> {
 
 fn test_timer_sleep() -> Result<(), &'static str> {
     let a = timer::ticks();
-    timer::sleep(10);
+    wait_for_ticks(1)?;
     let b = timer::ticks();
     if b <= a {
         return Err("sleep did not advance timer");

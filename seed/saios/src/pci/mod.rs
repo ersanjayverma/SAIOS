@@ -201,6 +201,11 @@ pub fn init() {
 pub fn devices() -> Vec<PciDevice> {
     init();
 
+    devices_snapshot()
+}
+
+/// Returns currently cached PCI devices without probing hardware.
+pub fn devices_snapshot() -> Vec<PciDevice> {
     lock();
     let db = unsafe { &*DB.get() };
     let snapshot = db.devices.clone();

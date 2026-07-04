@@ -8,7 +8,6 @@ use super::session::CommandContext;
 use crate::console;
 use crate::kernel::process;
 use crate::saifs;
-use crate::vfs;
 
 pub struct CommandDispatcher;
 
@@ -296,15 +295,33 @@ impl CommandDispatcher {
     }
 
     fn write_redirect(&self, path: &str, data: &str, append: bool) -> ShellResult {
+        let path = self.resolve_shell_path(path);
         let final_data = if append {
-            let mut merged = saifs::read_text(path).unwrap_or_default();
+            let mut merged = saifs::read_text(path.as_str()).unwrap_or_default();
             merged.push_str(data);
             merged
         } else {
             data.to_string()
         };
 
-        let _ = saifs::touch(path);
-        vfs::write_path(path, final_data.as_bytes())
+        let _ = saifs::remove(path.as_str());
+        let _ = saifs::touch(path.as_str());
+        let handle = saifs::open(path.as_str()).map_err(|_| "redirect: output open failed")?;
+        crate::saifs::Handle::write(&handle, final_data.as_bytes())
+            .map(|_| ())
+            .map_err(|_| "redirect: output write failed")
+    }
+
+    fn resolve_shell_path(&self, path: &str) -> String {
+        if path.starts_with('/') {
+            return path.to_string();
+        }
+
+        let cwd = saifs::pwd();
+        if cwd == "/" {
+            alloc::format!("/{}", path)
+        } else {
+            alloc::format!("{}/{}", cwd, path)
+        }
     }
 }

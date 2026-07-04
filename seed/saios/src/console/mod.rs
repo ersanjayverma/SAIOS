@@ -345,24 +345,9 @@ pub fn init() {
         (*MOUSE.get()).init();
     }
     if !keyboard_ready {
-        let _ = driver::start("usb");
-        let usb_hosts = usb::controller_count();
-        if usb_hosts != 0 {
-            if usb::hid_input_ready() {
-                hal::arch::x86_64::console::_print(format_args!(
-                    "console: PS/2 keyboard unavailable; xHCI host(s) initialized with connected USB port(s), but HID enumeration/input events are not implemented yet\n"
-                ));
-            } else {
-                hal::arch::x86_64::console::_print(format_args!(
-                    "console: PS/2 keyboard unavailable; detected {} USB controller(s), but USB HID input is not implemented yet\n",
-                    usb_hosts
-                ));
-            }
-        } else {
-            hal::arch::x86_64::console::_print(format_args!(
-                "console: PS/2 keyboard unavailable; legacy 8042 path not present or not responding\n"
-            ));
-        }
+        hal::arch::x86_64::console::_print(format_args!(
+            "console: PS/2 keyboard unavailable; USB probing deferred until explicit usb/rescan command\n"
+        ));
     }
     let _ = driver::ensure_driver(
         "serial",

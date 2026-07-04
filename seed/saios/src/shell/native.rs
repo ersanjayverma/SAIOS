@@ -496,17 +496,8 @@ fn print_command_table(ctx: &CommandContext) {
         .unwrap_or(7)
         .max(7);
 
-    console::println!(
-        "{:<width$}  DESCRIPTION",
-        "COMMAND",
-        width = name_width
-    );
-    console::println!(
-        "{:-<width$}  {:-<11}",
-        "",
-        "",
-        width = name_width
-    );
+    console::println!("{:<width$}  DESCRIPTION", "COMMAND", width = name_width);
+    console::println!("{:-<width$}  {:-<11}", "", "", width = name_width);
 
     for item in &ctx.command_catalog {
         console::println!(
@@ -2169,7 +2160,9 @@ fn cmd_usb(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
                     console::println!("  note: {}", err);
                 }
             }
-            console::println!("usb: xHCI init/probe is present; HID keyboard/mouse still needs device enumeration, transfer rings, and report parsing");
+            console::println!(
+                "usb: xHCI init/probe is present; HID keyboard/mouse still needs device enumeration, transfer rings, and report parsing"
+            );
             Ok(())
         }
         _ => Err("usb: usage: usb [status|scan|rescan|up]"),

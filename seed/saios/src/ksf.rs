@@ -349,15 +349,9 @@ impl KernelService for ConsoleService {
     }
 
     fn start(&mut self) -> Result<(), &'static str> {
-        let _ = crate::kernel::driver::start("pci");
-        let _ = crate::kernel::driver::start("storage");
-        let _ = crate::kernel::driver::start("fat32");
-        let _ = crate::kernel::driver::start("network");
-        let _ = crate::kernel::driver::start("loopback");
-        let _ = crate::kernel::driver::start("ethernet");
-        let _ = crate::kernel::driver::start("wifi");
-        let _ = crate::kernel::driver::start("dhcp");
-        let _ = crate::kernel::driver::start("dns");
+        // Keep console startup side-effect free. Hardware-heavy PCI, storage,
+        // USB and network scans are available through the driver manager and
+        // explicit shell commands, but must not block early boot on real HW.
         Ok(())
     }
 

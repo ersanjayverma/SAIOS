@@ -34,10 +34,10 @@ pub mod taskman;
 pub mod timer;
 pub mod vfs;
 pub mod vmm;
-use core::mem::size_of;
+use core::{arch::global_asm, mem::size_of};
 use efi_main::SaiosBootInfo;
 use graphics::display::FramebufferDisplay;
-use hal::arch::x86_64::{cpuid, gdt, idt, interrupt, msr};
+use hal::arch::x86_64::{gdt, idt, interrupt};
 use seed::Seed;
 
 unsafe extern "C" {
@@ -45,14 +45,28 @@ unsafe extern "C" {
     static _kernel_end: u8;
 }
 
+global_asm!(
+    ".section .text.boot, \"ax\"",
+    ".global _start",
+    "_start:",
+    "cli",
+    "cld",
+    "mov dx, 0x3f8",
+    "mov al, 'K'",
+    "out dx, al",
+    "and rsp, -16",
+    "call saios_kernel_main",
+    "2:",
+    "hlt",
+    "jmp 2b",
+);
+
 const BOOT_STAGE_COLOR_DIAGNOSTICS: bool = false;
-const LATE_MICROCODE_PROBE_ENABLED: bool = true;
 
 const STAGE_KERNEL_ENTRY: u32 = 0x00FF_0000;
 const STAGE_BOOTINFO_OK: u32 = 0x00FF_4000;
 const STAGE_GDT_OK: u32 = 0x00FF_A000;
 const STAGE_IDT_OK: u32 = 0x00FF_FF00;
-const STAGE_MICROCODE_OK: u32 = 0x0000_FFFF;
 const STAGE_MAP_SLICE_OK: u32 = 0x00FF_00FF;
 const STAGE_PMM_OK: u32 = 0x0000_FF00;
 const STAGE_VMM_OK: u32 = 0x0000_80FF;
@@ -80,26 +94,6 @@ fn mark_boot_stage(framebuffer_info: efi_main::graphics::FramebufferInfo, color:
     }
 }
 
-fn detect_microcode_revision() -> Result<u32, &'static str> {
-    const CPUID_FEATURES_LEAF: u32 = 0x0000_0001;
-    const IA32_BIOS_SIGN_ID: u32 = 0x0000_008B;
-
-    let features = cpuid::features();
-    if !features.msr {
-        return Err("MSR unsupported");
-    }
-
-    let (_, _, ecx, _) = cpuid::cpuid(CPUID_FEATURES_LEAF);
-    if (ecx & (1 << 31)) != 0 {
-        return Err("running under hypervisor");
-    }
-
-    // Latch current microcode revision into IA32_BIOS_SIGN_ID.
-    msr::wrmsr(IA32_BIOS_SIGN_ID, 0);
-    let _ = cpuid::cpuid(CPUID_FEATURES_LEAF);
-    Ok((msr::rdmsr(IA32_BIOS_SIGN_ID) >> 32) as u32)
-}
-
 /// # Safety
 ///
 /// This is the kernel entry point invoked by the bootloader. `boot_info` must
@@ -107,10 +101,10 @@ fn detect_microcode_revision() -> Result<u32, &'static str> {
 /// remains valid for the lifetime of the kernel. Must be called exactly once
 /// with interrupts in a defined state.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
+pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> ! {
     // Bring up UART immediately so post-ExitBootServices progress is always visible.
     hal::arch::x86_64::console::init_serial();
-    kernel_trace_byte(b'K');
+    kernel_trace_byte(b'R');
     hal::arch::x86_64::console::set_output_enabled(true);
     hal::arch::x86_64::console::_print(format_args!("kernel: _start enter\n"));
     interrupt::disable();
@@ -213,22 +207,12 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
     mark_boot_stage(framebuffer_info, STAGE_KSF_READY);
     kernel::timeline::mark("Services");
 
-    if LATE_MICROCODE_PROBE_ENABLED {
-        match detect_microcode_revision() {
-            Ok(revision) => hal::arch::x86_64::console::_print(format_args!(
-                "kernel: cpu microcode revision={:#x}\n",
-                revision
-            )),
-            Err(reason) => hal::arch::x86_64::console::_print(format_args!(
-                "kernel: cpu microcode revision unavailable ({})\n",
-                reason
-            )),
-        }
-        mark_boot_stage(framebuffer_info, STAGE_MICROCODE_OK);
-    }
-
     // Initialize ACPI subsystem
     if boot_info.acpi.rsdp != 0 {
+        hal::arch::x86_64::console::_print(format_args!(
+            "kernel: ACPI init begin rsdp={:#x}\n",
+            boot_info.acpi.rsdp
+        ));
         match kernel::acpi::init(boot_info.acpi.rsdp) {
             Ok(()) => {
                 if let Some(acpi_mgr) = kernel::acpi::get_manager()
@@ -250,6 +234,7 @@ pub unsafe extern "C" fn _start(boot_info: *const SaiosBootInfo) -> ! {
                 ));
             }
         }
+        hal::arch::x86_64::console::_print(format_args!("kernel: ACPI init end\n"));
     } else {
         hal::arch::x86_64::console::_print(format_args!("kernel: No ACPI RSDP found\n"));
     }
