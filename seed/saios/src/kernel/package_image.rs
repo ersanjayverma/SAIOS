@@ -1,6 +1,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::vfs;
 
@@ -21,10 +22,16 @@ const SHARED_LIB_ENTRIES: &[&str] = &[
 
 const BIN_ENTRIES: &[&str] = &[
     "hello", "calc", "editor", "shell", "ls", "cat", "cp", "mv", "rm", "mkdir", "ps", "kill",
-    "top", "uname", "stress", "cc", "taskman", "diskpart",
+    "top", "uname", "stress", "cc", "taskman", "diskpart", "busybox",
 ];
 
+const EMBEDDED_BUSYBOX: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../busybox"));
+
 static MOUNTED: AtomicBool = AtomicBool::new(false);
+
+const ELF_PT_LOAD: u32 = 1;
+const ELF_PT_DYNAMIC: u32 = 2;
+const ELF_PT_INTERP: u32 = 3;
 
 #[derive(Copy, Clone, Debug)]
 pub struct PackageImageStatus {
@@ -180,6 +187,118 @@ fn seed_shared_libraries() -> Result<(), &'static str> {
     Ok(())
 }
 
+fn seed_busybox_from_kernel_image() -> Result<(), &'static str> {
+    verify_busybox_static_elf(EMBEDDED_BUSYBOX)?;
+    ensure_file("/bin/busybox")?;
+    vfs::write_path("/bin/busybox", EMBEDDED_BUSYBOX)
+}
+
+fn read_u16_le(data: &[u8], off: usize) -> Option<u16> {
+    let bytes = data.get(off..off + 2)?;
+    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_u32_le(data: &[u8], off: usize) -> Option<u32> {
+    let bytes = data.get(off..off + 4)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_u64_le(data: &[u8], off: usize) -> Option<u64> {
+    let bytes = data.get(off..off + 8)?;
+    Some(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+fn verify_busybox_static_elf(image: &[u8]) -> Result<(), &'static str> {
+    if image.len() < 64 {
+        return Err("busybox: invalid ELF image");
+    }
+    if image[0] != 0x7F || image[1] != b'E' || image[2] != b'L' || image[3] != b'F' {
+        return Err("busybox: not an ELF binary");
+    }
+    if image[4] != 2 || image[5] != 1 {
+        return Err("busybox: unsupported ELF class or endianness");
+    }
+
+    let phoff = read_u64_le(image, 32).ok_or("busybox: malformed ELF header")? as usize;
+    let phentsize = read_u16_le(image, 54).ok_or("busybox: malformed ELF header")? as usize;
+    let phnum = read_u16_le(image, 56).ok_or("busybox: malformed ELF header")? as usize;
+
+    if phentsize < 56 || phnum == 0 {
+        return Err("busybox: malformed program headers");
+    }
+
+    let table_bytes = phentsize
+        .checked_mul(phnum)
+        .ok_or("busybox: malformed program headers")?;
+    let ph_end = phoff
+        .checked_add(table_bytes)
+        .ok_or("busybox: malformed program headers")?;
+    if ph_end > image.len() {
+        return Err("busybox: truncated program headers");
+    }
+
+    let mut has_load_segment = false;
+    for idx in 0..phnum {
+        let off = phoff + idx * phentsize;
+        let p_type = read_u32_le(image, off).ok_or("busybox: malformed program header")?;
+        let p_filesz = read_u64_le(image, off + 32).ok_or("busybox: malformed program header")?;
+
+        if p_type == ELF_PT_LOAD {
+            has_load_segment = true;
+        }
+        if p_type == ELF_PT_INTERP && p_filesz > 0 {
+            return Err("busybox: dynamically linked (PT_INTERP present)");
+        }
+        if p_type == ELF_PT_DYNAMIC && p_filesz > 0 {
+            return Err("busybox: dynamically linked (PT_DYNAMIC present)");
+        }
+    }
+
+    if !has_load_segment {
+        return Err("busybox: no loadable segment");
+    }
+
+    Ok(())
+}
+
+fn busybox_source_candidates() -> Vec<alloc::string::String> {
+    let mut out = Vec::new();
+    for volume in crate::driver::storage::volumes_cached() {
+        if volume.name == "tmpfs" {
+            continue;
+        }
+        let Some(mountpoint) = volume.mounted_at else {
+            continue;
+        };
+        let root = mountpoint.trim_end_matches('/');
+        out.push(alloc::format!("{}/busybox", root));
+        out.push(alloc::format!("{}/bin/busybox", root));
+        out.push(alloc::format!("{}/usr/bin/busybox", root));
+    }
+    out
+}
+
+pub fn install_busybox_from_storage_to_tmpfs() -> Result<bool, &'static str> {
+    for candidate in busybox_source_candidates() {
+        if crate::driver::storage::mounted_volume_for_path_cached(candidate.as_str()).is_none() {
+            continue;
+        }
+
+        let Ok(image) = vfs::read_path(candidate.as_str()) else {
+            continue;
+        };
+
+        verify_busybox_static_elf(image.as_slice())?;
+        ensure_file("/bin/busybox")?;
+        vfs::write_path("/bin/busybox", image.as_slice())?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 fn mount_default_inner() -> Result<(), &'static str> {
     for d in ROOT_DIRS {
         ensure_dir(d)?;
@@ -187,6 +306,7 @@ fn mount_default_inner() -> Result<(), &'static str> {
 
     seed_shared_libraries()?;
     seed_binaries()?;
+    seed_busybox_from_kernel_image()?;
 
     ensure_file("/etc/profile")?;
     ensure_file("/etc/hostname")?;
