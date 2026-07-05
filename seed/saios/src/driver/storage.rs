@@ -2571,6 +2571,119 @@ fn ext4_list_dir(
     Ok(out)
 }
 
+fn ext4_lookup_path_impl<C, LoadInode, ListDir, ReadInodeData>(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    rel: &str,
+    ctx: &mut C,
+    mut load_inode: LoadInode,
+    mut list_dir: ListDir,
+    mut read_inode_data: ReadInodeData,
+) -> Result<(u32, Ext4Inode), &'static str>
+where
+    LoadInode: FnMut(
+        &DiskDevice,
+        &Partition,
+        &Ext4Superblock,
+        u32,
+        &mut C,
+    ) -> Result<Ext4Inode, &'static str>,
+    ListDir: FnMut(
+        &DiskDevice,
+        &Partition,
+        &Ext4Superblock,
+        u32,
+        &Ext4Inode,
+        &mut C,
+    ) -> Result<Vec<Ext4DirEntry>, &'static str>,
+    ReadInodeData: FnMut(
+        &DiskDevice,
+        &Partition,
+        &Ext4Superblock,
+        &Ext4Inode,
+        &mut C,
+    ) -> Result<Vec<u8>, &'static str>,
+{
+    let mut path = normalize_path(rel);
+
+    for _ in 0..EXT4_MAX_SYMLINK_DEPTH {
+        let mut inode_no = 2u32;
+        let mut inode = load_inode(disk, part, sb, inode_no, ctx)?;
+        let path_snap = path.clone();
+        let segments: Vec<&str> = path_snap.split('/').filter(|s| !s.is_empty()).collect();
+        let mut resolved_parts: Vec<String> = Vec::new();
+        let mut restarted = false;
+
+        for (idx, seg) in segments.iter().enumerate() {
+            if (inode.mode & EXT4_S_IFDIR) == 0 {
+                return Err("not a directory");
+            }
+            let entries = list_dir(disk, part, sb, inode_no, &inode, ctx)?;
+            let mut found_ino: Option<u32> = None;
+            for ent in &entries {
+                if ent.name == *seg {
+                    found_ino = Some(ent.inode);
+                    break;
+                }
+            }
+            let next = found_ino.ok_or("path not found")?;
+            let next_inode = load_inode(disk, part, sb, next, ctx)?;
+
+            if (next_inode.mode & EXT4_S_IFLNK) != 0 {
+                let target_bytes = if next_inode.size as usize <= next_inode.block.len() {
+                    next_inode.block[..next_inode.size as usize].to_vec()
+                } else {
+                    read_inode_data(disk, part, sb, &next_inode, ctx)?
+                };
+                let target = core::str::from_utf8(target_bytes.as_slice())
+                    .map_err(|_| "storage: ext4 symlink target is not utf-8")?;
+                let remaining = if idx + 1 < segments.len() {
+                    segments[idx + 1..].join("/")
+                } else {
+                    String::new()
+                };
+                let parent = if resolved_parts.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("/{}", resolved_parts.join("/"))
+                };
+                let combined = if target.starts_with('/') {
+                    if remaining.is_empty() {
+                        target.to_string()
+                    } else {
+                        format!("{}/{}", target.trim_end_matches('/'), remaining)
+                    }
+                } else {
+                    let base = if parent == "/" {
+                        format!("/{}", target)
+                    } else {
+                        format!("{}/{}", parent, target)
+                    };
+                    if remaining.is_empty() {
+                        base
+                    } else {
+                        format!("{}/{}", base.trim_end_matches('/'), remaining)
+                    }
+                };
+                path = normalize_path(combined.as_str());
+                restarted = true;
+                break;
+            }
+
+            inode_no = next;
+            inode = next_inode;
+            resolved_parts.push((*seg).to_string());
+        }
+
+        if !restarted {
+            return Ok((inode_no, inode));
+        }
+    }
+
+    Err("storage: ext4 symlink resolution limit exceeded")
+}
+
 fn ext4_first_extent_in_node(
     disk: &DiskDevice,
     part: &Partition,
@@ -2713,82 +2826,18 @@ fn ext4_lookup_path(
     rel: &str,
 ) -> Result<(Ext4Superblock, u32, Ext4Inode), &'static str> {
     let sb = ext4_load_superblock(disk, part)?;
-    let mut path = normalize_path(rel);
-
-    for _ in 0..EXT4_MAX_SYMLINK_DEPTH {
-        let mut inode_no = 2u32;
-        let mut inode = ext4_load_inode(disk, part, &sb, inode_no)?;
-        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        let mut resolved_parts: Vec<&str> = Vec::new();
-        let mut restarted = false;
-
-        for (idx, seg) in segments.iter().enumerate() {
-            if (inode.mode & EXT4_S_IFDIR) == 0 {
-                return Err("not a directory");
-            }
-            let entries = ext4_list_dir(disk, part, &sb, &inode)?;
-            let mut found = None;
-            for ent in entries {
-                if ent.name == *seg {
-                    found = Some(ent.inode);
-                    break;
-                }
-            }
-            let next = found.ok_or("path not found")?;
-            let next_inode = ext4_load_inode(disk, part, &sb, next)?;
-
-            if (next_inode.mode & EXT4_S_IFLNK) != 0 {
-                let target_bytes = if next_inode.size as usize <= next_inode.block.len() {
-                    next_inode.block[..next_inode.size as usize].to_vec()
-                } else {
-                    ext4_read_inode_data(disk, part, &sb, &next_inode)?
-                };
-                let target = core::str::from_utf8(target_bytes.as_slice())
-                    .map_err(|_| "storage: ext4 symlink target is not utf-8")?;
-                let remaining = if idx + 1 < segments.len() {
-                    segments[idx + 1..].join("/")
-                } else {
-                    String::new()
-                };
-                let parent = if resolved_parts.is_empty() {
-                    "/".to_string()
-                } else {
-                    format!("/{}", resolved_parts.join("/"))
-                };
-                let combined = if target.starts_with('/') {
-                    if remaining.is_empty() {
-                        target.to_string()
-                    } else {
-                        format!("{}/{}", target.trim_end_matches('/'), remaining)
-                    }
-                } else {
-                    let base = if parent == "/" {
-                        format!("/{}", target)
-                    } else {
-                        format!("{}/{}", parent, target)
-                    };
-                    if remaining.is_empty() {
-                        base
-                    } else {
-                        format!("{}/{}", base.trim_end_matches('/'), remaining)
-                    }
-                };
-                path = normalize_path(combined.as_str());
-                restarted = true;
-                break;
-            }
-
-            inode_no = next;
-            inode = next_inode;
-            resolved_parts.push(seg);
-        }
-
-        if !restarted {
-            return Ok((sb, inode_no, inode));
-        }
-    }
-
-    Err("storage: ext4 symlink resolution limit exceeded")
+    let mut ctx = ();
+    let (inode_no, inode) = ext4_lookup_path_impl(
+        disk,
+        part,
+        &sb,
+        rel,
+        &mut ctx,
+        |disk, part, sb, inode_no, _| ext4_load_inode(disk, part, sb, inode_no),
+        |disk, part, sb, _inode_no, inode, _| ext4_list_dir(disk, part, sb, inode),
+        |disk, part, sb, inode, _| ext4_read_inode_data(disk, part, sb, inode),
+    )?;
+    Ok((sb, inode_no, inode))
 }
 
 fn ext4_with_volume<R>(
@@ -3216,85 +3265,20 @@ fn ext4_lookup_path_c(
     }
 
     let sb = cache.sb;
-    let mut path = norm.clone();
-
-    for _ in 0..EXT4_MAX_SYMLINK_DEPTH {
-        let mut inode_no = 2u32;
-        let mut inode = ext4_load_inode_c(disk, part, &sb, inode_no, cache)?;
-        // Clone path for this iteration so `path` can be reassigned on symlink.
-        let path_snap = path.clone();
-        let segments: Vec<&str> = path_snap.split('/').filter(|s| !s.is_empty()).collect();
-        let mut resolved_parts: Vec<String> = Vec::new();
-        let mut restarted = false;
-
-        for (idx, seg) in segments.iter().enumerate() {
-            if (inode.mode & EXT4_S_IFDIR) == 0 {
-                return Err("not a directory");
-            }
-            let entries = ext4_list_dir_c(disk, part, &sb, inode_no, &inode, cache)?;
-            let mut found_ino: Option<u32> = None;
-            for ent in &entries {
-                if ent.name == *seg {
-                    found_ino = Some(ent.inode);
-                    break;
-                }
-            }
-            let next = found_ino.ok_or("path not found")?;
-            let next_inode = ext4_load_inode_c(disk, part, &sb, next, cache)?;
-
-            if (next_inode.mode & EXT4_S_IFLNK) != 0 {
-                let target_bytes = if next_inode.size as usize <= next_inode.block.len() {
-                    next_inode.block[..next_inode.size as usize].to_vec()
-                } else {
-                    ext4_read_inode_data_c(disk, part, &sb, &next_inode, cache)?
-                };
-                let target = core::str::from_utf8(target_bytes.as_slice())
-                    .map_err(|_| "storage: ext4 symlink target is not utf-8")?;
-                let remaining = if idx + 1 < segments.len() {
-                    segments[idx + 1..].join("/")
-                } else {
-                    String::new()
-                };
-                let parent = if resolved_parts.is_empty() {
-                    "/".to_string()
-                } else {
-                    format!("/{}", resolved_parts.join("/"))
-                };
-                let combined = if target.starts_with('/') {
-                    if remaining.is_empty() {
-                        target.to_string()
-                    } else {
-                        format!("{}/{}", target.trim_end_matches('/'), remaining)
-                    }
-                } else {
-                    let base = if parent == "/" {
-                        format!("/{}", target)
-                    } else {
-                        format!("{}/{}", parent, target)
-                    };
-                    if remaining.is_empty() {
-                        base
-                    } else {
-                        format!("{}/{}", base.trim_end_matches('/'), remaining)
-                    }
-                };
-                path = normalize_path(combined.as_str());
-                restarted = true;
-                break;
-            }
-
-            inode_no = next;
-            inode = next_inode;
-            resolved_parts.push((*seg).to_string());
-        }
-
-        if !restarted {
-            // Cache the resolved path → inode mapping for future lookups.
-            cache.paths.put(norm.clone(), inode_no);
-            return Ok((inode_no, inode));
-        }
-    }
-    Err("storage: ext4 symlink resolution limit exceeded")
+    let (inode_no, inode) = ext4_lookup_path_impl(
+        disk,
+        part,
+        &sb,
+        norm.as_str(),
+        cache,
+        |disk, part, sb, inode_no, cache| ext4_load_inode_c(disk, part, sb, inode_no, cache),
+        |disk, part, sb, inode_no, inode, cache| {
+            ext4_list_dir_c(disk, part, sb, inode_no, inode, cache)
+        },
+        |disk, part, sb, inode, cache| ext4_read_inode_data_c(disk, part, sb, inode, cache),
+    )?;
+    cache.paths.put(norm.clone(), inode_no);
+    Ok((inode_no, inode))
 }
 
 fn mounted_volume_info_internal(

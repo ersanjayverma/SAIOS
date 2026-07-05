@@ -13,6 +13,7 @@ struct StackGuard([u8; 4096]);
 
 static mut USER_TRANSITION_KERNEL_STACK: AlignedStack = AlignedStack([0; 32 * 1024]);
 static mut USER_TRANSITION_KERNEL_STACK_GUARD: StackGuard = StackGuard([0; 4096]);
+const USER_ENTRY_ENABLE_INTERRUPTS: bool = false;
 
 global_asm!(
     // Boot entry trampoline and static boot page tables.
@@ -155,11 +156,59 @@ global_asm!(
     "pop rbx",
     "pop rax",
     "iretq",
+
+    ".section .bss, \"aw\", @nobits",
+    ".balign 8",
+    "hal_user_fault_return_rsp:",
+    ".quad 0",
+    "hal_user_fault_return_rip:",
+    ".quad 0",
+    ".balign 1",
+    "hal_user_fault_return_active:",
+    ".byte 0",
+    ".section .text.boot, \"ax\"",
+
+    ".global hal_enter_user_mode_recoverable",
+    "hal_enter_user_mode_recoverable:",
+    // SysV args: rdi=entry, rsi=user_rsp, rdx=rflags, rcx=user_ss, r8=user_cs
+    "mov [rip + hal_user_fault_return_rsp], rsp",
+    "lea rax, [rip + 2f]",
+    "mov [rip + hal_user_fault_return_rip], rax",
+    "mov byte ptr [rip + hal_user_fault_return_active], 1",
+    "push rcx", // SS
+    "push rsi", // RSP
+    "push rdx", // RFLAGS
+    "push r8",  // CS
+    "push rdi", // RIP
+    "xor eax, eax",
+    "iretq",
+    "2:",
+    "mov byte ptr [rip + hal_user_fault_return_active], 0",
+    "mov eax, 1",
+    "ret",
+
+    ".global hal_resume_from_user_fault",
+    "hal_resume_from_user_fault:",
+    "cmp byte ptr [rip + hal_user_fault_return_active], 0",
+    "je 2f",
+    "mov rsp, [rip + hal_user_fault_return_rsp]",
+    "jmp qword ptr [rip + hal_user_fault_return_rip]",
+    "2:",
+    "hlt",
+    "jmp 2b",
 );
 
 unsafe extern "C" {
     fn hal_context_switch(old: *mut u8, new: *const u8);
     fn hal_timer_irq0_stub();
+    fn hal_enter_user_mode_recoverable(
+        entry: u64,
+        user_rsp: u64,
+        rflags: u64,
+        user_ss: u64,
+        user_cs: u64,
+    ) -> u64;
+    fn hal_resume_from_user_fault() -> !;
 }
 
 #[inline(always)]
@@ -189,12 +238,31 @@ pub fn user_transition_kernel_rsp0() -> u64 {
 }
 
 #[inline(always)]
+pub fn user_transition_stack_layout() -> (u64, u64, u64, u64) {
+    unsafe {
+        let stack_base = core::ptr::addr_of!(USER_TRANSITION_KERNEL_STACK.0) as u64;
+        let guard_base = core::ptr::addr_of!(USER_TRANSITION_KERNEL_STACK_GUARD.0) as u64;
+        (
+            stack_base,
+            stack_base + (32 * 1024) as u64,
+            guard_base,
+            guard_base + 4096u64,
+        )
+    }
+}
+
+#[inline(always)]
+pub fn resume_from_user_fault() -> ! {
+    unsafe { hal_resume_from_user_fault() }
+}
+
+#[inline(always)]
 /// # Safety
 ///
 /// Caller must ensure `entry`/`user_rsp` are canonical user virtual addresses
 /// mapped in the active address space and that TSS.rsp0 points to a valid
 /// kernel stack for privilege transitions.
-pub unsafe fn enter_user_mode(entry: u64, user_rsp: u64) -> ! {
+pub unsafe fn enter_user_mode(entry: u64, user_rsp: u64) -> bool {
     let mut rflags: u64;
     unsafe {
         core::arch::asm!(
@@ -204,22 +272,32 @@ pub unsafe fn enter_user_mode(entry: u64, user_rsp: u64) -> ! {
             options(nomem, preserves_flags),
         );
     }
-    rflags |= 1 << 9; // IF
+    if USER_ENTRY_ENABLE_INTERRUPTS {
+        rflags |= 1 << 9; // IF
+    } else {
+        rflags &= !(1 << 9);
+    }
 
     let user_cs = crate::arch::x86_64::gdt::USER_CODE.0 as u64;
     let user_ss = crate::arch::x86_64::gdt::USER_DATA.0 as u64;
     let gdt = crate::arch::x86_64::cpu::read_gdt_ptr();
     let idt = crate::arch::x86_64::cpu::read_idt_ptr();
     let rsp0 = crate::arch::x86_64::tss::rsp0();
+    let tss = crate::arch::x86_64::tss::instance() as u64;
+    let kernel_rsp = crate::arch::x86_64::cpu::read_rsp();
+    let (stack_base, stack_end, guard_base, guard_end) = user_transition_stack_layout();
+    let gdt_storage = crate::arch::x86_64::gdt::storage_base();
+    let gdt_storage_limit = crate::arch::x86_64::gdt::storage_limit();
 
     crate::arch::x86_64::console::_print_force(format_args!(
-        "[user-jump] rip={:#x} rsp={:#x} rflags={:#x} cs={:#x} ss={:#x} rsp0={:#x}\n",
+        "[user-jump] rip={:#x} rsp={:#x} rflags={:#x} cs={:#x} ss={:#x} rsp0={:#x} if={}\n",
         entry,
         user_rsp,
         rflags,
         user_cs,
         user_ss,
-        rsp0
+        rsp0,
+        if USER_ENTRY_ENABLE_INTERRUPTS { 1 } else { 0 }
     ));
     crate::arch::x86_64::console::_print_force(format_args!(
         "[user-jump] gdt=({:#x},limit={:#x}) idt=({:#x},limit={:#x})\n",
@@ -228,32 +306,24 @@ pub unsafe fn enter_user_mode(entry: u64, user_rsp: u64) -> ! {
         idt.base,
         idt.limit
     ));
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[user-jump] gdt-storage=({:#x},limit={:#x}) tss={:#x} kernel-rsp={:#x}\n",
+        gdt_storage,
+        gdt_storage_limit,
+        tss,
+        kernel_rsp,
+    ));
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[user-jump] stack=[{:#x}..{:#x}) guard=[{:#x}..{:#x})\n",
+        stack_base,
+        stack_end,
+        guard_base,
+        guard_end,
+    ));
+
+    crate::arch::x86_64::console::_put_char_force('J');
 
     unsafe {
-        core::arch::asm!(
-            "push rdx", // SS
-            "push rsi", // RSP
-            "push rcx", // RFLAGS
-            "push r8",  // CS
-            "push rdi", // RIP
-            "push rax",
-            "mov dx, 0x3f8",
-            "mov al, 'J'",
-            "out dx, al",
-            "pop rax",
-            // Linux-style process entry expects rdx=0 (rtld_fini for static
-            // binaries). iretq does not consume general registers, so clear
-            // the user-visible state after building the frame and avoid
-            // touching those registers again before the privilege transition.
-            "xor eax, eax",
-            "xor edx, edx",
-            "iretq",
-            in("rdi") entry,
-            in("rsi") user_rsp,
-            in("rcx") rflags,
-            in("rdx") user_ss,
-            in("r8") user_cs,
-            options(noreturn),
-        );
+        hal_enter_user_mode_recoverable(entry, user_rsp, rflags, user_ss, user_cs) != 0
     }
 }

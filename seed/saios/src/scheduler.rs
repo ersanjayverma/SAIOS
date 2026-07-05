@@ -320,9 +320,12 @@ pub fn spawn(entry: ThreadEntry) -> ThreadId {
 
 fn ensure_init_script() {
     let _ = crate::saifs::mkdir("/system");
+    let _ = crate::saifs::mkdir("/sbin");
     let _ = crate::saifs::touch("/system/init");
+    let _ = crate::saifs::touch("/sbin/init");
     let script = b"# SAIOS init script\nsetenv HOSTNAME saios\nalias ll ls\n";
     let _ = crate::vfs::write_path("/system/init", script);
+    let _ = crate::vfs::write_path("/sbin/init", script);
 }
 
 fn auto_mount_cached_fat_volume() {

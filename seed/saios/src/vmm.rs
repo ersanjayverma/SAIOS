@@ -93,6 +93,17 @@ pub struct VmmStats {
     pub next_kernel_virt: VirtAddr,
 }
 
+#[derive(Copy, Clone, Debug, Default)]
+pub struct PageMappingInfo {
+    pub phys: PhysAddr,
+    pub present: bool,
+    pub writable: bool,
+    pub user: bool,
+    pub global: bool,
+    pub nx: bool,
+    pub huge: bool,
+}
+
 struct VmmState {
     initialized: bool,
     cr3: u64,
@@ -377,6 +388,35 @@ fn map_page_hw(virt: VirtAddr, phys: PhysAddr, flags: u64) -> Result<(), &'stati
     Ok(())
 }
 
+fn reprotect_page_hw(virt: VirtAddr, flags: u64) -> Result<(), &'static str> {
+    let (l4, l3, l2, l1, _) = level_indices(virt);
+
+    let pml4 = unsafe { &mut *pml4_table_ptr() };
+    if !pml4.entries[l4].is_present() {
+        return Err("vmm: page not mapped");
+    }
+
+    let pdpt = unsafe { &mut *pdpt_table_ptr(l4) };
+    if !pdpt.entries[l3].is_present() || (pdpt.entries[l3].0 & paging::FLAG_HUGE) != 0 {
+        return Err("vmm: page not mapped");
+    }
+
+    let pd = unsafe { &mut *pd_table_ptr(l4, l3) };
+    if !pd.entries[l2].is_present() || (pd.entries[l2].0 & paging::FLAG_HUGE) != 0 {
+        return Err("vmm: page not mapped");
+    }
+
+    let pt = unsafe { &mut *pt_table_ptr(l4, l3, l2) };
+    if !pt.entries[l1].is_present() {
+        return Err("vmm: page not mapped");
+    }
+
+    let phys = pt.entries[l1].address();
+    pt.entries[l1].set_page(phys, leaf_flags(flags));
+    invlpg(virt);
+    Ok(())
+}
+
 fn unmap_page_hw(virt: VirtAddr) -> Result<(), &'static str> {
     let (l4, l3, l2, l1, _) = level_indices(virt);
 
@@ -475,6 +515,65 @@ fn translate_hw(virt: VirtAddr) -> Option<PhysAddr> {
     }
 
     pt.entries[l1].address().checked_add(off)
+}
+
+pub fn inspect_mapping_current(virt: VirtAddr) -> Option<PageMappingInfo> {
+    let (l4, l3, l2, l1, off) = level_indices(virt);
+    let pml4 = unsafe { &*pml4_table_ptr() };
+    let pml4e = pml4.entries[l4];
+    if !pml4e.is_present() {
+        return None;
+    }
+
+    let pdpt = unsafe { &*pdpt_table_ptr(l4) };
+    let pdpte = pdpt.entries[l3];
+    if !pdpte.is_present() {
+        return None;
+    }
+    if (pdpte.0 & paging::FLAG_HUGE) != 0 {
+        return Some(PageMappingInfo {
+            phys: pdpte.address().saturating_add(virt & 0x3fff_ffff),
+            present: true,
+            writable: (pdpte.0 & paging::FLAG_WRITABLE) != 0,
+            user: (pdpte.0 & paging::FLAG_USER) != 0,
+            global: (pdpte.0 & paging::FLAG_GLOBAL) != 0,
+            nx: (pdpte.0 & paging::FLAG_NX) != 0,
+            huge: true,
+        });
+    }
+
+    let pd = unsafe { &*pd_table_ptr(l4, l3) };
+    let pde = pd.entries[l2];
+    if !pde.is_present() {
+        return None;
+    }
+    if (pde.0 & paging::FLAG_HUGE) != 0 {
+        return Some(PageMappingInfo {
+            phys: pde.address().saturating_add(virt & 0x1f_ffff),
+            present: true,
+            writable: (pde.0 & paging::FLAG_WRITABLE) != 0,
+            user: (pde.0 & paging::FLAG_USER) != 0,
+            global: (pde.0 & paging::FLAG_GLOBAL) != 0,
+            nx: (pde.0 & paging::FLAG_NX) != 0,
+            huge: true,
+        });
+    }
+
+    let pt = unsafe { &*pt_table_ptr(l4, l3, l2) };
+    let pte = pt.entries[l1];
+    if !pte.is_present() {
+        return None;
+    }
+
+    Some(PageMappingInfo {
+        phys: pte.address().saturating_add(off),
+        present: true,
+        writable: (pte.0 & paging::FLAG_WRITABLE) != 0,
+        user: (pte.0 & paging::FLAG_USER) != 0,
+        global: (pte.0 & paging::FLAG_GLOBAL) != 0,
+        nx: (pte.0 & paging::FLAG_NX) != 0,
+        huge: false,
+    })
 }
 
 fn clone_table_recursive(src_phys: PhysAddr, level: u8) -> Result<PhysAddr, &'static str> {
@@ -1121,6 +1220,39 @@ pub fn map_owned(
         }
     });
     Ok(())
+}
+
+pub fn reprotect(
+    virt_start: VirtAddr,
+    pages: usize,
+    flags: u64,
+) -> Result<(), &'static str> {
+    if pages == 0 {
+        return Err("vmm: pages must be > 0");
+    }
+    if !is_page_aligned(virt_start) {
+        return Err("vmm: virtual address must be page aligned");
+    }
+
+    with_state_mut(|state| {
+        if !state.initialized {
+            return Err("vmm: not initialized");
+        }
+
+        let mapping = state
+            .mappings
+            .iter_mut()
+            .find(|m| m.virt_start == virt_start && m.pages == pages)
+            .ok_or("vmm: mapping not found")?;
+
+        for page in 0..pages {
+            let virt = virt_start.saturating_add((page as u64).saturating_mul(PAGE_SIZE));
+            reprotect_page_hw(virt, flags)?;
+        }
+
+        mapping.flags = flags;
+        Ok(())
+    })
 }
 
 /// Allocates physical pages and maps them into kernel virtual address space.

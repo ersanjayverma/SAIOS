@@ -167,3 +167,11 @@ pub fn init() {
         load_tss();
     }
 }
+
+pub fn storage_base() -> u64 {
+    unsafe { (*GDT.get()).entries.as_ptr() as u64 }
+}
+
+pub fn storage_limit() -> u16 {
+    (size_of::<[u64; 7]>() - 1) as u16
+}

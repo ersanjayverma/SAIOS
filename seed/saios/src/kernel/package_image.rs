@@ -22,10 +22,11 @@ const SHARED_LIB_ENTRIES: &[&str] = &[
 
 const BIN_ENTRIES: &[&str] = &[
     "hello", "calc", "editor", "shell", "ls", "cat", "cp", "mv", "rm", "mkdir", "ps", "kill",
-    "top", "uname", "stress", "cc", "taskman", "diskpart", "busybox",
+    "top", "uname", "stress", "cc", "taskman", "diskpart", "busybox", "r3probe",
 ];
 
 const EMBEDDED_BUSYBOX: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../busybox"));
+const USER_MODE_PROBE_PATH: &str = "/bin/r3probe";
 
 static MOUNTED: AtomicBool = AtomicBool::new(false);
 
@@ -144,6 +145,72 @@ fn write_binary(path: &str, entry: &str) -> Result<(), &'static str> {
     vfs::write_path(path, elf.as_slice())
 }
 
+fn write_user_mode_probe_binary(path: &str) -> Result<(), &'static str> {
+    const ELF_HEADER_SIZE: usize = 64;
+    const PROGRAM_HEADER_SIZE: usize = 56;
+    const CODE_OFFSET: usize = 0x80;
+    const IMAGE_SIZE: usize = CODE_OFFSET + 9;
+    const ENTRY_VADDR: u64 = 0x0040_0000 + CODE_OFFSET as u64;
+    const LINUX_EXIT_SYSCALL: u32 = 60;
+    const CODE: [u8; 9] = [
+        0xB8,
+        LINUX_EXIT_SYSCALL as u8,
+        0x00,
+        0x00,
+        0x00,
+        0x31,
+        0xFF,
+        0x0F,
+        0x05,
+    ];
+
+    let mut elf = vec![0u8; IMAGE_SIZE];
+
+    elf[0] = 0x7F;
+    elf[1] = b'E';
+    elf[2] = b'L';
+    elf[3] = b'F';
+    elf[4] = 2;
+    elf[5] = 1;
+    elf[6] = 1;
+
+    fn put16(buf: &mut [u8], off: usize, value: u16) {
+        let b = value.to_le_bytes();
+        buf[off..off + 2].copy_from_slice(&b);
+    }
+    fn put32(buf: &mut [u8], off: usize, value: u32) {
+        let b = value.to_le_bytes();
+        buf[off..off + 4].copy_from_slice(&b);
+    }
+    fn put64(buf: &mut [u8], off: usize, value: u64) {
+        let b = value.to_le_bytes();
+        buf[off..off + 8].copy_from_slice(&b);
+    }
+
+    put16(&mut elf, 16, 2);
+    put16(&mut elf, 18, 62);
+    put32(&mut elf, 20, 1);
+    put64(&mut elf, 24, ENTRY_VADDR);
+    put64(&mut elf, 32, ELF_HEADER_SIZE as u64);
+    put32(&mut elf, 48, 0);
+    put16(&mut elf, 52, ELF_HEADER_SIZE as u16);
+    put16(&mut elf, 54, PROGRAM_HEADER_SIZE as u16);
+    put16(&mut elf, 56, 1);
+
+    let ph = ELF_HEADER_SIZE;
+    put32(&mut elf, ph, 1);
+    put32(&mut elf, ph + 4, 0x5);
+    put64(&mut elf, ph + 8, 0);
+    put64(&mut elf, ph + 16, 0x0040_0000);
+    put64(&mut elf, ph + 24, 0x0040_0000);
+    put64(&mut elf, ph + 32, IMAGE_SIZE as u64);
+    put64(&mut elf, ph + 40, IMAGE_SIZE as u64);
+    put64(&mut elf, ph + 48, 0x1000);
+
+    elf[CODE_OFFSET..CODE_OFFSET + CODE.len()].copy_from_slice(&CODE);
+    vfs::write_path(path, elf.as_slice())
+}
+
 fn write_shared_library(path: &str, soname: &str, exports: &str) -> Result<(), &'static str> {
     let mut text = alloc::string::String::new();
     text.push_str("SAIOS_SO_V1\n");
@@ -160,7 +227,11 @@ fn seed_binaries() -> Result<(), &'static str> {
     for b in BIN_ENTRIES {
         let path = alloc::format!("/bin/{}", b);
         ensure_file(path.as_str())?;
-        write_binary(path.as_str(), b)?;
+        if *b == "r3probe" {
+            write_user_mode_probe_binary(path.as_str())?;
+        } else {
+            write_binary(path.as_str(), b)?;
+        }
     }
 
     Ok(())
@@ -307,6 +378,8 @@ fn mount_default_inner() -> Result<(), &'static str> {
     seed_shared_libraries()?;
     seed_binaries()?;
     seed_busybox_from_kernel_image()?;
+    ensure_file(USER_MODE_PROBE_PATH)?;
+    write_user_mode_probe_binary(USER_MODE_PROBE_PATH)?;
 
     ensure_file("/etc/profile")?;
     ensure_file("/etc/hostname")?;

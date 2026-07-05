@@ -73,6 +73,7 @@ struct MapRange {
 struct LoadedImage {
     entry: u64,
     mapped_starts: Vec<u64>,
+    mapped_ranges: Vec<MapRange>,
 }
 
 fn read_u16_le(bytes: &[u8], off: usize) -> Option<u16> {
@@ -382,7 +383,8 @@ fn map_and_load(
 
         let phys = pmm::alloc_pages(pages).ok_or("elf: no physical memory for segment")?;
         let owner = format!("elf-seg@0x{:x}", r.start);
-        if let Err(e) = vmm::map_owned(r.start, phys, pages, r.flags, owner.as_str()) {
+        let load_flags = r.flags | vmm::FLAG_WRITE;
+        if let Err(e) = vmm::map_owned(r.start, phys, pages, load_flags, owner.as_str()) {
             let _ = pmm::free_pages_range(phys, pages);
             for s in &mapped_starts {
                 let _ = vmm::unmap(*s);
@@ -456,7 +458,18 @@ fn map_and_load(
     Ok(LoadedImage {
         entry,
         mapped_starts,
+        mapped_ranges: ranges,
     })
+}
+
+fn finalize_segment_protections(img: &LoadedImage) -> Result<(), &'static str> {
+    for range in &img.mapped_ranges {
+        let size = range.end.saturating_sub(range.start);
+        let pages = usize::try_from(size / vmm::PAGE_SIZE)
+            .map_err(|_| "elf: segment pages overflow")?;
+        vmm::reprotect(range.start, pages, range.flags)?;
+    }
+    Ok(())
 }
 
 fn unmap_loaded(img: &LoadedImage) {
@@ -473,15 +486,12 @@ fn jump_to_entry(entry: u64) -> i32 {
     f()
 }
 
-fn jump_to_entry_with_rsp(entry: u64, rsp: u64) -> ! {
-    // SAFETY: caller guarantees `entry` is executable and `rsp` points to a
-    // mapped writable user stack. Transition to CPL3 with iretq so faults and
-    // syscalls are handled with kernel/user privilege separation.
+fn jump_to_entry_with_rsp_recoverable(entry: u64, rsp: u64) -> bool {
     unsafe {
         let kernel_rsp0 = hal::arch::x86_64::seed_support::user_transition_kernel_rsp0();
         hal::arch::x86_64::tss::set_rsp0(kernel_rsp0);
         hal::arch::x86_64::syscall::set_kernel_rsp0(kernel_rsp0);
-        hal::arch::x86_64::seed_support::enter_user_mode(entry, rsp);
+        hal::arch::x86_64::seed_support::enter_user_mode(entry, rsp)
     }
 }
 
@@ -607,6 +617,25 @@ fn current_rsp() -> u64 {
     hal::arch::x86_64::cpu::read_rsp()
 }
 
+fn log_mapping(label: &str, virt: u64) {
+    if let Some(info) = vmm::inspect_mapping_current(virt) {
+        crate::console::println!(
+            "elf: mapchk {} virt=0x{:x} phys=0x{:x} p={} w={} u={} nx={} g={} huge={}",
+            label,
+            virt,
+            info.phys,
+            info.present as u8,
+            info.writable as u8,
+            info.user as u8,
+            info.nx as u8,
+            info.global as u8,
+            info.huge as u8,
+        );
+    } else {
+        crate::console::println!("elf: mapchk {} virt=0x{:x} unmapped", label, virt);
+    }
+}
+
 fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> Result<i32, &'static str> {
     crate::kernel::fault::begin_user_exec(pid);
     crate::console::println!(
@@ -616,7 +645,22 @@ fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> 
         hal::arch::paging::read_cr3()
     );
     if let Some(sp) = initial_rsp {
-        jump_to_entry_with_rsp(entry, sp);
+        let kernel_rsp0 = hal::arch::x86_64::seed_support::user_transition_kernel_rsp0();
+        let gdt = hal::arch::x86_64::cpu::read_gdt_ptr();
+        let idt = hal::arch::x86_64::cpu::read_idt_ptr();
+        hal::arch::x86_64::tss::set_rsp0(kernel_rsp0);
+        hal::arch::x86_64::syscall::set_kernel_rsp0(kernel_rsp0);
+        log_mapping("entry", entry);
+        log_mapping("user-rsp", sp);
+        log_mapping("rsp0", kernel_rsp0);
+        log_mapping("gdt", gdt.base);
+        log_mapping("idt", idt.base);
+        let fault_returned = jump_to_entry_with_rsp_recoverable(entry, sp);
+        let faulted = crate::kernel::fault::take_active_exec_faulted();
+        if fault_returned && faulted {
+            return Err("elf: user process fault");
+        }
+        return Err("elf: user process returned unexpectedly");
     }
 
     let code = jump_to_entry(entry);
@@ -633,6 +677,10 @@ fn can_use_fresh_user_root() -> bool {
     ks >= vmm::KERNEL_VIRT_BASE
 }
 
+fn can_use_isolated_address_space() -> bool {
+    !crate::heap::identity_mode_enabled()
+}
+
 pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'static str> {
     let handle = saifs::open(path).map_err(|_| "elf: open failed")?;
     let bytes = handle.read().map_err(|_| "elf: read failed")?;
@@ -640,7 +688,8 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
     let header = parse_header(bytes.as_slice())?;
     let phs = parse_program_headers(bytes.as_slice(), &header)?;
     let base = runtime_base(&header, image_base);
-    let use_isolated_exec = header.e_type == ET_EXEC && ET_EXEC_ISOLATED_ADDRESS_SPACE;
+    let use_isolated_exec =
+        header.e_type == ET_EXEC && ET_EXEC_ISOLATED_ADDRESS_SPACE && can_use_isolated_address_space();
 
     if header.e_type == ET_EXEC && !use_isolated_exec {
         let (ks, ke) = vmm::kernel_image_range();
@@ -667,8 +716,10 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
         }
     }
 
-    let use_isolated_dyn =
-        header.e_type == ET_DYN && ET_DYN_PROCESS_ADDRESS_SPACE && can_use_fresh_user_root();
+    let use_isolated_dyn = header.e_type == ET_DYN
+        && ET_DYN_PROCESS_ADDRESS_SPACE
+        && can_use_fresh_user_root()
+        && can_use_isolated_address_space();
 
     if use_isolated_exec || use_isolated_dyn {
         let exec_root = if header.e_type == ET_DYN {
@@ -714,6 +765,8 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
                 crate::console::println!("elf: phase=reloc done");
             }
 
+            finalize_segment_protections(&img)?;
+
             crate::console::println!("elf: phase=jump");
             let code = jump_to_entry_recoverable(img.entry, pid, initial_rsp)?;
             unmap_loaded(&img);
@@ -722,6 +775,14 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
         let _ = vmm::destroy_address_space_root(exec_root);
         run_result
     } else {
+        if (header.e_type == ET_EXEC && ET_EXEC_ISOLATED_ADDRESS_SPACE
+            || header.e_type == ET_DYN && ET_DYN_PROCESS_ADDRESS_SPACE)
+            && crate::heap::identity_mode_enabled()
+        {
+            crate::console::println!(
+                "elf: isolated address space deferred (kernel heap identity fallback active); using shared bring-up path"
+            );
+        }
         if header.e_type == ET_DYN && ET_DYN_PROCESS_ADDRESS_SPACE {
             crate::console::println!(
                 "elf: ET_DYN user-root path deferred (kernel still low-half); using shared bring-up path"
@@ -758,6 +819,8 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
             }
             crate::console::println!("elf: phase=reloc done");
         }
+
+        finalize_segment_protections(&img)?;
 
         crate::console::println!("elf: phase=jump");
         let code = jump_to_entry_recoverable(img.entry, pid, initial_rsp)?;

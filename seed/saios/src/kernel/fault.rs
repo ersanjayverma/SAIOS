@@ -177,8 +177,5 @@ pub extern "C" fn abort_active_exec() -> ! {
         let _ = crate::kernel::process::kill(pid);
     }
 
-    loop {
-        crate::scheduler::yield_now();
-        hal::arch::x86_64::cpu::hlt();
-    }
+    hal::arch::x86_64::seed_support::resume_from_user_fault()
 }

@@ -13,6 +13,7 @@ const DEFAULT_INIT_SCRIPT: &str = "/system/init";
 const DEFAULT_LOGIN_SHELL: &str = "busybox";
 const DEFAULT_ROOT_USER: &str = "root";
 const DEFAULT_ROOT_PASSWORD: &str = "root";
+const USER_MODE_PROBE: &str = "/bin/r3probe";
 
 #[derive(Clone, Debug)]
 pub struct UserSummary {
@@ -263,6 +264,14 @@ fn prompt_line(prompt: &str) -> String {
     console::read_line().as_str().trim().to_string()
 }
 
+fn run_user_mode_probe(parent_pid: u64) {
+    console::println!("session: running ring3 probe {}", USER_MODE_PROBE);
+    match process::exec_from(Some(parent_pid), USER_MODE_PROBE, &[], &[]) {
+        Ok(code) => console::println!("session: ring3 probe exited code={}", code),
+        Err(e) => console::println!("session: ring3 probe failed: {}", e),
+    }
+}
+
 pub fn current_config_summary() -> Option<(String, String, String)> {
     with_state(|slot| {
         slot.as_ref().map(|s| {
@@ -294,7 +303,7 @@ pub fn user_summary(username: &str) -> Option<UserSummary> {
 pub fn boot_to_login_shell() -> ! {
     let state = load_runtime_state();
 
-    let _ = process::start_pid1("/sbin/init");
+    let _ = process::start_pid1("/system/init");
 
     if !state.config.hostname.is_empty() {
         let _ = crate::vfs::write_path(
@@ -337,6 +346,7 @@ pub fn boot_to_login_shell() -> ! {
     let shell_pid = process::ensure_shell_process(state.config.login_shell.as_str());
     let _ = process::create_session(shell_pid);
     let _ = process::set_foreground_process_group(shell_pid);
+    run_user_mode_probe(shell_pid);
 
     let shell_name = state.config.login_shell.as_str();
     let shell_args = login_shell_args(shell_name);
