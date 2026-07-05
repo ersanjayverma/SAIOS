@@ -110,6 +110,8 @@ impl OpenOptions {
 #[derive(Debug, Clone)]
 struct OpenFile {
     inode: u64,
+    /// `Some(abs_path)` for storage-backed files; `None` for TmpFs-backed files.
+    path: Option<String>,
     offset: usize,
     readable: bool,
     writable: bool,
@@ -124,6 +126,13 @@ pub struct MountRecord {
     pub fs_name: String,
     /// True if the mount is read-only.
     pub read_only: bool,
+}
+
+/// Uniform file-stat result returned by [`stat`].
+#[derive(Debug, Clone)]
+pub struct FileStat {
+    pub kind: FileType,
+    pub size: usize,
 }
 
 #[derive(Clone)]
@@ -809,7 +818,9 @@ pub fn umount(path: &str) -> Result<(), &'static str> {
 }
 
 /// Opens the file at `path` with the given options and returns a file
-/// descriptor.
+/// descriptor.  Works for both TmpFs-backed and storage-backed (ext4/FAT32)
+/// paths so all callers can use a single open/read/write/close sequence
+/// regardless of the underlying filesystem.
 pub fn open(path: &str, options: OpenOptions) -> Result<VfsFd, &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
@@ -823,6 +834,35 @@ pub fn open(path: &str, options: OpenOptions) -> Result<VfsFd, &'static str> {
             return Err("read-only virtual path");
         }
 
+        // ── storage-backed path ────────────────────────────────────────────
+        if is_storage_backed(&abs) {
+            if options.create {
+                if storage::fs_stat(&abs).is_err() {
+                    storage::fs_create(&abs)?;
+                }
+            }
+            let stat = storage::fs_stat(&abs)?;
+            if stat.kind != storage::FsNodeKind::File {
+                return Err("not a file");
+            }
+            if options.truncate {
+                if !options.write {
+                    return Err("truncate requires write access");
+                }
+                storage::fs_write(&abs, &[])?;
+            }
+            let offset = if options.append { stat.size } else { 0 };
+            return Ok(vfs.alloc_fd(OpenFile {
+                inode: storage_inode(&abs),
+                path: Some(abs),
+                offset,
+                readable: options.read,
+                writable: options.write,
+                append: options.append,
+            }));
+        }
+
+        // ── TmpFs path ─────────────────────────────────────────────────────
         if options.create && !is_sys_path(&abs) && vfs.fs.resolve(path).is_err() {
             vfs.fs.create(path)?;
         }
@@ -848,6 +888,7 @@ pub fn open(path: &str, options: OpenOptions) -> Result<VfsFd, &'static str> {
 
         Ok(vfs.alloc_fd(OpenFile {
             inode,
+            path: None,
             offset,
             readable: options.read,
             writable: options.write,
@@ -862,55 +903,85 @@ pub fn close(fd: VfsFd) -> Result<(), &'static str> {
 }
 
 /// Reads up to `max_len` bytes from the file descriptor.
+/// Works for both TmpFs-backed and storage-backed descriptors.
 pub fn read(fd: VfsFd, max_len: usize) -> Result<Vec<u8>, &'static str> {
     with_vfs(|vfs| {
-        let (inode, offset, readable) = {
-            let of = vfs.get_open_file(fd)?;
-            (of.inode, of.offset, of.readable)
-        };
-
-        if !readable {
+        let of = vfs.get_open_file(fd)?.clone();
+        if !of.readable {
             return Err("file descriptor is not readable");
         }
 
-        let data = vfs.fs.read_inode_range(inode, offset, max_len)?;
-        let new_offset = offset.saturating_add(data.len());
+        if let Some(ref storage_path) = of.path {
+            // Storage-backed: fetch via block cache (cheap on repeated access).
+            let full = storage::fs_read(storage_path)?;
+            let start = of.offset.min(full.len());
+            let end = full.len().min(start.saturating_add(max_len));
+            let data = full[start..end].to_vec();
+            vfs.get_open_file_mut(fd)?.offset = of.offset.saturating_add(data.len());
+            return Ok(data);
+        }
+
+        let data = vfs.fs.read_inode_range(of.inode, of.offset, max_len)?;
+        let new_offset = of.offset.saturating_add(data.len());
         vfs.get_open_file_mut(fd)?.offset = new_offset;
         Ok(data)
     })
 }
 
 /// Writes `data` to the file descriptor and returns the number of bytes
-/// written.
+/// written.  For storage-backed descriptors, performs a read-modify-write so
+/// that positional and append writes are both correct.
 pub fn write(fd: VfsFd, data: &[u8]) -> Result<usize, &'static str> {
     with_vfs(|vfs| {
-        let (inode, mut offset, writable, append) = {
+        let (path, inode, offset, writable, append) = {
             let of = vfs.get_open_file(fd)?;
-            (of.inode, of.offset, of.writable, of.append)
+            (of.path.clone(), of.inode, of.offset, of.writable, of.append)
         };
 
         if !writable {
             return Err("file descriptor is not writable");
         }
 
-        if append {
-            offset = vfs.fs.inode_len(inode)?;
+        if let Some(ref storage_path) = path {
+            // Storage-backed: read-modify-write.
+            let mut existing = storage::fs_read(storage_path).unwrap_or_default();
+            let write_at = if append { existing.len() } else { offset };
+            let end = write_at.saturating_add(data.len());
+            if end > existing.len() {
+                existing.resize(end, 0);
+            }
+            existing[write_at..end].copy_from_slice(data);
+            storage::fs_write(storage_path, existing.as_slice())?;
+            vfs.get_open_file_mut(fd)?.offset = write_at.saturating_add(data.len());
+            return Ok(data.len());
         }
 
-        let written = vfs.fs.write_inode_at(inode, offset, data)?;
-        vfs.get_open_file_mut(fd)?.offset = offset.saturating_add(written);
+        let mut write_offset = offset;
+        if append {
+            write_offset = vfs.fs.inode_len(inode)?;
+        }
+        let written = vfs.fs.write_inode_at(inode, write_offset, data)?;
+        vfs.get_open_file_mut(fd)?.offset = write_offset.saturating_add(written);
         Ok(written)
     })
 }
 
 /// Repositions the file descriptor's offset according to `from`.
+/// Works for both TmpFs-backed and storage-backed descriptors.
 pub fn seek(fd: VfsFd, from: SeekFrom) -> Result<usize, &'static str> {
     with_vfs(|vfs| {
-        let (inode, current) = {
+        let (path, inode, current) = {
             let of = vfs.get_open_file(fd)?;
-            (of.inode, of.offset)
+            (of.path.clone(), of.inode, of.offset)
         };
-        let len = vfs.fs.inode_len(inode)? as isize;
+
+        let len: isize = if let Some(ref storage_path) = path {
+            storage::fs_stat(storage_path)
+                .map(|s| s.size as isize)
+                .unwrap_or(0)
+        } else {
+            vfs.fs.inode_len(inode)? as isize
+        };
 
         let target = match from {
             SeekFrom::Start(pos) => pos as isize,
@@ -1089,4 +1160,82 @@ pub fn open_node(path: &str) -> Result<VNode, &'static str> {
     }
 
     with_vfs(|vfs| vfs.fs.open_node(path))
+}
+
+/// Returns size and type for `path`; works across TmpFs and storage backends.
+pub fn stat(path: &str) -> Result<FileStat, &'static str> {
+    let abs = with_vfs(|vfs| vfs.fs.normalized_path(path));
+    if is_sys_path(&abs) {
+        return Err("vfs: stat on /sys not supported");
+    }
+    if is_storage_backed(&abs) {
+        let s = storage::fs_stat(&abs)?;
+        return Ok(FileStat {
+            kind: match s.kind {
+                storage::FsNodeKind::File => FileType::File,
+                storage::FsNodeKind::Directory => FileType::Directory,
+            },
+            size: s.size,
+        });
+    }
+    with_vfs(|vfs| {
+        let inode = vfs.fs.resolve(&abs)?;
+        let node = vfs.fs.node(inode)?;
+        let size = if node.kind == FileType::File {
+            node.data.len()
+        } else {
+            0
+        };
+        Ok(FileStat {
+            kind: node.kind,
+            size,
+        })
+    })
+}
+
+/// Lists directory entries at `path`; uniform wrapper over [`ls`].
+pub fn readdir(path: &str) -> Result<Vec<String>, &'static str> {
+    ls(Some(path))
+}
+
+/// Mount a storage volume at `target`, registering in both the storage layer
+/// and the VFS mount table.  Creates `target` in TmpFs if it does not exist.
+/// This is the single authoritative mount entry-point for Milestone 2.
+pub fn mount_storage(source: &str, target: &str, read_only: bool) -> Result<(), &'static str> {
+    // Resolve the volume (accepts device name, partition name, or /dev/… path).
+    let vol = storage::resolve_mountable_volume(source).ok_or("vfs: no mountable volume found")?;
+    let fs_name = vol.filesystem.as_str();
+
+    // Ensure mount-point directory exists in TmpFs (no-op if already present).
+    with_vfs(|vfs| {
+        let abs = vfs.fs.normalized_path(target);
+        if vfs.fs.resolve(&abs).is_err() {
+            let _ = vfs.fs.mkdir(&abs);
+        }
+        Ok::<(), &'static str>(())
+    })?;
+
+    // Mount in storage layer (creates Ext4VolumeCache / FAT32 tree).
+    storage::mount_volume(vol.name.as_str(), target, read_only)?;
+
+    // Record in VFS mount table.
+    with_vfs(|vfs| {
+        let abs = vfs.fs.normalized_path(target);
+        if !vfs.mounts.iter().any(|m| m.path == abs) {
+            vfs.mounts.push(MountRecord {
+                path: abs,
+                fs_name: fs_name.to_string(),
+                read_only,
+            });
+        }
+        Ok::<(), &'static str>(())
+    })
+}
+
+/// Unmount the volume at `target`, removing records from both the VFS mount
+/// table and the storage layer.
+pub fn umount_storage(target: &str) -> Result<(), &'static str> {
+    umount(target)?;
+    storage::umount_volume(target)?;
+    Ok(())
 }

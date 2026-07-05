@@ -108,7 +108,15 @@ impl Registry {
         name: &str,
         state: ObjectState,
     ) -> Result<ObjectId, &'static str> {
-        self.register_with_meta(object_type, name, state, None, None, ObjectCapabilities::NONE, 0)
+        self.register_with_meta(
+            object_type,
+            name,
+            state,
+            None,
+            None,
+            ObjectCapabilities::NONE,
+            0,
+        )
     }
 
     pub fn register_with_meta(
@@ -200,7 +208,13 @@ impl Registry {
         self.objects[idx].state = state;
         self.objects[idx].last_modified_tick = crate::timer::ticks();
         let name = self.objects[idx].name.clone();
-        self.push_event(id, ObjectEvent::StateChanged, name.as_str(), Some(state), "transition");
+        self.push_event(
+            id,
+            ObjectEvent::StateChanged,
+            name.as_str(),
+            Some(state),
+            "transition",
+        );
         Ok(())
     }
 
@@ -218,11 +232,21 @@ impl Registry {
         self.objects[idx].owner = owner;
         self.objects[idx].last_modified_tick = crate::timer::ticks();
         let name = self.objects[idx].name.clone();
-        self.push_event(id, ObjectEvent::OwnerChanged, name.as_str(), self.objects.get(idx).map(|o| o.state), "owner");
+        self.push_event(
+            id,
+            ObjectEvent::OwnerChanged,
+            name.as_str(),
+            self.objects.get(idx).map(|o| o.state),
+            "owner",
+        );
         Ok(())
     }
 
-    pub fn set_parent(&mut self, id: ObjectId, parent: Option<ObjectId>) -> Result<(), &'static str> {
+    pub fn set_parent(
+        &mut self,
+        id: ObjectId,
+        parent: Option<ObjectId>,
+    ) -> Result<(), &'static str> {
         let idx = self
             .objects
             .iter()
@@ -258,7 +282,13 @@ impl Registry {
         }
 
         let name = self.objects[idx].name.clone();
-        self.push_event(id, ObjectEvent::ParentChanged, name.as_str(), self.objects.get(idx).map(|o| o.state), "parent");
+        self.push_event(
+            id,
+            ObjectEvent::ParentChanged,
+            name.as_str(),
+            self.objects.get(idx).map(|o| o.state),
+            "parent",
+        );
         Ok(())
     }
 
@@ -272,7 +302,13 @@ impl Registry {
         self.objects[idx].last_modified_tick = crate::timer::ticks();
         let rc = self.objects[idx].reference_count;
         let name = self.objects[idx].name.clone();
-        self.push_event(id, ObjectEvent::Acquired, name.as_str(), self.objects.get(idx).map(|o| o.state), "acquire");
+        self.push_event(
+            id,
+            ObjectEvent::Acquired,
+            name.as_str(),
+            self.objects.get(idx).map(|o| o.state),
+            "acquire",
+        );
         Ok(rc)
     }
 
@@ -291,11 +327,22 @@ impl Registry {
         self.objects[idx].last_modified_tick = crate::timer::ticks();
         let rc = self.objects[idx].reference_count;
         let name = self.objects[idx].name.clone();
-        self.push_event(id, ObjectEvent::Released, name.as_str(), self.objects.get(idx).map(|o| o.state), "release");
+        self.push_event(
+            id,
+            ObjectEvent::Released,
+            name.as_str(),
+            self.objects.get(idx).map(|o| o.state),
+            "release",
+        );
         Ok(rc)
     }
 
-    pub fn set_property(&mut self, id: ObjectId, key: &str, value: &str) -> Result<(), &'static str> {
+    pub fn set_property(
+        &mut self,
+        id: ObjectId,
+        key: &str,
+        value: &str,
+    ) -> Result<(), &'static str> {
         if key.is_empty() {
             return Err("kom: property key cannot be empty");
         }
@@ -305,7 +352,11 @@ impl Registry {
             .position(|o| o.id == id)
             .ok_or("kom: object not found")?;
 
-        if let Some(prop) = self.objects[idx].properties.iter_mut().find(|p| p.key == key) {
+        if let Some(prop) = self.objects[idx]
+            .properties
+            .iter_mut()
+            .find(|p| p.key == key)
+        {
             prop.value = value.to_string();
         } else {
             self.objects[idx].properties.push(ObjectProperty {

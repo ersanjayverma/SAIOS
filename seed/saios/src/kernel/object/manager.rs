@@ -135,17 +135,29 @@ pub fn inspect(id: ObjectId) -> Option<Vec<String>> {
     find(id).map(|record| {
         let mut out = Vec::new();
         out.push(alloc::format!("Id: {}", record.id.0));
-        out.push(alloc::format!("Label: {}", record.id.label(record.object_type)));
+        out.push(alloc::format!(
+            "Label: {}",
+            record.id.label(record.object_type)
+        ));
         out.push(alloc::format!("Type: {}", record.object_type.as_str()));
         out.push(alloc::format!("Name: {}", record.name));
         out.push(alloc::format!("State: {}", record.state.as_str()));
         out.push(alloc::format!("Flags: 0x{:X}", record.flags));
-        out.push(alloc::format!("Parent: {}", record.parent.map(|p| p.0).unwrap_or(0)));
-        out.push(alloc::format!("Owner: {}", record.owner.map(|p| p.0).unwrap_or(0)));
+        out.push(alloc::format!(
+            "Parent: {}",
+            record.parent.map(|p| p.0).unwrap_or(0)
+        ));
+        out.push(alloc::format!(
+            "Owner: {}",
+            record.owner.map(|p| p.0).unwrap_or(0)
+        ));
         out.push(alloc::format!("Children: {}", record.children.len()));
         out.push(alloc::format!("RefCount: {}", record.reference_count));
         out.push(alloc::format!("CreatedTick: {}", record.created_tick));
-        out.push(alloc::format!("ModifiedTick: {}", record.last_modified_tick));
+        out.push(alloc::format!(
+            "ModifiedTick: {}",
+            record.last_modified_tick
+        ));
         out
     })
 }

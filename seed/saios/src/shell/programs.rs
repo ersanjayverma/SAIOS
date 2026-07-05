@@ -24,11 +24,16 @@ type ProgramResult = Result<i32, &'static str>;
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
+const EV_CURRENT: u8 = 1;
 const EM_X86_64: u16 = 62;
+const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
+const PF_X: u32 = 0x1;
+const PF_W: u32 = 0x2;
+const PF_R: u32 = 0x4;
 const DT_NULL: i64 = 0;
 const DT_NEEDED: i64 = 1;
 const DT_STRTAB: i64 = 5;
@@ -51,6 +56,16 @@ pub struct BinaryMetadata {
     pub needed_libraries: Vec<String>,
     /// Symbols required by the binary.
     pub required_symbols: Vec<String>,
+    /// Number of PT_LOAD segments accepted by the loader.
+    pub load_segments: usize,
+    /// Total bytes that require BSS-style zero initialization.
+    pub zero_fill_bytes: u64,
+    /// Count of readable PT_LOAD segments.
+    pub readable_segments: usize,
+    /// Count of writable PT_LOAD segments.
+    pub writable_segments: usize,
+    /// Count of executable PT_LOAD segments.
+    pub executable_segments: usize,
 }
 
 fn hello_program(args: &[&str], env: &[(String, String)]) -> i32 {
@@ -431,47 +446,67 @@ fn path_basename(path: &str) -> String {
 #[derive(Clone, Copy)]
 struct ElfProgramHeader {
     p_type: u32,
+    p_flags: u32,
     p_offset: u64,
     p_vaddr: u64,
     p_filesz: u64,
+    p_memsz: u64,
+    p_align: u64,
 }
 
-fn parse_elf_program_headers(bytes: &[u8]) -> Option<Vec<ElfProgramHeader>> {
-    if bytes.len() < 64 || bytes.get(0..4)? != ELF_MAGIC {
-        return None;
+fn parse_elf_program_headers(bytes: &[u8]) -> Result<Vec<ElfProgramHeader>, &'static str> {
+    if bytes.len() < 64 || bytes.get(0..4) != Some(&ELF_MAGIC) {
+        return Err("exec: invalid ELF magic");
     }
-    if *bytes.get(4)? != ELFCLASS64 || *bytes.get(5)? != ELFDATA2LSB {
-        return None;
+    if *bytes.get(4).ok_or("exec: truncated ELF ident")? != ELFCLASS64 {
+        return Err("exec: unsupported ELF class");
     }
-    if read_u16_le(bytes, 18)? != EM_X86_64 {
-        return None;
+    if *bytes.get(5).ok_or("exec: truncated ELF ident")? != ELFDATA2LSB {
+        return Err("exec: unsupported ELF endianness");
+    }
+    if *bytes.get(6).ok_or("exec: truncated ELF ident")? != EV_CURRENT {
+        return Err("exec: unsupported ELF ident version");
+    }
+    if read_u16_le(bytes, 18).ok_or("exec: truncated ELF header")? != EM_X86_64 {
+        return Err("exec: unsupported ELF machine");
     }
 
-    let phoff = read_u64_le(bytes, 32)? as usize;
-    let phentsize = read_u16_le(bytes, 54)? as usize;
-    let phnum = read_u16_le(bytes, 56)? as usize;
+    let phoff = read_u64_le(bytes, 32).ok_or("exec: truncated ELF header")? as usize;
+    let phentsize = read_u16_le(bytes, 54).ok_or("exec: truncated ELF header")? as usize;
+    let phnum = read_u16_le(bytes, 56).ok_or("exec: truncated ELF header")? as usize;
 
+    if phnum == 0 {
+        return Err("exec: ELF has no program headers");
+    }
     if phentsize < 56 {
-        return None;
+        return Err("exec: ELF program header size is invalid");
     }
 
     let mut headers = Vec::new();
     for i in 0..phnum {
-        let off = phoff.checked_add(i.checked_mul(phentsize)?)?;
-        let end = off.checked_add(56)?;
+        let off = phoff
+            .checked_add(
+                i.checked_mul(phentsize)
+                    .ok_or("exec: program header overflow")?,
+            )
+            .ok_or("exec: program header overflow")?;
+        let end = off.checked_add(56).ok_or("exec: program header overflow")?;
         if end > bytes.len() {
-            return None;
+            return Err("exec: program headers exceed file size");
         }
 
         headers.push(ElfProgramHeader {
-            p_type: read_u32_le(bytes, off)?,
-            p_offset: read_u64_le(bytes, off + 8)?,
-            p_vaddr: read_u64_le(bytes, off + 16)?,
-            p_filesz: read_u64_le(bytes, off + 32)?,
+            p_type: read_u32_le(bytes, off).ok_or("exec: truncated program header")?,
+            p_flags: read_u32_le(bytes, off + 4).ok_or("exec: truncated program header")?,
+            p_offset: read_u64_le(bytes, off + 8).ok_or("exec: truncated program header")?,
+            p_vaddr: read_u64_le(bytes, off + 16).ok_or("exec: truncated program header")?,
+            p_filesz: read_u64_le(bytes, off + 32).ok_or("exec: truncated program header")?,
+            p_memsz: read_u64_le(bytes, off + 40).ok_or("exec: truncated program header")?,
+            p_align: read_u64_le(bytes, off + 48).ok_or("exec: truncated program header")?,
         });
     }
 
-    Some(headers)
+    Ok(headers)
 }
 
 fn vaddr_to_file_offset(program_headers: &[ElfProgramHeader], vaddr: u64) -> Option<usize> {
@@ -491,19 +526,85 @@ fn vaddr_to_file_offset(program_headers: &[ElfProgramHeader], vaddr: u64) -> Opt
     None
 }
 
-fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Option<BinaryMetadata> {
+fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Result<BinaryMetadata, &'static str> {
     let program_headers = parse_elf_program_headers(bytes)?;
-    let e_type = read_u16_le(bytes, 16)?;
-    let entry_addr = read_u64_le(bytes, 24)?;
+    let e_type = read_u16_le(bytes, 16).ok_or("exec: truncated ELF header")?;
+    if e_type != ET_EXEC && e_type != ET_DYN {
+        return Err("exec: unsupported ELF type");
+    }
+    let entry_addr = read_u64_le(bytes, 24).ok_or("exec: truncated ELF header")?;
     let mut dynamic = false;
     let mut interpreter: Option<String> = None;
     let mut needed_libraries: Vec<String> = Vec::new();
+    let mut load_segments = 0usize;
+    let mut zero_fill_bytes = 0u64;
+    let mut entry_in_executable_segment = false;
+    let mut readable_segments = 0usize;
+    let mut writable_segments = 0usize;
+    let mut executable_segments = 0usize;
+
+    for ph in &program_headers {
+        if ph.p_type != PT_LOAD {
+            continue;
+        }
+
+        load_segments = load_segments.saturating_add(1);
+        if (ph.p_flags & PF_R) != 0 {
+            readable_segments = readable_segments.saturating_add(1);
+        }
+        if (ph.p_flags & PF_W) != 0 {
+            writable_segments = writable_segments.saturating_add(1);
+        }
+        if (ph.p_flags & PF_X) != 0 {
+            executable_segments = executable_segments.saturating_add(1);
+        }
+
+        if ph.p_filesz > ph.p_memsz {
+            return Err("exec: PT_LOAD filesz exceeds memsz");
+        }
+
+        let file_end = ph
+            .p_offset
+            .checked_add(ph.p_filesz)
+            .ok_or("exec: PT_LOAD file range overflow")?;
+        if file_end > bytes.len() as u64 {
+            return Err("exec: PT_LOAD range exceeds file size");
+        }
+
+        let mem_end = ph
+            .p_vaddr
+            .checked_add(ph.p_memsz)
+            .ok_or("exec: PT_LOAD virtual range overflow")?;
+
+        if ph.p_align != 0 && !ph.p_align.is_power_of_two() {
+            return Err("exec: PT_LOAD alignment is invalid");
+        }
+        if ph.p_align > 1 && (ph.p_vaddr % ph.p_align) != (ph.p_offset % ph.p_align) {
+            return Err("exec: PT_LOAD alignment mismatch");
+        }
+
+        if ph.p_memsz > ph.p_filesz {
+            zero_fill_bytes = zero_fill_bytes.saturating_add(ph.p_memsz - ph.p_filesz);
+        }
+
+        if entry_addr >= ph.p_vaddr && entry_addr < mem_end && (ph.p_flags & PF_X) != 0 {
+            entry_in_executable_segment = true;
+        }
+    }
+
+    if load_segments == 0 {
+        return Err("exec: ELF has no PT_LOAD segments");
+    }
+    if entry_addr != 0 && !entry_in_executable_segment {
+        return Err("exec: entry point is not in an executable segment");
+    }
 
     for ph in &program_headers {
         if ph.p_type == PT_INTERP {
-            let start = usize::try_from(ph.p_offset).ok()?;
+            let start =
+                usize::try_from(ph.p_offset).map_err(|_| "exec: PT_INTERP offset invalid")?;
             if start >= bytes.len() {
-                return None;
+                return Err("exec: PT_INTERP range exceeds file size");
             }
             interpreter = read_cstring(bytes, start);
             continue;
@@ -511,11 +612,15 @@ fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Option<BinaryMetadata> {
 
         if ph.p_type == PT_DYNAMIC {
             dynamic = true;
-            let dyn_start = usize::try_from(ph.p_offset).ok()?;
-            let dyn_size = usize::try_from(ph.p_filesz).ok()?;
-            let dyn_end = dyn_start.checked_add(dyn_size)?;
+            let dyn_start =
+                usize::try_from(ph.p_offset).map_err(|_| "exec: PT_DYNAMIC offset invalid")?;
+            let dyn_size =
+                usize::try_from(ph.p_filesz).map_err(|_| "exec: PT_DYNAMIC size invalid")?;
+            let dyn_end = dyn_start
+                .checked_add(dyn_size)
+                .ok_or("exec: PT_DYNAMIC range overflow")?;
             if dyn_end > bytes.len() {
-                return None;
+                return Err("exec: PT_DYNAMIC range exceeds file size");
             }
 
             let mut strtab_vaddr: Option<u64> = None;
@@ -524,8 +629,9 @@ fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Option<BinaryMetadata> {
 
             let mut cursor = dyn_start;
             while cursor + 16 <= dyn_end {
-                let d_tag = read_i64_le(bytes, cursor)?;
-                let d_val = read_u64_le(bytes, cursor + 8)?;
+                let d_tag = read_i64_le(bytes, cursor).ok_or("exec: truncated dynamic entry")?;
+                let d_val =
+                    read_u64_le(bytes, cursor + 8).ok_or("exec: truncated dynamic entry")?;
                 cursor += 16;
 
                 if d_tag == DT_NULL {
@@ -550,8 +656,11 @@ fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Option<BinaryMetadata> {
             {
                 let strtab_end = strtab_off.saturating_add(size).min(bytes.len());
                 for needed in needed_offsets {
-                    let rel = usize::try_from(needed).ok()?;
-                    let start = strtab_off.checked_add(rel)?;
+                    let rel =
+                        usize::try_from(needed).map_err(|_| "exec: DT_NEEDED offset invalid")?;
+                    let start = strtab_off
+                        .checked_add(rel)
+                        .ok_or("exec: DT_NEEDED offset overflow")?;
                     if start >= strtab_end {
                         continue;
                     }
@@ -575,7 +684,7 @@ fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Option<BinaryMetadata> {
         entry_addr & !0xFFF
     };
 
-    Some(BinaryMetadata {
+    Ok(BinaryMetadata {
         entry: path_basename(path),
         pie: e_type == ET_DYN,
         preferred_base,
@@ -583,11 +692,16 @@ fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Option<BinaryMetadata> {
         interpreter,
         needed_libraries,
         required_symbols: Vec::new(),
+        load_segments,
+        zero_fill_bytes,
+        readable_segments,
+        writable_segments,
+        executable_segments,
     })
 }
 
-pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
-    let text = saifs::read_text(path).ok()?;
+pub fn binary_metadata_checked(path: &str) -> Result<BinaryMetadata, &'static str> {
+    let text = saifs::read_text(path).map_err(|_| "exec: binary read failed")?;
     if text.starts_with("SAIOS_BIN_V1") {
         let mut entry: Option<String> = None;
         let mut pie = false;
@@ -643,8 +757,8 @@ pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
             }
         }
 
-        let entry = entry?;
-        return Some(BinaryMetadata {
+        let entry = entry.ok_or("exec: SAIOS_BIN missing entry")?;
+        return Ok(BinaryMetadata {
             entry,
             pie,
             preferred_base,
@@ -652,12 +766,21 @@ pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
             interpreter,
             needed_libraries,
             required_symbols,
+            load_segments: 0,
+            zero_fill_bytes: 0,
+            readable_segments: 0,
+            writable_segments: 0,
+            executable_segments: 0,
         });
     }
 
-    let handle = saifs::open(path).ok()?;
-    let bytes = handle.read().ok()?;
+    let handle = saifs::open(path).map_err(|_| "exec: binary open failed")?;
+    let bytes = handle.read().map_err(|_| "exec: binary read failed")?;
     parse_elf_metadata(path, bytes.as_slice())
+}
+
+pub fn binary_metadata(path: &str) -> Option<BinaryMetadata> {
+    binary_metadata_checked(path).ok()
 }
 
 fn execute_entry(entry: &str, args: &[&str], env: &[(String, String)]) -> ProgramResult {
@@ -690,7 +813,7 @@ fn execute_entry(entry: &str, args: &[&str], env: &[(String, String)]) -> Progra
 /// binary metadata is read and the named entry point is dispatched.
 pub fn execute_path(
     path: &str,
-    name: &str,
+    _name: &str,
     args: &[&str],
     env: &[(String, String)],
 ) -> ProgramResult {
@@ -698,9 +821,7 @@ pub fn execute_path(
         return execute_compiled_stub(path, args);
     }
 
-    let entry = binary_metadata(path)
-        .map(|m| m.entry)
-        .unwrap_or_else(|| name.to_string());
+    let entry = binary_metadata_checked(path).map(|m| m.entry)?;
     execute_entry(entry.as_str(), args, env)
 }
 

@@ -18,7 +18,6 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::console;
-use crate::kernel::process;
 use crate::saifs;
 use hal::arch::x86_64::sync::StaticCell;
 
@@ -153,11 +152,23 @@ pub fn run_diskpart_alias(args: &[&str], env: &[(String, String)]) -> Result<i32
 
 /// Entry point for the interactive shell user program.
 pub fn program_main() {
-    let _ = process::start_pid1("/system/init");
+    run_shell_session("root", Some("/system/init"));
+}
+
+pub fn run_init_script(path: &str) {
     let mut engine = engine::ShellEngine::new();
-    let _ = engine.execute_line("source /system/init");
-    let _ = process::finish_pid1(0);
-    let _ = process::ensure_shell_process("snsh");
+    let line = alloc::format!("source {}", path);
+    let _ = engine.execute_line(line.as_str());
+}
+
+pub fn run_shell_session(user: &str, init_script: Option<&str>) -> ! {
+    let mut engine = engine::ShellEngine::new();
+    engine.set_current_user(user);
+    if let Some(path) = init_script {
+        let line = alloc::format!("source {}", path);
+        let _ = engine.execute_line(line.as_str());
+    }
     console::println!("Launching SNSH...");
     engine.run();
+    run()
 }

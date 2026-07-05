@@ -12,9 +12,9 @@ mod input;
 mod keyboard;
 mod mouse;
 mod serial;
+pub mod tests;
 mod vga;
 mod visual;
-pub mod tests;
 
 use alloc::string::String as AllocString;
 use alloc::vec::Vec;
@@ -27,7 +27,6 @@ use backend::{ConsoleBackend, MirrorConsole};
 use core::sync::atomic::{AtomicBool, Ordering};
 use cursor::Cursor;
 use efi_main::graphics::FramebufferInfo;
-use visual::VisualConsole;
 use hal::arch::x86_64::sync::StaticCell;
 use heapless::String;
 use input::InputBuffer;
@@ -36,6 +35,7 @@ use mouse::MouseDriver;
 use serial::{SerialConsole, poll_input_event as poll_serial_input_event};
 use static_assertions::const_assert;
 use unicode_width::UnicodeWidthChar;
+use visual::VisualConsole;
 
 pub use keyboard::KeyEvent;
 pub use mouse::{MouseButtons, MouseEvent};
@@ -958,7 +958,13 @@ pub fn poll_input() -> Option<String<256>> {
     framebuffer_scrollback_to_bottom();
 
     // SAFETY: single-core early kernel context.
-    let (prev_rendered, prev_len_cells, prev_cursor_cells, prev_cursor_char_width, prev_right_char_width) = unsafe {
+    let (
+        prev_rendered,
+        prev_len_cells,
+        prev_cursor_cells,
+        prev_cursor_char_width,
+        prev_right_char_width,
+    ) = unsafe {
         let input = &*INPUT_BUFFER.get();
         let rendered = input.render();
         let cursor_chars = input.cursor();
@@ -1129,6 +1135,7 @@ pub fn poll_input() -> Option<String<256>> {
             None
         }
         KeyEvent::CtrlC => {
+            let _ = crate::kernel::process::signal_foreground_group(2);
             newline();
             unsafe { (*INPUT_BUFFER.get()).clear() };
             Some(String::new())

@@ -2,7 +2,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::ptr;
-use core::sync::atomic::{compiler_fence, fence, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering, compiler_fence, fence};
 
 use hal::arch::x86_64::sync::StaticCell;
 
@@ -265,10 +265,16 @@ fn resolve_abar(dev: &pci::PciDevice) -> Result<u64, &'static str> {
     Ok(bar.base)
 }
 
-fn map_mmio_window(phys_base: u64, size_bytes: usize, owner: &str) -> Result<(u64, *mut u8), &'static str> {
+fn map_mmio_window(
+    phys_base: u64,
+    size_bytes: usize,
+    owner: &str,
+) -> Result<(u64, *mut u8), &'static str> {
     let aligned_phys = phys_base & !(vmm::PAGE_SIZE - 1);
     let offset = (phys_base - aligned_phys) as usize;
-    let total = offset.checked_add(size_bytes).ok_or("ahci: mmio window overflow")?;
+    let total = offset
+        .checked_add(size_bytes)
+        .ok_or("ahci: mmio window overflow")?;
     let pages = total.div_ceil(vmm::PAGE_SIZE as usize);
     let virt = vmm::map_physical_anywhere(
         aligned_phys,
@@ -287,13 +293,14 @@ fn alloc_dma_pages(pages: usize, owner: &str) -> Result<DmaAllocation, &'static 
         return Err("ahci: dma pages must be > 0");
     }
     let phys = pmm::alloc_pages(pages).ok_or("ahci: dma physical allocation failed")?;
-    let virt = match vmm::map_physical_anywhere(phys, pages, vmm::FLAG_READ | vmm::FLAG_WRITE, owner) {
-        Ok(virt) => virt,
-        Err(err) => {
-            let _ = pmm::free_pages_range(phys, pages);
-            return Err(err);
-        }
-    };
+    let virt =
+        match vmm::map_physical_anywhere(phys, pages, vmm::FLAG_READ | vmm::FLAG_WRITE, owner) {
+            Ok(virt) => virt,
+            Err(err) => {
+                let _ = pmm::free_pages_range(phys, pages);
+                return Err(err);
+            }
+        };
 
     unsafe {
         ptr::write_bytes(virt as *mut u8, 0, pages * vmm::PAGE_SIZE as usize);
@@ -318,7 +325,14 @@ fn port_write32(mmio: *mut u8, port: u8, reg: usize, value: u32) {
     write32(mmio, port_offset(port) + reg, value);
 }
 
-fn wait_until_port_timeout(mmio: *mut u8, port: u8, reg: usize, mask: u32, set: bool, iters: usize) -> bool {
+fn wait_until_port_timeout(
+    mmio: *mut u8,
+    port: u8,
+    reg: usize,
+    mask: u32,
+    set: bool,
+    iters: usize,
+) -> bool {
     for i in 0..iters {
         let value = port_read32(mmio, port, reg);
         let matches = (value & mask) != 0;
@@ -334,7 +348,13 @@ fn wait_until_port_timeout(mmio: *mut u8, port: u8, reg: usize, mask: u32, set: 
 fn enable_pci_command(dev: &pci::PciDevice, bits: u16) {
     let command = pci::read_u16(dev.bus, dev.device, dev.function, PCI_COMMAND_OFFSET);
     if (command & bits) != bits {
-        pci::write_u16(dev.bus, dev.device, dev.function, PCI_COMMAND_OFFSET, command | bits);
+        pci::write_u16(
+            dev.bus,
+            dev.device,
+            dev.function,
+            PCI_COMMAND_OFFSET,
+            command | bits,
+        );
     }
 }
 
@@ -357,7 +377,14 @@ fn stop_port_engine(mmio: *mut u8, port: u8) -> Result<(), &'static str> {
     port_write32(mmio, port, AHCI_PX_CMD, cmd);
 
     // Use quick timeout for port stop - if it doesn't respond fast, skip it
-    if !wait_until_port_timeout(mmio, port, AHCI_PX_CMD, AHCI_PX_CMD_CR | AHCI_PX_CMD_FR, false, AHCI_QUICK_ITERS) {
+    if !wait_until_port_timeout(
+        mmio,
+        port,
+        AHCI_PX_CMD,
+        AHCI_PX_CMD_CR | AHCI_PX_CMD_FR,
+        false,
+        AHCI_QUICK_ITERS,
+    ) {
         return Err("ahci: port stop timed out");
     }
     Ok(())
@@ -371,7 +398,11 @@ fn start_port_engine(mmio: *mut u8, port: u8) {
     port_write32(mmio, port, AHCI_PX_CMD, cmd);
 }
 
-fn init_port_runtime(mmio: *mut u8, port: u8, owner: &str) -> Result<AhciPortRuntime, &'static str> {
+fn init_port_runtime(
+    mmio: *mut u8,
+    port: u8,
+    owner: &str,
+) -> Result<AhciPortRuntime, &'static str> {
     stop_port_engine(mmio, port)?;
 
     let command_list = alloc_dma_pages(1, owner)?;
@@ -443,7 +474,8 @@ fn issue_ata_command(
 
         (*table).prdt[0].dba = runtime.data_buffer.phys as u32;
         (*table).prdt[0].dbau = (runtime.data_buffer.phys >> 32) as u32;
-        (*table).prdt[0].dbc_ioc = (((transfer_len as u32).saturating_sub(1)) & 0x3F_FFFF) | (1 << 31);
+        (*table).prdt[0].dbc_ioc =
+            (((transfer_len as u32).saturating_sub(1)) & 0x3F_FFFF) | (1 << 31);
 
         let cfis = &mut (*table).cfis;
         cfis[0] = FIS_TYPE_REG_H2D;
@@ -511,7 +543,12 @@ fn identify_port(mmio: *mut u8, runtime: &mut AhciPortRuntime) -> Result<(), &'s
     Ok(())
 }
 
-fn read_sector_runtime(mmio: *mut u8, runtime: &mut AhciPortRuntime, lba: u64, out: &mut [u8]) -> Result<(), &'static str> {
+fn read_sector_runtime(
+    mmio: *mut u8,
+    runtime: &mut AhciPortRuntime,
+    lba: u64,
+    out: &mut [u8],
+) -> Result<(), &'static str> {
     if out.len() != runtime.sector_size as usize {
         return Err("ahci: invalid read buffer size");
     }
@@ -525,17 +562,30 @@ fn read_sector_runtime(mmio: *mut u8, runtime: &mut AhciPortRuntime, lba: u64, o
         runtime.sector_size as usize,
     )?;
     unsafe {
-        ptr::copy_nonoverlapping(runtime.data_buffer.virt as *const u8, out.as_mut_ptr(), out.len());
+        ptr::copy_nonoverlapping(
+            runtime.data_buffer.virt as *const u8,
+            out.as_mut_ptr(),
+            out.len(),
+        );
     }
     Ok(())
 }
 
-fn write_sector_runtime(mmio: *mut u8, runtime: &mut AhciPortRuntime, lba: u64, data: &[u8]) -> Result<(), &'static str> {
+fn write_sector_runtime(
+    mmio: *mut u8,
+    runtime: &mut AhciPortRuntime,
+    lba: u64,
+    data: &[u8],
+) -> Result<(), &'static str> {
     if data.len() != runtime.sector_size as usize {
         return Err("ahci: invalid write buffer size");
     }
     unsafe {
-        ptr::copy_nonoverlapping(data.as_ptr(), runtime.data_buffer.virt as *mut u8, data.len());
+        ptr::copy_nonoverlapping(
+            data.as_ptr(),
+            runtime.data_buffer.virt as *mut u8,
+            data.len(),
+        );
     }
     issue_ata_command(
         mmio,
@@ -557,9 +607,9 @@ fn rescan_locked(state: &mut AhciState) {
     state.next_disk_id = 1;
 
     if heap::identity_mode_enabled() {
-        state
-            .diagnostics
-            .push("stage=controller_init detail=AHCI MMIO scan skipped in VMM fallback mode".to_string());
+        state.diagnostics.push(
+            "stage=controller_init detail=AHCI MMIO scan skipped in VMM fallback mode".to_string(),
+        );
         return;
     }
 
@@ -571,7 +621,13 @@ fn rescan_locked(state: &mut AhciState) {
         }
         detected_any = true;
 
-        record_diag(state, "pci_detection", &dev, None, "ahci class device discovered");
+        record_diag(
+            state,
+            "pci_detection",
+            &dev,
+            None,
+            "ahci class device discovered",
+        );
 
         let abar = match resolve_abar(&dev) {
             Ok(phys) => Some(phys),

@@ -16,6 +16,7 @@ use crate::kernel::crt;
 use crate::kernel::device;
 use crate::kernel::driver;
 use crate::kernel::event;
+use crate::kernel::init_runtime;
 use crate::kernel::object as kom;
 use crate::kernel::package_image;
 use crate::kernel::process;
@@ -325,6 +326,16 @@ pub fn register(registry: &mut CommandRegistry) {
         name: "env",
         description: "List shell environment variables",
         handler: cmd_env,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "whoami",
+        description: "Print active login user",
+        handler: cmd_whoami,
+    }));
+    registry.register(Box::new(StaticCommand {
+        name: "whois",
+        description: "Show account information for a user",
+        handler: cmd_whois,
     }));
     registry.register(Box::new(StaticCommand {
         name: "setenv",
@@ -1068,6 +1079,39 @@ fn cmd_env(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
     Ok(())
 }
 
+fn cmd_whoami(ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
+    if let Some(user) = &ctx.session.current_user {
+        console::println!("{}", user);
+        return Ok(());
+    }
+    if let Some(user) = ctx.env_get("USER") {
+        console::println!("{}", user);
+        return Ok(());
+    }
+    console::println!("unknown");
+    Ok(())
+}
+
+fn cmd_whois(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
+    let query = args
+        .first()
+        .copied()
+        .or_else(|| ctx.session.current_user.as_deref())
+        .ok_or("whois: missing user")?;
+
+    let Some(user) = init_runtime::user_summary(query) else {
+        return Err("whois: user not found");
+    };
+
+    console::println!("user: {}", user.username);
+    console::println!("uid: {}", user.uid);
+    console::println!("gid: {}", user.gid);
+    console::println!("role: {}", user.role);
+    console::println!("home: {}", user.home);
+    console::println!("shell: {}", user.shell);
+    Ok(())
+}
+
 fn cmd_setenv(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let key = args.first().copied().ok_or("setenv: missing key")?;
     let value = args.get(1).copied().ok_or("setenv: missing value")?;
@@ -1158,12 +1202,15 @@ fn cmd_syscall(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             syscall::SyscallNumber::from_name(sel).ok_or("syscall invoke: unknown name")?
         };
 
-        let arg0 = args.get(2).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let mut argv = [0u64; 6];
+        for (i, slot) in argv.iter_mut().enumerate() {
+            *slot = args
+                .get(2 + i)
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+        }
 
-        let req = syscall::SyscallRequest {
-            number,
-            args: [arg0, 0, 0, 0, 0, 0],
-        };
+        let req = syscall::SyscallRequest { number, args: argv };
         let ctx = syscall::SyscallContext { pid: 1 };
 
         match syscall::dispatch(req, ctx) {
@@ -1173,7 +1220,7 @@ fn cmd_syscall(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
         return Ok(());
     }
 
-    Err("usage: syscall [abi|check <id>|invoke <name|id> [arg0]]")
+    Err("usage: syscall [abi|check <id>|invoke <name|id> [arg0..arg5]]")
 }
 
 fn cmd_crt(ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
@@ -1511,7 +1558,12 @@ fn cmd_objects(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
     console::println!("{:<6}  {:<10}  {:<24}", "ID", "TYPE", "NAME");
     for obj in records {
-        console::println!("{:<6}  {:<10.10}  {:<24.24}", obj.id.0, obj.object_type.as_str(), obj.name);
+        console::println!(
+            "{:<6}  {:<10.10}  {:<24.24}",
+            obj.id.0,
+            obj.object_type.as_str(),
+            obj.name
+        );
     }
     Ok(())
 }
@@ -2271,11 +2323,21 @@ fn print_cached_disks() {
     console::println!("==============");
     console::println!(
         "  {:<12}  {:>8}  {:<6}  {:<5}  {:<10}  {}",
-        "NAME", "SIZE(MB)", "SECTOR", "HW", "PARTS", "BACKING"
+        "NAME",
+        "SIZE(MB)",
+        "SECTOR",
+        "HW",
+        "PARTS",
+        "BACKING"
     );
     console::println!(
         "  {:-<12}  {:->8}  {:-<6}  {:-<5}  {:-<10}  {:-<32}",
-        "", "", "", "", "", ""
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
     );
 
     for d in &disks {
@@ -2297,7 +2359,10 @@ fn print_cached_disks() {
         console::println!("Run 'volumes scan' to request storage discovery.");
     } else {
         console::println!("");
-        console::println!("{} disk(s) detected. Use 'volumes' for mountable volumes.", disks.len());
+        console::println!(
+            "{} disk(s) detected. Use 'volumes' for mountable volumes.",
+            disks.len()
+        );
     }
 }
 
@@ -2307,11 +2372,21 @@ fn print_cached_volumes() {
     console::println!("================");
     console::println!(
         "  {:<12}  {:<8}  {:>8}  {:<10}  {:<18}  {}",
-        "NAME", "FS", "SIZE(MB)", "ACCESS", "MOUNTED", "BACKING"
+        "NAME",
+        "FS",
+        "SIZE(MB)",
+        "ACCESS",
+        "MOUNTED",
+        "BACKING"
     );
     console::println!(
         "  {:-<12}  {:-<8}  {:->8}  {:-<10}  {:-<18}  {:-<28}",
-        "", "", "", "", "", ""
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
     );
 
     for v in &volumes {
@@ -2350,7 +2425,14 @@ fn print_cached_ahci() {
             .unwrap_or_else(|| "-".to_string());
         console::println!(
             "  {} {} {:02x}:{:02x}.{} {:04x}:{:04x} abar={}",
-            c.name, state, c.bus, c.device, c.function, c.vendor_id, c.device_id, abar
+            c.name,
+            state,
+            c.bus,
+            c.device,
+            c.function,
+            c.vendor_id,
+            c.device_id,
+            abar
         );
         if let Some(err) = c.last_error.as_ref() {
             console::println!("    error: {}", err);
@@ -2520,8 +2602,12 @@ fn cmd_storage(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
     match sub {
         "help" => {
-            console::println!("storage diag            Run bottom-up diagnostics (cached, non-blocking)");
-            console::println!("storage diag probe      Run diagnostics with live AHCI/storage probe");
+            console::println!(
+                "storage diag            Run bottom-up diagnostics (cached, non-blocking)"
+            );
+            console::println!(
+                "storage diag probe      Run diagnostics with live AHCI/storage probe"
+            );
             console::println!("storage scan            Force AHCI + storage rescan");
             console::println!("storage pci             List PCI storage controllers");
             Ok(())
@@ -2581,7 +2667,11 @@ fn cmd_storage(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             console::println!(
                 "  pci={} storage={} ext4={} ntfs={} fat32={}",
                 if pci_drv.is_some() { "ok" } else { "missing" },
-                if storage_drv.is_some() { "ok" } else { "missing" },
+                if storage_drv.is_some() {
+                    "ok"
+                } else {
+                    "missing"
+                },
                 if ext4_drv.is_some() { "ok" } else { "missing" },
                 if ntfs_drv.is_some() { "ok" } else { "missing" },
                 if fat32_drv.is_some() { "ok" } else { "missing" }
@@ -2634,7 +2724,14 @@ fn cmd_storage(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
                     }
                 }
             }
-            console::println!("  NVMe: {}", if has_nvme_pci { "PCI Found (driver pending)" } else { "Not Found" });
+            console::println!(
+                "  NVMe: {}",
+                if has_nvme_pci {
+                    "PCI Found (driver pending)"
+                } else {
+                    "Not Found"
+                }
+            );
 
             console::println!("\n[4] Port Enumeration + IDENTIFY");
             let ahci_disks = if live_probe {
@@ -2646,10 +2743,15 @@ fn cmd_storage(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
                 console::println!("  no AHCI media identified");
             } else {
                 for d in &ahci_disks {
-                    let gb = d.total_sectors.saturating_mul(d.sector_size as u64) / (1024 * 1024 * 1024);
+                    let gb =
+                        d.total_sectors.saturating_mul(d.sector_size as u64) / (1024 * 1024 * 1024);
                     console::println!(
                         "  {} ctrl={} port={} model={} size={}GB",
-                        d.name, d.controller, d.port, d.model, gb
+                        d.name,
+                        d.controller,
+                        d.port,
+                        d.model,
+                        gb
                     );
                 }
             }
@@ -2663,7 +2765,11 @@ fn cmd_storage(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             }
             let block_devices: Vec<_> = device::devices()
                 .into_iter()
-                .filter(|d| d.class.contains("block/") || d.driver.eq_ignore_ascii_case("storage") || d.driver.eq_ignore_ascii_case("ahci"))
+                .filter(|d| {
+                    d.class.contains("block/")
+                        || d.driver.eq_ignore_ascii_case("storage")
+                        || d.driver.eq_ignore_ascii_case("ahci")
+                })
                 .collect();
             if block_devices.is_empty() {
                 console::println!("  FAIL: no block devices registered");
@@ -2685,13 +2791,12 @@ fn cmd_storage(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             } else {
                 disk::volumes_cached()
             };
-            let real_volumes: Vec<_> = volumes
-                .into_iter()
-                .filter(|v| v.name != "tmpfs")
-                .collect();
+            let real_volumes: Vec<_> = volumes.into_iter().filter(|v| v.name != "tmpfs").collect();
             if real_volumes.is_empty() {
                 if !storage_pci.is_empty() {
-                    console::println!("  INFO: no non-tmpfs volumes (controller present; driver support may be pending)");
+                    console::println!(
+                        "  INFO: no non-tmpfs volumes (controller present; driver support may be pending)"
+                    );
                 } else {
                     console::println!("  FAIL: no non-tmpfs volumes");
                 }
@@ -2782,9 +2887,7 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
     match sub {
         // ── mount list (default) ────────────────────────────────────────────
-        "list" | "ls" => {
-            cmd_volumes(_ctx, &["mounts"])
-        }
+        "list" | "ls" => cmd_volumes(_ctx, &["mounts"]),
 
         "disks" => cmd_volumes(_ctx, &["disks"]),
 
@@ -2803,7 +2906,9 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             console::println!("mount <device> <path> [ro]    Mount a storage volume");
             console::println!("umount <path>                 Unmount a mounted path");
             console::println!("");
-            console::println!("Volumes are shown by 'volumes'. Common names: sata0p1, disk0p1, ...");
+            console::println!(
+                "Volumes are shown by 'volumes'. Common names: sata0p1, disk0p1, ..."
+            );
             console::println!("Mount points must exist as directories (e.g. /mnt/disk0).");
             Ok(())
         }
@@ -2822,27 +2927,16 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
             let read_only = args.get(2).is_some_and(|f| f.eq_ignore_ascii_case("ro"));
 
-            let vol = disk::resolve_mountable_volume(device)
-                .ok_or("mount: no mountable volume found (run 'mount scan', then use a partition like sata0p1)")?;
+            // Single call: creates mount-point dir, mounts in storage layer,
+            // records in VFS mount table.
+            vfs::mount_storage(device, mountpoint, read_only)?;
 
-            let fs_name = vol.filesystem.as_str();
-
-            // Auto-create the mount-point directory if it doesn't exist
-            let _ = vfs::mkdir(mountpoint);
-
-            // Register in VFS
-            vfs::mount(mountpoint, fs_name, read_only)?;
-
-            // Update storage driver's mounted_at marker
-            if let Err(e) = disk::mount_volume(vol.name.as_str(), mountpoint, read_only) {
-                let _ = vfs::umount(mountpoint);
-                return Err(e);
-            }
-
+            let vol_name = disk::resolve_mountable_volume(device)
+                .map(|v| v.name)
+                .unwrap_or_else(|| device.to_string());
             console::println!(
-                "mount: {} ({}) mounted at {} [{}]",
-                vol.name,
-                fs_name,
+                "mount: {} mounted at {} [{}]",
+                vol_name,
                 mountpoint,
                 if read_only { "ro" } else { "rw" }
             );
@@ -2857,11 +2951,8 @@ fn cmd_umount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
         .copied()
         .ok_or("umount: usage: umount <path>")?;
 
-    // Remove from VFS (validates path and protects root)
-    vfs::umount(mountpoint)?;
-
-    // Clear the storage driver's mounted_at marker (best-effort)
-    let _ = disk::umount_volume(mountpoint);
+    // Single call: removes from both VFS mount table and storage layer.
+    vfs::umount_storage(mountpoint)?;
 
     console::println!("umount: {} unmounted", mountpoint);
     Ok(())
@@ -3042,7 +3133,9 @@ fn cmd_detect(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     with_detect_baseline_mut(|baseline| {
         if baseline.is_none() {
             *baseline = Some(current.clone());
-            console::println!("detect: baseline initialized (run detect again to see new hardware)");
+            console::println!(
+                "detect: baseline initialized (run detect again to see new hardware)"
+            );
             return;
         }
 

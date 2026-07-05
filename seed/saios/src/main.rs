@@ -173,28 +173,29 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
     let nx_enabled = detect_nx_page_protection_policy();
     vmm::set_nx_page_protection_enabled(nx_enabled);
 
-    let (prepared_kernel_pml4, mut active_cr3, mut vmm_bootstrap_ok) = match vmm::bootstrap_kernel_page_tables(
-        framebuffer_info.base,
-        framebuffer_info.size,
-        boot_info_ptr,
-        boot_info_size,
-        kernel_start,
-        kernel_end,
-    ) {
-        Ok(pml4) => {
-            let current_cr3 = paging::read_cr3() & 0x000F_FFFF_FFFF_F000;
-            (Some(pml4), current_cr3, false)
-        }
-        Err(e) => {
-            // Fallback path for firmware that cannot tolerate early CR3/bootstrap assumptions.
-            let current_cr3 = paging::read_cr3() & 0x000F_FFFF_FFFF_F000;
-            hal::arch::x86_64::console::_print(format_args!(
-                "kernel: VMM bootstrap failed: {} (fallback cr3={:#x})\n",
-                e, current_cr3
-            ));
-            (None, current_cr3, false)
-        }
-    };
+    let (prepared_kernel_pml4, mut active_cr3, mut vmm_bootstrap_ok) =
+        match vmm::bootstrap_kernel_page_tables(
+            framebuffer_info.base,
+            framebuffer_info.size,
+            boot_info_ptr,
+            boot_info_size,
+            kernel_start,
+            kernel_end,
+        ) {
+            Ok(pml4) => {
+                let current_cr3 = paging::read_cr3() & 0x000F_FFFF_FFFF_F000;
+                (Some(pml4), current_cr3, false)
+            }
+            Err(e) => {
+                // Fallback path for firmware that cannot tolerate early CR3/bootstrap assumptions.
+                let current_cr3 = paging::read_cr3() & 0x000F_FFFF_FFFF_F000;
+                hal::arch::x86_64::console::_print(format_args!(
+                    "kernel: VMM bootstrap failed: {} (fallback cr3={:#x})\n",
+                    e, current_cr3
+                ));
+                (None, current_cr3, false)
+            }
+        };
 
     if EARLY_CR3_SWITCH_ENABLED && !vmm_bootstrap_ok {
         if let Some(kernel_pml4) = prepared_kernel_pml4 {
@@ -225,8 +226,8 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
             let rsp_guard_64k = rsp.saturating_sub(0x10000);
             let alloc_marker = &GLOBAL_ALLOCATOR as *const _ as u64;
             let kernel_hh_start = vmm::KERNEL_IMAGE_MIRROR_BASE.saturating_add(kernel_start);
-            let kernel_hh_tail = vmm::KERNEL_IMAGE_MIRROR_BASE
-                .saturating_add(kernel_end.saturating_sub(1));
+            let kernel_hh_tail =
+                vmm::KERNEL_IMAGE_MIRROR_BASE.saturating_add(kernel_end.saturating_sub(1));
             let required_points = [
                 ("rip", rip),
                 ("rip+0x1000", rip_next),
@@ -306,8 +307,7 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
             if switch_target < LATE_CR3_MIN_SWITCH_PHYS {
                 hal::arch::x86_64::console::_print(format_args!(
                     "kernel: early CR3 switch skipped (target below safety floor: {:#x} < {:#x})\n",
-                    switch_target,
-                    LATE_CR3_MIN_SWITCH_PHYS
+                    switch_target, LATE_CR3_MIN_SWITCH_PHYS
                 ));
             } else if !preflight_ok {
                 hal::arch::x86_64::console::_print(format_args!(

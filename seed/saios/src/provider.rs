@@ -210,7 +210,10 @@ impl Provider for StorageProvider {
             });
 
             for part_name in &disk.partitions {
-                let Some(volume) = volumes.iter().find(|v| v.name.eq_ignore_ascii_case(part_name)) else {
+                let Some(volume) = volumes
+                    .iter()
+                    .find(|v| v.name.eq_ignore_ascii_case(part_name))
+                else {
                     continue;
                 };
 
@@ -266,13 +269,18 @@ impl Provider for StorageProvider {
         }
 
         for volume in volumes {
-            if volume.name == "tmpfs" || disks.iter().any(|d| d.name.eq_ignore_ascii_case(&volume.name)) {
+            if volume.name == "tmpfs"
+                || disks
+                    .iter()
+                    .any(|d| d.name.eq_ignore_ascii_case(&volume.name))
+            {
                 continue;
             }
-            if disks
-                .iter()
-                .any(|d| d.partitions.iter().any(|p| p.eq_ignore_ascii_case(&volume.name)))
-            {
+            if disks.iter().any(|d| {
+                d.partitions
+                    .iter()
+                    .any(|p| p.eq_ignore_ascii_case(&volume.name))
+            }) {
                 continue;
             }
 

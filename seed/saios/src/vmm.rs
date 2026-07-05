@@ -7,7 +7,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::sync::atomic::{fence, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering, fence};
 
 use hal::arch::paging;
 use hal::arch::x86_64::sync::StaticCell;

@@ -100,11 +100,7 @@ pub fn boot_readiness_gate() -> bool {
         } else {
             "FAIL"
         };
-        console::println!(
-            "[READY] {:<16} {}",
-            gate.label,
-            status
-        );
+        console::println!("[READY] {:<16} {}", gate.label, status);
     }
 
     report.kernel_ready()

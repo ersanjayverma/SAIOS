@@ -50,6 +50,12 @@ impl ShellEngine {
             .dispatch(&self.registry, &mut self.ctx, line)
     }
 
+    pub fn set_current_user(&mut self, user: &str) {
+        self.ctx.session.current_user = Some(user.into());
+        self.ctx.env_set("USER", user);
+        self.ctx.env_set("LOGNAME", user);
+    }
+
     fn render_prompt(&self) {
         let provider = SessionPromptProvider::new(&self.ctx.session);
         let prompt = provider.render();

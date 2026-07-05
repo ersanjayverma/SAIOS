@@ -147,7 +147,8 @@ impl Scheduler {
     }
 
     fn queue_sleep(&mut self, idx: usize, wake_tick: u64) {
-        self.sleep_queue.retain(|(_, queued_idx)| *queued_idx != idx);
+        self.sleep_queue
+            .retain(|(_, queued_idx)| *queued_idx != idx);
 
         let pos = self
             .sleep_queue
@@ -388,7 +389,7 @@ pub fn prepare_default_user_session() -> Result<(), &'static str> {
 }
 
 fn default_user_session_entry() {
-    crate::shell::program_main();
+    crate::kernel::init_runtime::boot_to_login_shell();
 }
 
 /// Starts the default user shell as a scheduler-owned user session.
@@ -489,9 +490,8 @@ pub fn sleep_ticks(tick_delta: u64) {
 
     let target = crate::timer::ticks().saturating_add(tick_delta);
 
-    let initialized = interrupt::without_interrupts(|| {
-        matches!(scheduler_ref(), Some(s) if s.initialized)
-    });
+    let initialized =
+        interrupt::without_interrupts(|| matches!(scheduler_ref(), Some(s) if s.initialized));
 
     if !initialized {
         while crate::timer::ticks() < target {

@@ -86,11 +86,22 @@ fn cmd_ls(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     if show_all {
         console::println!(
             "{:<24}  {:<10}  {:<10}  {:<10}  {:<8}  {:<8}  PROPERTIES",
-            "NAME", "KIND", "TYPE", "STATUS", "HEALTH", "SIZE"
+            "NAME",
+            "KIND",
+            "TYPE",
+            "STATUS",
+            "HEALTH",
+            "SIZE"
         );
         console::println!(
             "{:-<24}  {:-<10}  {:-<10}  {:-<10}  {:-<8}  {:-<8}  {:-<10}",
-            "", "", "", "", "", "", ""
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
         );
     }
 
@@ -109,10 +120,7 @@ fn cmd_ls(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
                     saifs::SaifsNodeKind::Object => "object",
                     saifs::SaifsNodeKind::Virtual => "virtual",
                 };
-                let object_type = handle
-                    .object_type()
-                    .map(object_type_label)
-                    .unwrap_or("-");
+                let object_type = handle.object_type().map(object_type_label).unwrap_or("-");
                 let status = handle.status().map(object_status_label).unwrap_or("-");
                 let health = crate::saifs::Handle::health(&handle)
                     .map(health_label)
@@ -328,9 +336,7 @@ fn cmd_mv(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn has_help_flag(flags: &[&str]) -> bool {
-    flags
-        .iter()
-        .any(|f| *f == "-h" || *f == "--help")
+    flags.iter().any(|f| *f == "-h" || *f == "--help")
 }
 
 fn split_flags<'a>(args: &'a [&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {

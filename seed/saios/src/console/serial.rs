@@ -365,7 +365,6 @@ impl SerialConsole {
             Self::emergency_put_char(c);
         }
     }
-
 }
 
 impl ConsoleBackend for SerialConsole {

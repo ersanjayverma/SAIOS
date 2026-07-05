@@ -19,7 +19,10 @@ fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
 }
 
-fn map_pages_for_range(phys_addr: u64, len: usize) -> Result<(u64, u64, usize, bool), &'static str> {
+fn map_pages_for_range(
+    phys_addr: u64,
+    len: usize,
+) -> Result<(u64, u64, usize, bool), &'static str> {
     if len == 0 {
         return Err("ACPI: cannot map zero-length range");
     }

@@ -75,6 +75,10 @@ impl HeapState {
 static STATE: StaticCell<HeapState> = StaticCell::new(HeapState::new());
 static LOCK: AtomicBool = AtomicBool::new(false);
 static IDENTITY_HEAP_MAX_PHYS: AtomicU64 = AtomicU64::new(0);
+static ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
+static DEALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
+static ALLOC_REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
+static DEALLOC_REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 fn lock() {
     while LOCK
@@ -218,6 +222,9 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
             return core::ptr::NonNull::<u8>::dangling().as_ptr();
         }
 
+        ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+        ALLOC_REQUESTED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+
         lock();
         let state = unsafe { &mut *STATE.get() };
 
@@ -257,7 +264,18 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
         // Bump allocator v1: deallocation is a no-op because individual
         // allocations are not tracked.
+        DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+        DEALLOC_REQUESTED_BYTES.fetch_add(_layout.size() as u64, Ordering::Relaxed);
     }
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+pub struct LeakStats {
+    pub alloc_calls: u64,
+    pub dealloc_calls: u64,
+    pub alloc_requested_bytes: u64,
+    pub dealloc_requested_bytes: u64,
+    pub outstanding_requested_bytes: u64,
 }
 
 /// Initializes the kernel heap.
@@ -318,4 +336,20 @@ pub fn stats() -> HeapStats {
 
     unlock();
     HeapStats { total, used, free }
+}
+
+pub fn leak_stats() -> LeakStats {
+    let alloc_calls = ALLOC_CALLS.load(Ordering::Relaxed);
+    let dealloc_calls = DEALLOC_CALLS.load(Ordering::Relaxed);
+    let alloc_requested_bytes = ALLOC_REQUESTED_BYTES.load(Ordering::Relaxed);
+    let dealloc_requested_bytes = DEALLOC_REQUESTED_BYTES.load(Ordering::Relaxed);
+    let outstanding_requested_bytes = alloc_requested_bytes.saturating_sub(dealloc_requested_bytes);
+
+    LeakStats {
+        alloc_calls,
+        dealloc_calls,
+        alloc_requested_bytes,
+        dealloc_requested_bytes,
+        outstanding_requested_bytes,
+    }
 }

@@ -140,7 +140,9 @@ pub fn alloc_pages_below(count: usize, max_phys: PhysAddr) -> Option<PhysAddr> {
         ((max_phys.saturating_add(PAGE_SIZE - 1)) / PAGE_SIZE) as usize
     };
     let bounded_tracked_pages = core::cmp::min(pmm.tracked_pages, max_page_exclusive);
-    if bounded_tracked_pages <= first_allocatable || bounded_tracked_pages - first_allocatable < count {
+    if bounded_tracked_pages <= first_allocatable
+        || bounded_tracked_pages - first_allocatable < count
+    {
         return None;
     }
 

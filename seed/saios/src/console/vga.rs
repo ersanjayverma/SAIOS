@@ -2,8 +2,8 @@ use core::ptr;
 
 use efi_main::graphics::FramebufferInfo;
 
-use super::backend::ConsoleBackend;
 use super::FramebufferBenchResult;
+use super::backend::ConsoleBackend;
 use super::framebuffer::DisplayProperties;
 use crate::vmm;
 
@@ -197,7 +197,10 @@ impl ConsoleBackend for VgaConsole {
                 let x = self.cursor_x.min(VGA_WIDTH.saturating_sub(1));
                 let y = self.cursor_y.min(VGA_HEIGHT.saturating_sub(1));
                 self.write_cell(x, y, ch);
-                self.cursor_x = self.cursor_x.saturating_add(1).min(VGA_WIDTH.saturating_sub(1));
+                self.cursor_x = self
+                    .cursor_x
+                    .saturating_add(1)
+                    .min(VGA_WIDTH.saturating_sub(1));
                 if self.cursor_x >= VGA_WIDTH {
                     self.newline();
                 } else {
@@ -219,7 +222,10 @@ impl ConsoleBackend for VgaConsole {
                     let spaces = VGA_TAB_WIDTH - (self.cursor_x % VGA_TAB_WIDTH);
                     for _ in 0..spaces {
                         self.write_cell(self.cursor_x, self.cursor_y, ' ');
-                        self.cursor_x = self.cursor_x.saturating_add(1).min(VGA_WIDTH.saturating_sub(1));
+                        self.cursor_x = self
+                            .cursor_x
+                            .saturating_add(1)
+                            .min(VGA_WIDTH.saturating_sub(1));
                         if self.cursor_x >= VGA_WIDTH {
                             self.newline();
                         }
@@ -235,7 +241,10 @@ impl ConsoleBackend for VgaConsole {
                     let x = self.cursor_x.min(VGA_WIDTH.saturating_sub(1));
                     let y = self.cursor_y.min(VGA_HEIGHT.saturating_sub(1));
                     self.write_cell(x, y, ch);
-                    self.cursor_x = self.cursor_x.saturating_add(1).min(VGA_WIDTH.saturating_sub(1));
+                    self.cursor_x = self
+                        .cursor_x
+                        .saturating_add(1)
+                        .min(VGA_WIDTH.saturating_sub(1));
                     if self.cursor_x >= VGA_WIDTH {
                         self.newline();
                     }

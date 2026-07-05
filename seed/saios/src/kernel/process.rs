@@ -20,8 +20,12 @@ pub enum ProcessState {
 #[derive(Clone, Debug)]
 pub struct ProcessRecord {
     pub pid: u64,
+    pub parent_pid: Option<u64>,
     pub name: String,
     pub state: ProcessState,
+    pub process_group: u64,
+    pub session_id: u64,
+    pub controlling_tty: bool,
     pub thread_count: usize,
     pub exit_code: Option<i32>,
     pub image_base: u64,
@@ -30,6 +34,9 @@ pub struct ProcessRecord {
     pub linked_interpreter: Option<String>,
     pub linked_libraries: Vec<String>,
     pub resolved_symbols: Vec<String>,
+    pub readable_segments: usize,
+    pub writable_segments: usize,
+    pub executable_segments: usize,
 }
 
 struct ProcessManager {
@@ -38,6 +45,8 @@ struct ProcessManager {
     next_pid: u64,
     init_pid: Option<u64>,
     shell_pid: Option<u64>,
+    foreground_pgid: Option<u64>,
+    controlling_tty_session: Option<u64>,
 }
 
 impl ProcessManager {
@@ -48,16 +57,35 @@ impl ProcessManager {
             next_pid: 1,
             init_pid: None,
             shell_pid: None,
+            foreground_pgid: None,
+            controlling_tty_session: None,
         }
     }
 
-    fn spawn(&mut self, name: &str) -> u64 {
+    fn spawn(&mut self, name: &str, parent_pid: Option<u64>) -> u64 {
         let pid = self.next_pid;
         self.next_pid = self.next_pid.saturating_add(1);
+        let (process_group, session_id, controlling_tty) = if let Some(ppid) = parent_pid {
+            if let Some(parent) = self.records.iter().find(|r| r.pid == ppid) {
+                (
+                    parent.process_group,
+                    parent.session_id,
+                    parent.controlling_tty,
+                )
+            } else {
+                (pid, pid, false)
+            }
+        } else {
+            (pid, pid, false)
+        };
         self.records.push(ProcessRecord {
             pid,
+            parent_pid,
             name: name.to_string(),
             state: ProcessState::Running,
+            process_group,
+            session_id,
+            controlling_tty,
             thread_count: 1,
             exit_code: None,
             image_base: 0,
@@ -66,6 +94,9 @@ impl ProcessManager {
             linked_interpreter: None,
             linked_libraries: Vec::new(),
             resolved_symbols: Vec::new(),
+            readable_segments: 0,
+            writable_segments: 0,
+            executable_segments: 0,
         });
         pid
     }
@@ -78,7 +109,42 @@ impl ProcessManager {
             .ok_or("process: pid not found")?;
         rec.state = ProcessState::Exited;
         rec.exit_code = Some(code);
+
+        // Re-parent living descendants so they can still be waited on.
+        let reaper = self.reaper_pid();
+        for child in self.records.iter_mut() {
+            if child.parent_pid == Some(pid) {
+                child.parent_pid = reaper;
+            }
+        }
+        self.sweep_orphan_zombies();
         Ok(())
+    }
+
+    fn reaper_pid(&self) -> Option<u64> {
+        if let Some(pid) = self.init_pid {
+            return Some(pid);
+        }
+        self.shell_pid
+    }
+
+    fn sweep_orphan_zombies(&mut self) {
+        let init_pid = self.init_pid;
+        let shell_pid = self.shell_pid;
+        let live_pids: Vec<u64> = self.records.iter().map(|p| p.pid).collect();
+        self.records.retain(|r| {
+            if r.state != ProcessState::Exited {
+                return true;
+            }
+            if Some(r.pid) == init_pid || Some(r.pid) == shell_pid {
+                return true;
+            }
+            if r.parent_pid.is_none() {
+                return false;
+            }
+            let parent = r.parent_pid.unwrap_or(0);
+            live_pids.iter().any(|p| *p == parent)
+        });
     }
 
     fn set_waiting(&mut self, pid: u64) -> Result<(), &'static str> {
@@ -165,8 +231,12 @@ pub fn start_pid1(path: &str) -> u64 {
         m.next_pid = m.next_pid.saturating_add(1);
         m.records.push(ProcessRecord {
             pid,
+            parent_pid: None,
             name: path.to_string(),
             state: ProcessState::Running,
+            process_group: pid,
+            session_id: pid,
+            controlling_tty: false,
             thread_count: 1,
             exit_code: None,
             image_base: 0,
@@ -175,8 +245,17 @@ pub fn start_pid1(path: &str) -> u64 {
             linked_interpreter: None,
             linked_libraries: Vec::new(),
             resolved_symbols: Vec::new(),
+            readable_segments: 0,
+            writable_segments: 0,
+            executable_segments: 0,
         });
         m.init_pid = Some(pid);
+        if m.controlling_tty_session.is_none() {
+            m.controlling_tty_session = Some(pid);
+        }
+        if m.foreground_pgid.is_none() {
+            m.foreground_pgid = Some(pid);
+        }
         event::publish(
             EventKind::ProcessStarted,
             "process",
@@ -205,8 +284,15 @@ pub fn ensure_shell_process(name: &str) -> u64 {
             return pid;
         }
 
-        let pid = m.spawn(name);
+        let pid = m.spawn(name, m.init_pid);
         m.shell_pid = Some(pid);
+        if let Some(rec) = m.records.iter_mut().find(|r| r.pid == pid) {
+            rec.session_id = pid;
+            rec.process_group = pid;
+            rec.controlling_tty = true;
+        }
+        m.controlling_tty_session = Some(pid);
+        m.foreground_pgid = Some(pid);
         event::publish(
             EventKind::ProcessStarted,
             "process",
@@ -234,6 +320,66 @@ pub fn kill(pid: u64) -> Result<(), &'static str> {
     })
 }
 
+pub fn has_waitable_child(parent_pid: u64, target: Option<u64>) -> bool {
+    with_manager(|m| {
+        m.records.iter().any(|r| {
+            if r.parent_pid != Some(parent_pid) {
+                return false;
+            }
+            if let Some(tpid) = target {
+                r.pid == tpid
+            } else {
+                true
+            }
+        })
+    })
+}
+
+pub fn first_exited_child(parent_pid: u64) -> Option<(u64, i32)> {
+    with_manager(|m| {
+        m.records
+            .iter()
+            .find(|r| r.parent_pid == Some(parent_pid) && r.state == ProcessState::Exited)
+            .map(|r| (r.pid, r.exit_code.unwrap_or(0)))
+    })
+}
+
+pub fn child_record(parent_pid: u64, child_pid: u64) -> Option<ProcessRecord> {
+    with_manager(|m| {
+        m.records
+            .iter()
+            .find(|r| r.parent_pid == Some(parent_pid) && r.pid == child_pid)
+            .cloned()
+    })
+}
+
+pub fn reap_child(parent_pid: u64, pid: u64) -> Result<i32, &'static str> {
+    with_manager_mut(|m| {
+        let idx = m
+            .records
+            .iter()
+            .position(|r| r.pid == pid)
+            .ok_or("reap: pid not found")?;
+
+        if m.records[idx].parent_pid != Some(parent_pid) {
+            return Err("reap: not a child of caller");
+        }
+        if m.records[idx].state != ProcessState::Exited {
+            return Err("reap: process still running");
+        }
+        if m.init_pid == Some(pid) {
+            return Err("reap: cannot reap pid1");
+        }
+        if m.shell_pid == Some(pid) {
+            return Err("reap: cannot reap shell process");
+        }
+
+        let code = m.records[idx].exit_code.unwrap_or(0);
+        m.records.remove(idx);
+        Ok(code)
+    })
+}
+
 pub fn wait(pid: u64) -> Result<i32, &'static str> {
     with_manager_mut(|m| {
         let _ = m.set_waiting(pid);
@@ -249,6 +395,227 @@ pub fn wait(pid: u64) -> Result<i32, &'static str> {
     })
 }
 
+pub fn record(pid: u64) -> Option<ProcessRecord> {
+    with_manager(|m| m.records.iter().find(|r| r.pid == pid).cloned())
+}
+
+pub fn first_exited(exclude_pid: u64) -> Option<(u64, i32)> {
+    with_manager(|m| {
+        m.records
+            .iter()
+            .find(|r| r.pid != exclude_pid && r.state == ProcessState::Exited)
+            .map(|r| (r.pid, r.exit_code.unwrap_or(0)))
+    })
+}
+
+pub fn reap(pid: u64) -> Result<i32, &'static str> {
+    with_manager_mut(|m| {
+        let idx = m
+            .records
+            .iter()
+            .position(|r| r.pid == pid)
+            .ok_or("reap: pid not found")?;
+        if m.records[idx].state != ProcessState::Exited {
+            return Err("reap: process still running");
+        }
+
+        if m.init_pid == Some(pid) {
+            return Err("reap: cannot reap pid1");
+        }
+
+        if m.shell_pid == Some(pid) {
+            m.shell_pid = None;
+        }
+
+        let code = m.records[idx].exit_code.unwrap_or(0);
+        m.records.remove(idx);
+        Ok(code)
+    })
+}
+
+pub fn fork_from(parent_pid: u64, clone_flags: u64) -> Result<u64, &'static str> {
+    with_manager_mut(|m| {
+        let parent = m
+            .records
+            .iter()
+            .find(|r| r.pid == parent_pid)
+            .cloned()
+            .ok_or("fork: parent pid not found")?;
+
+        let pid = m.next_pid;
+        m.next_pid = m.next_pid.saturating_add(1);
+
+        let mut child = parent;
+        child.pid = pid;
+        child.parent_pid = Some(parent_pid);
+        child.state = ProcessState::Running;
+        child.exit_code = None;
+        // CLONE_THREAD only affects accounting in this model.
+        if (clone_flags & (1 << 16)) != 0 {
+            child.thread_count = child.thread_count.saturating_add(1);
+        } else {
+            child.thread_count = 1;
+        }
+
+        m.records.push(child);
+        event::publish(
+            EventKind::ProcessStarted,
+            "process",
+            alloc::format!(
+                "pid={} forked-from={} flags=0x{:x}",
+                pid,
+                parent_pid,
+                clone_flags
+            )
+            .as_str(),
+        );
+        Ok(pid)
+    })
+}
+
+pub fn send_signal(pid: u64, signo: u8) -> Result<(), &'static str> {
+    if signo == 0 {
+        return Err("signal: invalid signal");
+    }
+    with_manager_mut(|m| {
+        let rec = m
+            .records
+            .iter_mut()
+            .find(|r| r.pid == pid)
+            .ok_or("signal: pid not found")?;
+        if rec.state == ProcessState::Exited {
+            return Ok(());
+        }
+        rec.state = ProcessState::Exited;
+        rec.exit_code = Some(-i32::from(signo));
+        event::publish(
+            EventKind::ProcessStopped,
+            "process",
+            alloc::format!("pid={} signaled={}", pid, signo).as_str(),
+        );
+        Ok(())
+    })
+}
+
+pub fn process_group(pid: u64) -> Option<u64> {
+    with_manager(|m| {
+        m.records
+            .iter()
+            .find(|r| r.pid == pid)
+            .map(|r| r.process_group)
+    })
+}
+
+pub fn session_id(pid: u64) -> Option<u64> {
+    with_manager(|m| {
+        m.records
+            .iter()
+            .find(|r| r.pid == pid)
+            .map(|r| r.session_id)
+    })
+}
+
+pub fn set_process_group(pid: u64, pgid: u64) -> Result<(), &'static str> {
+    with_manager_mut(|m| {
+        if pgid == 0 {
+            return Err("setpgid: invalid pgid");
+        }
+        let sid = m
+            .records
+            .iter()
+            .find(|r| r.pid == pid)
+            .map(|r| r.session_id)
+            .ok_or("setpgid: pid not found")?;
+        let group_ok = m
+            .records
+            .iter()
+            .find(|r| r.pid == pgid)
+            .map(|r| r.session_id == sid)
+            .unwrap_or(true);
+        if !group_ok {
+            return Err("setpgid: cross-session group move denied");
+        }
+
+        let rec = m
+            .records
+            .iter_mut()
+            .find(|r| r.pid == pid)
+            .ok_or("setpgid: pid not found")?;
+        rec.process_group = pgid;
+        Ok(())
+    })
+}
+
+pub fn create_session(pid: u64) -> Result<u64, &'static str> {
+    with_manager_mut(|m| {
+        let rec = m
+            .records
+            .iter_mut()
+            .find(|r| r.pid == pid)
+            .ok_or("setsid: pid not found")?;
+        rec.session_id = pid;
+        rec.process_group = pid;
+        rec.controlling_tty = true;
+        m.controlling_tty_session = Some(pid);
+        m.foreground_pgid = Some(pid);
+        Ok(pid)
+    })
+}
+
+pub fn foreground_process_group() -> Option<u64> {
+    with_manager(|m| m.foreground_pgid)
+}
+
+pub fn set_foreground_process_group(pgid: u64) -> Result<(), &'static str> {
+    with_manager_mut(|m| {
+        let rec = m
+            .records
+            .iter()
+            .find(|r| r.process_group == pgid)
+            .ok_or("tcsetpgrp: process group not found")?;
+        if let Some(tty_sid) = m.controlling_tty_session {
+            if rec.session_id != tty_sid {
+                return Err("tcsetpgrp: process group not in controlling tty session");
+            }
+        }
+        m.foreground_pgid = Some(pgid);
+        Ok(())
+    })
+}
+
+pub fn signal_process_group(pgid: u64, signo: u8) -> Result<usize, &'static str> {
+    with_manager_mut(|m| {
+        if signo == 0 {
+            return Err("signal: invalid signal");
+        }
+        let shell_pid = m.shell_pid;
+        let mut delivered = 0usize;
+        for rec in m.records.iter_mut() {
+            if rec.process_group != pgid || rec.state == ProcessState::Exited {
+                continue;
+            }
+            // Keep interactive shell alive for terminal signals.
+            if shell_pid == Some(rec.pid) && (signo == 2 || signo == 3) {
+                continue;
+            }
+            rec.state = ProcessState::Exited;
+            rec.exit_code = Some(-i32::from(signo));
+            delivered = delivered.saturating_add(1);
+        }
+        if delivered == 0 {
+            return Err("signal: process group not found or no live members");
+        }
+        Ok(delivered)
+    })
+}
+
+pub fn signal_foreground_group(signo: u8) -> usize {
+    let Some(pgid) = foreground_process_group() else {
+        return 0;
+    };
+    signal_process_group(pgid, signo).unwrap_or(0)
+}
+
 pub fn exit(pid: u64, code: i32) -> Result<(), &'static str> {
     with_manager_mut(|m| {
         m.exit(pid, code)?;
@@ -262,21 +629,27 @@ pub fn exit(pid: u64, code: i32) -> Result<(), &'static str> {
 }
 
 pub fn spawn(name: &str, args: &[&str], env: &[(String, String)]) -> Result<u64, &'static str> {
+    let parent_pid = with_manager(|m| m.shell_pid.or(m.init_pid));
+    spawn_from(parent_pid, name, args, env)
+}
+
+pub fn spawn_from(
+    parent_pid: Option<u64>,
+    name: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Result<u64, &'static str> {
     let resolved = resolve_program_name(name)?;
     let program_name = resolved.rsplit('/').next().unwrap_or(resolved.as_str());
     let startup = crt::prepare_startup_block(program_name, args, env);
-    let metadata = programs::binary_metadata(resolved.as_str());
+    let metadata = programs::binary_metadata_checked(resolved.as_str())?;
 
-    let pid = with_manager_mut(|m| m.spawn(resolved.as_str()));
-    let (image_base, load_bias, pie_enabled) = if let Some(meta) = metadata.as_ref() {
-        if meta.pie {
-            let (base, bias) = compute_pie_layout(pid, meta.preferred_base);
-            (base, bias, true)
-        } else {
-            (meta.preferred_base, 0, false)
-        }
+    let pid = with_manager_mut(|m| m.spawn(resolved.as_str(), parent_pid));
+    let (image_base, load_bias, pie_enabled) = if metadata.pie {
+        let (base, bias) = compute_pie_layout(pid, metadata.preferred_base);
+        (base, bias, true)
     } else {
-        (0, 0, false)
+        (metadata.preferred_base, 0, false)
     };
 
     with_manager_mut(|m| {
@@ -284,32 +657,28 @@ pub fn spawn(name: &str, args: &[&str], env: &[(String, String)]) -> Result<u64,
             rec.image_base = image_base;
             rec.load_bias = load_bias;
             rec.pie_enabled = pie_enabled;
+            rec.readable_segments = metadata.readable_segments;
+            rec.writable_segments = metadata.writable_segments;
+            rec.executable_segments = metadata.executable_segments;
         }
     });
 
-    let link_report = if let Some(meta) = metadata.as_ref() {
-        match crate::kernel::dynamic_linker::link_image(resolved.as_str(), meta) {
-            Ok(report) => report,
-            Err(e) => {
-                with_manager_mut(|m| {
-                    if let Some(rec) = m.records.iter_mut().find(|r| r.pid == pid) {
-                        rec.state = ProcessState::Exited;
-                        rec.exit_code = Some(127);
-                    }
-                });
-                event::publish(
-                    EventKind::ProcessStopped,
-                    "process",
-                    alloc::format!("pid={} dynamic-link-failed {}", pid, e).as_str(),
-                );
-                return Err(e);
-            }
-        }
-    } else {
-        crate::kernel::dynamic_linker::LinkReport {
-            interpreter: "-".to_string(),
-            libraries: Vec::new(),
-            resolved_symbols: Vec::new(),
+    let link_report = match crate::kernel::dynamic_linker::link_image(resolved.as_str(), &metadata)
+    {
+        Ok(report) => report,
+        Err(e) => {
+            with_manager_mut(|m| {
+                if let Some(rec) = m.records.iter_mut().find(|r| r.pid == pid) {
+                    rec.state = ProcessState::Exited;
+                    rec.exit_code = Some(127);
+                }
+            });
+            event::publish(
+                EventKind::ProcessStopped,
+                "process",
+                alloc::format!("pid={} dynamic-link-failed {}", pid, e).as_str(),
+            );
+            return Err(e);
         }
     };
 
@@ -327,7 +696,7 @@ pub fn spawn(name: &str, args: &[&str], env: &[(String, String)]) -> Result<u64,
         EventKind::ProcessStarted,
         "process",
         alloc::format!(
-            "pid={} {} argc={} envc={} pie={} base=0x{:x} bias=0x{:x} libs={}",
+            "pid={} {} argc={} envc={} pie={} base=0x{:x} bias=0x{:x} libs={} segs={} bss={} rwx={}/{}/{}",
             pid,
             resolved,
             startup.argc,
@@ -335,12 +704,21 @@ pub fn spawn(name: &str, args: &[&str], env: &[(String, String)]) -> Result<u64,
             pie_enabled,
             image_base,
             load_bias,
-            link_report.libraries.len()
+            link_report.libraries.len(),
+            metadata.load_segments,
+            metadata.zero_fill_bytes,
+            metadata.readable_segments,
+            metadata.writable_segments,
+            metadata.executable_segments
         )
         .as_str(),
     );
 
-    let run = programs::execute_path(resolved.as_str(), program_name, args, env);
+    let run = if metadata.load_segments > 0 {
+        crate::kernel::elf_loader::load_and_run(resolved.as_str(), image_base)
+    } else {
+        programs::execute_path(resolved.as_str(), program_name, args, env)
+    };
     let exit_code = run.unwrap_or(127);
 
     with_manager_mut(|m| {
@@ -388,7 +766,16 @@ fn compute_pie_layout(pid: u64, preferred_base: u64) -> (u64, u64) {
 }
 
 pub fn exec(name: &str, args: &[&str], env: &[(String, String)]) -> Result<i32, &'static str> {
-    let pid = spawn(name, args, env)?;
+    exec_from(None, name, args, env)
+}
+
+pub fn exec_from(
+    parent_pid: Option<u64>,
+    name: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Result<i32, &'static str> {
+    let pid = spawn_from(parent_pid, name, args, env)?;
     jobs()
         .into_iter()
         .find(|job| job.pid == pid)

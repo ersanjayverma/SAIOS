@@ -550,7 +550,10 @@ impl ObjectManager {
             .iter()
             .position(|provider| {
                 provider.name().eq_ignore_ascii_case(provider_name)
-                    || provider.namespace().trim_matches('/').eq_ignore_ascii_case(provider_name)
+                    || provider
+                        .namespace()
+                        .trim_matches('/')
+                        .eq_ignore_ascii_case(provider_name)
             })
             .ok_or("provider not registered")?;
 

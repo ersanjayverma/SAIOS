@@ -578,12 +578,31 @@ fn core_tests() -> Vec<TestCase> {
         ),
         TestCase::new("Storage", "volume registry", test_storage_volume_registry),
         TestCase::new("Storage", "mounted filesystems", test_storage_mounts),
+        TestCase::new("Storage", "ext4 stage8 package", test_storage_ext4_stage8),
+        TestCase::new(
+            "Storage",
+            "ext4 cache validation",
+            test_storage_cache_validation
+        ),
+        TestCase::new(
+            "Stability",
+            "heap leak detection",
+            test_stability_heap_leak_detection
+        ),
         TestCase::new("Timer", "monotonic ticks", test_timer_monotonic),
         TestCase::new("Timer", "sleep advances ticks", test_timer_sleep),
         TestCase::new("Drivers", "keyboard", test_driver_keyboard),
         TestCase::new("Drivers", "mouse", test_driver_mouse),
-        TestCase::new("Drivers", "keyboard input behavior", test_driver_keyboard_behavior),
-        TestCase::new("Drivers", "mouse input behavior", test_driver_mouse_behavior),
+        TestCase::new(
+            "Drivers",
+            "keyboard input behavior",
+            test_driver_keyboard_behavior
+        ),
+        TestCase::new(
+            "Drivers",
+            "mouse input behavior",
+            test_driver_mouse_behavior
+        ),
         TestCase::new("Drivers", "timer", test_driver_timer),
         TestCase::new("Drivers", "serial", test_driver_serial),
         TestCase::new("Drivers", "framebuffer", test_driver_framebuffer),
@@ -1107,6 +1126,54 @@ fn test_storage_mounts() -> Result<(), &'static str> {
         .count();
     if mounted_volumes == 0 {
         return Err("skip: no storage volumes mounted");
+    }
+
+    Ok(())
+}
+
+fn test_storage_ext4_stage8() -> Result<(), &'static str> {
+    let s = crate::driver::storage::ext4_stage8_status();
+    if !(s.existing_file_overwrite
+        && s.block_allocator
+        && s.inode_allocator
+        && s.directory_updates
+        && s.journal)
+    {
+        return Err("ext4 stage8 package incomplete");
+    }
+    Ok(())
+}
+
+fn test_storage_cache_validation() -> Result<(), &'static str> {
+    let r = crate::driver::storage::validate_ext4_caches();
+    if r.errors != 0 {
+        return Err("ext4 cache validation found errors");
+    }
+    Ok(())
+}
+
+fn test_stability_heap_leak_detection() -> Result<(), &'static str> {
+    let before = heap::leak_stats();
+
+    {
+        let mut blocks: Vec<Vec<u8>> = Vec::new();
+        for i in 0..64usize {
+            blocks.push(alloc::vec![0xA5u8; 1024 + i * 8]);
+        }
+        for item in &mut blocks {
+            if let Some(b) = item.get_mut(0) {
+                *b = 0x5A;
+            }
+        }
+    }
+
+    let after = heap::leak_stats();
+    let before_out = before.outstanding_requested_bytes;
+    let after_out = after.outstanding_requested_bytes;
+    let delta = after_out.saturating_sub(before_out);
+
+    if delta > (128 * 1024) as u64 {
+        return Err("heap leak detector: outstanding bytes grew above threshold");
     }
 
     Ok(())
