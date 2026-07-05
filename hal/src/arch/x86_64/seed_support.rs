@@ -199,6 +199,10 @@ pub unsafe fn enter_user_mode(entry: u64, user_rsp: u64) -> ! {
             "push rcx", // RFLAGS
             "push r8",  // CS
             "push rdi", // RIP
+            // Linux-style process entry expects rdx=0 (rtld_fini for static
+            // binaries). iretq does not consume general registers, so clear
+            // the user-visible register state after building the frame.
+            "xor edx, edx",
             // Raw ring0 marker just before iretq: confirms frame was built.
             "mov dx, 0x3f8",
             "mov al, 'U'",

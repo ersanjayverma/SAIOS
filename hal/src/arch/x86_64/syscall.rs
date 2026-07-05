@@ -24,6 +24,8 @@ pub static SAIOS_SYSCALL_RSP0: AtomicU64 = AtomicU64::new(0);
 #[unsafe(no_mangle)]
 pub static SAIOS_SYSCALL_USER_RSP: AtomicU64 = AtomicU64::new(0);
 
+static SYSCALL_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Copy, Clone, Debug)]
 pub struct SyscallMsrSnapshot {
     pub efer: u64,
@@ -60,6 +62,12 @@ global_asm!(
     "mov al, '2'",
     "out dx, al",
     "and rsp, -16",
+    "push rcx",
+    "push r11",
+    "mov rdi, rax",
+    "call saios_syscall_trace_nr",
+    "pop r11",
+    "pop rcx",
     // Temporary syscall ABI: report ENOSYS, then return to ring3 with iretq.
     // This avoids SYSRET selector-layout constraints while GDT still uses the
     // natural iret layout (user code before user data).
@@ -83,6 +91,49 @@ global_asm!(
 
 unsafe extern "C" {
     fn saios_syscall_entry();
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn saios_syscall_trace_nr(nr: u64) {
+    let seq = SYSCALL_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    if seq >= 16 {
+        return;
+    }
+
+    let name = match nr {
+        0 => "read",
+        1 => "write",
+        2 => "open",
+        3 => "close",
+        9 => "mmap",
+        10 => "mprotect",
+        11 => "munmap",
+        12 => "brk",
+        16 => "ioctl",
+        20 => "writev",
+        21 => "access",
+        39 => "getpid",
+        59 => "execve",
+        89 => "readlink",
+        158 => "arch_prctl",
+        202 => "futex",
+        218 => "set_tid_address",
+        231 => "exit_group",
+        257 => "openat",
+        262 => "newfstatat",
+        273 => "set_robust_list",
+        302 => "prlimit64",
+        318 => "getrandom",
+        334 => "rseq",
+        _ => "?",
+    };
+
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[syscall] seq={} nr={} name={}\n",
+        seq,
+        nr,
+        name
+    ));
 }
 
 pub fn set_kernel_rsp0(rsp0: u64) {
