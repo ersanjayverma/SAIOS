@@ -50,6 +50,12 @@ The suite currently covers:
 Unsupported or intentionally destructive checks return `SKIP` with a reason.
 They do not panic the kernel.
 
+Storage contract note (current build):
+
+- Native ext4 traversal is validated for read paths.
+- Native ext4 write validation is currently scoped to in-place updates of existing regular files.
+- Native ext4 metadata-mutating operations (`create`, `mkdir`, `delete`, `rename`) are expected to return explicit unsupported errors until allocator/journal phases are implemented.
+
 ## v0.3 Readiness Gate
 
 During the v0.3 milestone, a core subset of validation checks is treated as a

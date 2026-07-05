@@ -258,6 +258,13 @@ Runtime note:
 
 - Execution is binary-metadata driven and no longer dependent on demo-only `run` flow.
 
+## Storage Behavior Notes
+
+- `mount` honors requested read-only vs read-write mode.
+- Native Linux ext4 supports read-only traversal and limited read-write updates in this build.
+- Native ext4 read-write currently supports in-place writes to existing regular files only.
+- Native ext4 metadata mutations are intentionally not implemented yet: `touch/create`, `mkdir`, `rm/delete`, and `mv/rename` on native ext4 return explicit unsupported errors.
+
 ## SISH Language Features
 
 The SNSH parser supports a small but complete command language:

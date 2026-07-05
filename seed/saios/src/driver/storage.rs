@@ -1166,10 +1166,16 @@ fn mounted_volume_for_path_internal<'a>(
 
 #[derive(Copy, Clone)]
 struct Ext4Superblock {
+    magic: u16,
     block_size: u64,
+    blocks_per_group: u32,
     inodes_per_group: u32,
     inode_size: u16,
     desc_size: u16,
+    first_inode: u32,
+    feature_compat: u32,
+    feature_incompat: u32,
+    feature_ro_compat: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -1183,6 +1189,15 @@ struct Ext4Inode {
 #[derive(Clone)]
 struct Ext4DirEntry {
     inode: u32,
+    file_type: u8,
+    name: String,
+}
+
+#[derive(Clone)]
+struct Ext4DirEntryParsed {
+    inode: u32,
+    rec_len: u16,
+    name_len: u8,
     file_type: u8,
     name: String,
 }
@@ -1225,7 +1240,11 @@ fn read_partition_at(
             .start_lba
             .saturating_add(first_sector as u64)
             .saturating_add(i as u64);
-        disk.block.read_sector(lba, scratch.as_mut_slice())?;
+        if let Err(_first) = disk.block.read_sector(lba, scratch.as_mut_slice()) {
+            // AHCI reads can occasionally fail transiently; retry once before
+            // surfacing an I/O error to upper filesystem layers.
+            disk.block.read_sector(lba, scratch.as_mut_slice())?;
+        }
         let at = i.saturating_mul(sector_size);
         raw[at..at + sector_size].copy_from_slice(scratch.as_slice());
     }
@@ -1238,6 +1257,50 @@ fn read_partition_at(
     Ok(raw[in_sector..end].to_vec())
 }
 
+fn write_partition_at(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    byte_offset: u64,
+    data: &[u8],
+) -> Result<(), &'static str> {
+    let sector_size = disk.block.sector_size() as usize;
+    if sector_size == 0 {
+        return Err("storage: invalid sector size");
+    }
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let first_sector = (byte_offset / sector_size as u64) as usize;
+    let last_byte = byte_offset
+        .saturating_add(data.len() as u64)
+        .saturating_sub(1);
+    let last_sector = (last_byte / sector_size as u64) as usize;
+    if (first_sector as u64) >= part.sector_count || (last_sector as u64) >= part.sector_count {
+        return Err("storage: ext4 write beyond partition");
+    }
+
+    let mut scratch = vec![0u8; sector_size];
+    let mut written = 0usize;
+    for sec in first_sector..=last_sector {
+        let lba = part.start_lba.saturating_add(sec as u64);
+        disk.block.read_sector(lba, scratch.as_mut_slice())?;
+
+        let sector_start = sec.saturating_mul(sector_size) as u64;
+        let write_start = byte_offset.max(sector_start);
+        let write_end = (byte_offset + data.len() as u64).min(sector_start + sector_size as u64);
+        let in_sec_start = (write_start - sector_start) as usize;
+        let n = (write_end - write_start) as usize;
+
+        scratch[in_sec_start..in_sec_start + n].copy_from_slice(&data[written..written + n]);
+        disk.block.write_sector(lba, scratch.as_slice())?;
+        written = written.saturating_add(n);
+    }
+
+    disk.block.flush();
+    Ok(())
+}
+
 fn ext4_load_superblock(disk: &DiskDevice, part: &Partition) -> Result<Ext4Superblock, &'static str> {
     let sb = read_partition_at(disk, part, 1024, 1024)?;
     let magic = le_u16(sb.as_slice(), 56).ok_or("storage: ext4 superblock truncated")?;
@@ -1247,16 +1310,26 @@ fn ext4_load_superblock(disk: &DiskDevice, part: &Partition) -> Result<Ext4Super
 
     let log_block_size = le_u32(sb.as_slice(), 24).ok_or("storage: ext4 sb truncated")?;
     let block_size = 1024u64.checked_shl(log_block_size).ok_or("storage: ext4 block size invalid")?;
-    let _blocks_per_group = le_u32(sb.as_slice(), 32).ok_or("storage: ext4 sb truncated")?;
+    let blocks_per_group = le_u32(sb.as_slice(), 32).ok_or("storage: ext4 sb truncated")?;
     let inodes_per_group = le_u32(sb.as_slice(), 40).ok_or("storage: ext4 sb truncated")?;
     let inode_size = le_u16(sb.as_slice(), 88).unwrap_or(128).max(128);
     let desc_size = le_u16(sb.as_slice(), 0xFE).unwrap_or(32).max(32);
+    let first_inode = le_u32(sb.as_slice(), 84).unwrap_or(11);
+    let feature_compat = le_u32(sb.as_slice(), 92).unwrap_or(0);
+    let feature_incompat = le_u32(sb.as_slice(), 96).unwrap_or(0);
+    let feature_ro_compat = le_u32(sb.as_slice(), 100).unwrap_or(0);
 
     Ok(Ext4Superblock {
+        magic,
         block_size,
+        blocks_per_group,
         inodes_per_group,
         inode_size,
         desc_size,
+        first_inode,
+        feature_compat,
+        feature_incompat,
+        feature_ro_compat,
     })
 }
 
@@ -1268,6 +1341,20 @@ fn ext4_read_block(
 ) -> Result<Vec<u8>, &'static str> {
     let offset = block_no.saturating_mul(sb.block_size);
     read_partition_at(disk, part, offset, sb.block_size as usize)
+}
+
+fn ext4_write_block(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    block_no: u64,
+    data: &[u8],
+) -> Result<(), &'static str> {
+    if data.len() != sb.block_size as usize {
+        return Err("storage: ext4 block write size mismatch");
+    }
+    let offset = block_no.saturating_mul(sb.block_size);
+    write_partition_at(disk, part, offset, data)
 }
 
 fn ext4_read_group_desc(
@@ -1447,6 +1534,76 @@ fn ext4_read_inode_data(
     Ok(out)
 }
 
+fn ext4_write_inode_data_inplace(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode: &Ext4Inode,
+    data: &[u8],
+) -> Result<(), &'static str> {
+    if (inode.mode & EXT4_S_IFREG) == 0 {
+        return Err("not a file");
+    }
+
+    if data.len() > inode.size as usize {
+        return Err("storage: ext4 native write cannot grow file yet");
+    }
+
+    let block_size = sb.block_size as usize;
+    if block_size == 0 {
+        return Err("storage: invalid ext4 block size");
+    }
+
+    let blocks = data.len().div_ceil(block_size);
+    for lb in 0..blocks as u32 {
+        let Some(pb) = ext4_resolve_file_block(disk, part, sb, inode, lb)? else {
+            return Err("storage: ext4 native write hit sparse/unmapped block");
+        };
+
+        let start = (lb as usize).saturating_mul(block_size);
+        let end = min(start.saturating_add(block_size), data.len());
+        let mut blk = ext4_read_block(disk, part, sb, pb)?;
+        blk[..end - start].copy_from_slice(&data[start..end]);
+        ext4_write_block(disk, part, sb, pb, blk.as_slice())?;
+    }
+
+    Ok(())
+}
+
+fn ext4_parse_dir_entries(data: &[u8], block_size: usize) -> Vec<Ext4DirEntryParsed> {
+    let mut out = Vec::new();
+    for block in data.chunks(block_size.max(1)) {
+        let mut at = 0usize;
+        while at + 8 <= block.len() {
+            let ino = le_u32(block, at).unwrap_or(0);
+            let rec_len = le_u16(block, at + 4).unwrap_or(0);
+            let rec_len_usize = rec_len as usize;
+            let name_len = *block.get(at + 6).unwrap_or(&0);
+            let file_type = *block.get(at + 7).unwrap_or(&0);
+
+            if rec_len_usize < 8 || at + rec_len_usize > block.len() {
+                break;
+            }
+
+            if ino != 0 && (name_len as usize) <= rec_len_usize.saturating_sub(8) {
+                let name_bytes = &block[at + 8..at + 8 + name_len as usize];
+                if let Ok(name) = core::str::from_utf8(name_bytes) {
+                    out.push(Ext4DirEntryParsed {
+                        inode: ino,
+                        rec_len,
+                        name_len,
+                        file_type,
+                        name: name.to_string(),
+                    });
+                }
+            }
+
+            at = at.saturating_add(rec_len_usize);
+        }
+    }
+    out
+}
+
 fn ext4_list_dir(
     disk: &DiskDevice,
     part: &Partition,
@@ -1459,29 +1616,153 @@ fn ext4_list_dir(
 
     let data = ext4_read_inode_data(disk, part, sb, inode)?;
     let mut out = Vec::new();
-    let mut at = 0usize;
-    while at + 8 <= data.len() {
-        let ino = le_u32(data.as_slice(), at).unwrap_or(0);
-        let rec_len = le_u16(data.as_slice(), at + 4).unwrap_or(0) as usize;
-        let name_len = *data.get(at + 6).unwrap_or(&0) as usize;
-        let file_type = *data.get(at + 7).unwrap_or(&0);
-        if rec_len == 0 {
-            break;
-        }
-        if ino != 0 && at + rec_len <= data.len() && name_len <= rec_len.saturating_sub(8) {
-            let name_bytes = &data[at + 8..at + 8 + name_len];
-            if let Ok(name) = core::str::from_utf8(name_bytes) {
-                out.push(Ext4DirEntry {
-                    inode: ino,
-                    file_type,
-                    name: name.to_string(),
-                });
-            }
-        }
-        at = at.saturating_add(rec_len);
+    for ent in ext4_parse_dir_entries(data.as_slice(), sb.block_size as usize) {
+        out.push(Ext4DirEntry {
+            inode: ent.inode,
+            file_type: ent.file_type,
+            name: ent.name,
+        });
     }
 
     Ok(out)
+}
+
+fn ext4_first_extent_in_node(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    node: &[u8],
+) -> Result<Option<(u32, u64, u16)>, &'static str> {
+    let magic = le_u16(node, 0).ok_or("storage: ext4 extent header truncated")?;
+    if magic != 0xF30A {
+        return Err("storage: ext4 extent header magic invalid");
+    }
+
+    let entries = le_u16(node, 2).unwrap_or(0) as usize;
+    let depth = le_u16(node, 6).unwrap_or(0);
+    let header_size = 12usize;
+
+    if entries == 0 {
+        return Ok(None);
+    }
+
+    if depth == 0 {
+        let at = header_size;
+        if at + 12 > node.len() {
+            return Ok(None);
+        }
+        let ee_block = le_u32(node, at).unwrap_or(0);
+        let ee_len_raw = le_u16(node, at + 4).unwrap_or(0);
+        let ee_start_hi = le_u16(node, at + 6).unwrap_or(0) as u64;
+        let ee_start_lo = le_u32(node, at + 8).unwrap_or(0) as u64;
+        let physical = (ee_start_hi << 32) | ee_start_lo;
+        return Ok(Some((ee_block, physical, ee_len_raw)));
+    }
+
+    let at = header_size;
+    if at + 12 > node.len() {
+        return Ok(None);
+    }
+    let child_lo = le_u32(node, at + 4).unwrap_or(0) as u64;
+    let child_hi = le_u16(node, at + 8).unwrap_or(0) as u64;
+    let child_block = (child_hi << 32) | child_lo;
+    let child = ext4_read_block(disk, part, sb, child_block)?;
+    ext4_first_extent_in_node(disk, part, sb, child.as_slice())
+}
+
+fn format_hex_preview(bytes: &[u8], limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let cap = min(limit, bytes.len());
+    for (row, chunk) in bytes[..cap].chunks(16).enumerate() {
+        let mut line = format!("{:04x}:", row * 16);
+        for b in chunk {
+            line.push_str(format!(" {:02x}", b).as_str());
+        }
+        out.push(line);
+    }
+    out
+}
+
+pub fn ext4_debug_report(volume: &str) -> Result<Vec<String>, &'static str> {
+    init();
+    with_state(|state| {
+        ext4_with_volume(state, volume, |disk, part| {
+            let sb = ext4_load_superblock(disk, part)?;
+            let root = ext4_load_inode(disk, part, &sb, 2)?;
+            let root_data = ext4_read_inode_data(disk, part, &sb, &root)?;
+            let parsed = ext4_parse_dir_entries(root_data.as_slice(), sb.block_size as usize);
+            let first_extent = if (root.flags & EXT4_EXTENTS_FL) != 0 {
+                ext4_first_extent_in_node(disk, part, &sb, root.block.as_slice())?
+            } else {
+                None
+            };
+
+            let mut lines = Vec::new();
+            lines.push("Superblock".to_string());
+            lines.push("----------".to_string());
+            lines.push(format!("magic=0x{:04x}", sb.magic));
+            lines.push(format!("block_size={}", sb.block_size));
+            lines.push(format!("inode_size={}", sb.inode_size));
+            lines.push(format!("blocks_per_group={}", sb.blocks_per_group));
+            lines.push(format!("inodes_per_group={}", sb.inodes_per_group));
+            lines.push(format!("first_inode={}", sb.first_inode));
+            lines.push(format!(
+                "features compat=0x{:08x} incompat=0x{:08x} ro_compat=0x{:08x}",
+                sb.feature_compat,
+                sb.feature_incompat,
+                sb.feature_ro_compat
+            ));
+
+            lines.push("".to_string());
+            lines.push("Root inode".to_string());
+            lines.push("----------".to_string());
+            lines.push(format!("inode=2 mode=0o{:o}", root.mode));
+            lines.push(format!("size={}", root.size));
+            lines.push(format!("flags=0x{:08x}", root.flags));
+            lines.push(format!(
+                "extent_header magic=0x{:04x} entries={} max={} depth={} generation={}",
+                le_u16(root.block.as_slice(), 0).unwrap_or(0),
+                le_u16(root.block.as_slice(), 2).unwrap_or(0),
+                le_u16(root.block.as_slice(), 4).unwrap_or(0),
+                le_u16(root.block.as_slice(), 6).unwrap_or(0),
+                le_u32(root.block.as_slice(), 8).unwrap_or(0)
+            ));
+
+            lines.push("".to_string());
+            lines.push("First extent".to_string());
+            lines.push("------------".to_string());
+            if let Some((logical, physical, len_raw)) = first_extent {
+                lines.push(format!("logical_block={}", logical));
+                lines.push(format!("physical_block={}", physical));
+                lines.push(format!("length={}", len_raw & 0x7FFF));
+
+                if physical != 0 {
+                    let first_block = ext4_read_block(disk, part, &sb, physical)?;
+                    lines.push("".to_string());
+                    lines.push("Directory block dump".to_string());
+                    lines.push("--------------------".to_string());
+                    lines.extend(format_hex_preview(first_block.as_slice(), 256));
+                }
+            } else {
+                lines.push("none".to_string());
+            }
+
+            lines.push("".to_string());
+            lines.push("Parsed entries".to_string());
+            lines.push("--------------".to_string());
+            for ent in parsed.iter().take(128) {
+                lines.push(format!(
+                    "inode={} rec_len={} name_len={} type={} name={}",
+                    ent.inode, ent.rec_len, ent.name_len, ent.file_type, ent.name
+                ));
+            }
+            if parsed.is_empty() {
+                lines.push("(none)".to_string());
+            }
+
+            Ok(lines)
+        })
+    })
 }
 
 fn ext4_lookup_path(
@@ -1587,12 +1868,54 @@ fn ext4_with_volume<R>(
     f(disk, part)
 }
 
+fn ext4_with_volume_mut<R>(
+    state: &mut StorageState,
+    volume: &str,
+    f: impl FnOnce(&mut DiskDevice, &Partition) -> Result<R, &'static str>,
+) -> Result<R, &'static str> {
+    let (disk_name, part_name) = resolve_volume_owner(state, volume)?;
+    let disk_idx = state
+        .disks
+        .iter()
+        .position(|d| d.name.eq_ignore_ascii_case(disk_name.as_str()))
+        .ok_or("storage: disk missing")?;
+    let part = state.disks[disk_idx]
+        .partitions
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(part_name.as_str()))
+        .ok_or("storage: partition missing")?
+        .clone();
+    f(&mut state.disks[disk_idx], &part)
+}
+
 fn mounted_volume_info_internal(
     state: &StorageState,
     abs_path: &str,
 ) -> Option<(String, FilesystemKind, String)> {
     let (vol, rel) = mounted_volume_for_path_internal(state, abs_path)?;
     Some((vol.name.clone(), vol.filesystem, rel))
+}
+
+fn is_native_ext4_read_only_volume(state: &StorageState, volume: &str) -> bool {
+    if state
+        .mounted
+        .iter()
+        .any(|m| m.volume.eq_ignore_ascii_case(volume))
+    {
+        return false;
+    }
+
+    ext4_with_volume(state, volume, |disk, part| ext4_load_superblock(disk, part))
+        .is_ok()
+}
+
+fn is_volume_writable(state: &StorageState, volume: &str) -> bool {
+    state
+        .volumes
+        .iter()
+        .find(|v| v.name.eq_ignore_ascii_case(volume))
+        .map(|v| v.writable)
+        .unwrap_or(false)
 }
 
 pub fn init() {
@@ -1793,9 +2116,10 @@ pub fn find_volume(name: &str) -> Option<DetectedVolume> {
     })
 }
 
-pub fn mount_volume(name: &str, path: &str, _read_only: bool) -> Result<(), &'static str> {
+pub fn mount_volume(name: &str, path: &str, read_only: bool) -> Result<(), &'static str> {
     init();
     let result = with_state_mut(|state| {
+        let mount_path = normalize_path(path);
         let idx = state
             .volumes
             .iter()
@@ -1809,7 +2133,12 @@ pub fn mount_volume(name: &str, path: &str, _read_only: bool) -> Result<(), &'st
         if state
             .volumes
             .iter()
-            .any(|v| v.mounted_at.as_deref() == Some(path))
+            .any(|v| {
+                v.mounted_at
+                    .as_ref()
+                    .map(|p| normalize_path(p.as_str()) == mount_path)
+                    .unwrap_or(false)
+            })
         {
             return Err("storage: duplicate mount path");
         }
@@ -1822,11 +2151,22 @@ pub fn mount_volume(name: &str, path: &str, _read_only: bool) -> Result<(), &'st
         if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: native filesystem reader not implemented for this volume");
         }
+
+        let native_ext4 = vol_fs == FilesystemKind::Ext4
+            && is_native_ext4_read_only_volume(state, vol_name.as_str());
+
         if fs_supports_mount_tree(vol_fs) {
             ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
         }
 
-        state.volumes[idx].mounted_at = Some(path.to_string());
+        state.volumes[idx].mounted_at = Some(mount_path);
+        state.volumes[idx].writable = !read_only;
+        if native_ext4 && !read_only {
+            state.diagnostics.push(format!(
+                "stage=mount target={} detail=native ext4 rw enabled in-place regular-file writes only",
+                vol_name
+            ));
+        }
         Ok(())
     });
     if result.is_ok() {
@@ -1838,10 +2178,16 @@ pub fn mount_volume(name: &str, path: &str, _read_only: bool) -> Result<(), &'st
 pub fn umount_volume(path: &str) -> Result<(), &'static str> {
     init();
     let result = with_state_mut(|state| {
+        let mount_path = normalize_path(path);
         let idx = state
             .volumes
             .iter()
-            .position(|v| v.mounted_at.as_deref() == Some(path))
+            .position(|v| {
+                v.mounted_at
+                    .as_ref()
+                    .map(|p| normalize_path(p.as_str()) == mount_path)
+                    .unwrap_or(false)
+            })
             .ok_or("storage: no volume mounted at that path")?;
 
         if fs_supports_rw_tree(state.volumes[idx].filesystem) {
@@ -1858,6 +2204,7 @@ pub fn umount_volume(path: &str) -> Result<(), &'static str> {
         }
 
         state.volumes[idx].mounted_at = None;
+        state.volumes[idx].writable = true;
         Ok(())
     });
     if result.is_ok() {
@@ -1988,6 +2335,14 @@ pub fn fs_create(path: &str) -> Result<(), &'static str> {
         if !fs_supports_rw_tree(vol_fs) {
             return Err("storage: filesystem is read-only in this build");
         }
+        if !is_volume_writable(state, vol_name.as_str()) {
+            return Err("storage: volume is mounted read-only");
+        }
+        if vol_fs == FilesystemKind::Ext4
+            && is_native_ext4_read_only_volume(state, vol_name.as_str())
+        {
+            return Err("storage: ext4 native create is not supported yet");
+        }
 
         ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
         let mounted = state
@@ -2029,6 +2384,14 @@ pub fn fs_mkdir(path: &str) -> Result<(), &'static str> {
         }
         if !fs_supports_rw_tree(vol_fs) {
             return Err("storage: filesystem is read-only in this build");
+        }
+        if !is_volume_writable(state, vol_name.as_str()) {
+            return Err("storage: volume is mounted read-only");
+        }
+        if vol_fs == FilesystemKind::Ext4
+            && is_native_ext4_read_only_volume(state, vol_name.as_str())
+        {
+            return Err("storage: ext4 native mkdir is not supported yet");
         }
 
         ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
@@ -2074,6 +2437,14 @@ pub fn fs_delete(path: &str) -> Result<(), &'static str> {
         }
         if !fs_supports_rw_tree(vol_fs) {
             return Err("storage: filesystem is read-only in this build");
+        }
+        if !is_volume_writable(state, vol_name.as_str()) {
+            return Err("storage: volume is mounted read-only");
+        }
+        if vol_fs == FilesystemKind::Ext4
+            && is_native_ext4_read_only_volume(state, vol_name.as_str())
+        {
+            return Err("storage: ext4 native delete is not supported yet");
         }
 
         ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
@@ -2128,6 +2499,14 @@ pub fn fs_rename(from: &str, to: &str) -> Result<(), &'static str> {
         }
         if !fs_supports_rw_tree(from_fs) {
             return Err("storage: filesystem is read-only in this build");
+        }
+        if !is_volume_writable(state, from_name.as_str()) {
+            return Err("storage: volume is mounted read-only");
+        }
+        if from_fs == FilesystemKind::Ext4
+            && is_native_ext4_read_only_volume(state, from_name.as_str())
+        {
+            return Err("storage: ext4 native rename is not supported yet");
         }
 
         ensure_volume_mounted(state, from_name.as_str(), from_fs)?;
@@ -2225,6 +2604,17 @@ pub fn fs_write(path: &str, data: &[u8]) -> Result<(), &'static str> {
         }
         if !fs_supports_rw_tree(vol_fs) {
             return Err("storage: filesystem is read-only in this build");
+        }
+        if !is_volume_writable(state, vol_name.as_str()) {
+            return Err("storage: volume is mounted read-only");
+        }
+        if vol_fs == FilesystemKind::Ext4
+            && is_native_ext4_read_only_volume(state, vol_name.as_str())
+        {
+            return ext4_with_volume_mut(state, vol_name.as_str(), |disk, part| {
+                let (sb, _ino, inode) = ext4_lookup_path(disk, part, rel.as_str())?;
+                ext4_write_inode_data_inplace(disk, part, &sb, &inode, data)
+            });
         }
 
         ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;

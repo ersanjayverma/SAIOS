@@ -30,6 +30,11 @@ Real-hardware bring-up produced additional correctness findings relevant to v0.3
 6. Foreground storage scan remains required and validated.
 	- Storage discovery runs synchronously in boot service startup and reports completion status deterministically.
 
+7. Native ext4 mount/write contract is now explicit.
+	- Native Linux ext4 traversal is active (superblock -> inode #2 -> extents -> directory parsing).
+	- `rw` mount now permits limited native ext4 writes: in-place updates to existing regular files only.
+	- Metadata-mutating native ext4 ops (`create`, `mkdir`, `delete`, `rename`) remain intentionally unsupported until allocator/journal phases are implemented.
+
 ## Milestone Goal
 
 Stabilize kernel correctness primitives before user-space expansion.
