@@ -1241,6 +1241,8 @@ struct Ext4DirEntryParsed {
 const EXT4_S_IFDIR: u16 = 0x4000;
 const EXT4_S_IFREG: u16 = 0x8000;
 const EXT4_S_IFLNK: u16 = 0xA000;
+const EXT4_FT_REG_FILE: u8 = 1;
+const EXT4_FT_DIR: u8 = 2;
 const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
 const EXT4_INLINE_DATA_FL: u32 = 0x1000_0000;
 const EXT4_INDEX_FL: u32 = 0x0000_1000;
@@ -1614,6 +1616,16 @@ fn ext4_set_bitmap_bit(bitmap: &mut [u8], bit: u32) -> Result<(), &'static str> 
     Ok(())
 }
 
+fn ext4_clear_bitmap_bit(bitmap: &mut [u8], bit: u32) -> Result<(), &'static str> {
+    let byte_idx = (bit / 8) as usize;
+    let bit_idx = (bit % 8) as u8;
+    let slot = bitmap
+        .get_mut(byte_idx)
+        .ok_or("storage: bitmap bit out of range")?;
+    *slot &= !(1u8 << bit_idx);
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn ext4_alloc_block_scaffold(
     disk: &mut DiskDevice,
@@ -1678,6 +1690,49 @@ fn ext4_alloc_inode_scaffold(
     Err("storage: ext4 stage8 inode allocator found no free inode")
 }
 
+fn ext4_free_block_scaffold(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    block_no: u64,
+) -> Result<(), &'static str> {
+    let first_data = sb.first_data_block as u64;
+    if block_no < first_data {
+        return Err("storage: ext4 block number is below first data block");
+    }
+    let relative = block_no - first_data;
+    let group = (relative / sb.blocks_per_group as u64) as u32;
+    let bit = (relative % sb.blocks_per_group as u64) as u32;
+    let gd = ext4_read_group_desc(disk, part, sb, group)?;
+    let has_hi = sb.desc_size >= 64;
+    let bitmap_block = ext4_group_bitmap_block(gd.as_slice(), 0, 32, has_hi)
+        .ok_or("storage: ext4 block bitmap missing")?;
+    let mut bitmap = ext4_read_block(disk, part, sb, bitmap_block)?;
+    ext4_clear_bitmap_bit(bitmap.as_mut_slice(), bit)?;
+    ext4_write_block(disk, part, sb, bitmap_block, bitmap.as_slice())
+}
+
+fn ext4_free_inode_scaffold(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode_no: u32,
+) -> Result<(), &'static str> {
+    if inode_no == 0 {
+        return Err("storage: ext4 inode 0 invalid");
+    }
+    let ino_index = inode_no - 1;
+    let group = ino_index / sb.inodes_per_group;
+    let bit = ino_index % sb.inodes_per_group;
+    let gd = ext4_read_group_desc(disk, part, sb, group)?;
+    let has_hi = sb.desc_size >= 64;
+    let bitmap_block = ext4_group_bitmap_block(gd.as_slice(), 4, 36, has_hi)
+        .ok_or("storage: ext4 inode bitmap missing")?;
+    let mut bitmap = ext4_read_block(disk, part, sb, bitmap_block)?;
+    ext4_clear_bitmap_bit(bitmap.as_mut_slice(), bit)?;
+    ext4_write_block(disk, part, sb, bitmap_block, bitmap.as_slice())
+}
+
 #[allow(dead_code)]
 fn ext4_write_inode_basic_scaffold(
     disk: &mut DiskDevice,
@@ -1696,10 +1751,22 @@ fn ext4_write_inode_basic_scaffold(
         .saturating_mul(sb.block_size)
         .saturating_add((index as u64).saturating_mul(sb.inode_size as u64));
 
-    let mut raw = read_partition_at(disk, part, inode_offset, sb.inode_size as usize)?;
+    let mut raw = vec![0u8; sb.inode_size as usize];
     put_u16_le(raw.as_mut_slice(), 0, mode)?;
     put_u32_le(raw.as_mut_slice(), 4, 0)?;
+    put_u16_le(raw.as_mut_slice(), 26, 1)?;
     put_u32_le(raw.as_mut_slice(), 32, 0)?;
+    write_partition_at(disk, part, inode_offset, raw.as_slice())
+}
+
+fn ext4_clear_inode_scaffold(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode_no: u32,
+) -> Result<(), &'static str> {
+    let inode_offset = ext4_inode_offset(disk, part, sb, inode_no)?;
+    let raw = vec![0u8; sb.inode_size as usize];
     write_partition_at(disk, part, inode_offset, raw.as_slice())
 }
 
@@ -1709,6 +1776,372 @@ fn ext4_journal_intent_scaffold(state: &mut StorageState, volume: &str, op: &str
         "stage=journal_intent target={} op={} mode=stub",
         volume, op
     ));
+}
+
+fn ext4_dir_entry_required_len(name_len: usize) -> usize {
+    (8usize.saturating_add(name_len).saturating_add(3)) & !3usize
+}
+
+fn ext4_append_dir_entry_to_block(
+    block: &mut [u8],
+    inode_no: u32,
+    file_type: u8,
+    name: &str,
+) -> Result<bool, &'static str> {
+    let name_bytes = name.as_bytes();
+    if name_bytes.is_empty() || name_bytes.len() > 255 {
+        return Err("storage: ext4 invalid directory entry name");
+    }
+
+    let required = ext4_dir_entry_required_len(name_bytes.len());
+    let mut at = 0usize;
+    while at + 8 <= block.len() {
+        let rec_len = le_u16(block, at + 4).unwrap_or(0) as usize;
+        if rec_len < 8 || at + rec_len > block.len() {
+            return Err("storage: ext4 directory block is malformed");
+        }
+
+        let current_inode = le_u32(block, at).unwrap_or(0);
+        let current_name_len = *block.get(at + 6).unwrap_or(&0) as usize;
+
+        if current_inode == 0 {
+            if rec_len >= required {
+                put_u32_le(block, at, inode_no)?;
+                put_u16_le(block, at + 4, rec_len as u16)?;
+                *block.get_mut(at + 6).ok_or("storage: ext4 directory entry truncated")? =
+                    name_bytes.len() as u8;
+                *block.get_mut(at + 7).ok_or("storage: ext4 directory entry truncated")? =
+                    file_type;
+                block[at + 8..at + 8 + name_bytes.len()].copy_from_slice(name_bytes);
+                if at + required < at + rec_len {
+                    block[at + 8 + name_bytes.len()..at + rec_len].fill(0);
+                }
+                return Ok(true);
+            }
+        } else {
+            let used = ext4_dir_entry_required_len(current_name_len);
+            if rec_len >= used.saturating_add(required) {
+                put_u16_le(block, at + 4, used as u16)?;
+                let new_at = at + used;
+                let new_rec_len = rec_len - used;
+                put_u32_le(block, new_at, inode_no)?;
+                put_u16_le(block, new_at + 4, new_rec_len as u16)?;
+                *block
+                    .get_mut(new_at + 6)
+                    .ok_or("storage: ext4 directory entry truncated")? = name_bytes.len() as u8;
+                *block
+                    .get_mut(new_at + 7)
+                    .ok_or("storage: ext4 directory entry truncated")? = file_type;
+                block[new_at + 8..new_at + 8 + name_bytes.len()].copy_from_slice(name_bytes);
+                if new_at + 8 + name_bytes.len() < new_at + new_rec_len {
+                    block[new_at + 8 + name_bytes.len()..new_at + new_rec_len].fill(0);
+                }
+                return Ok(true);
+            }
+        }
+
+        at = at.saturating_add(rec_len);
+    }
+
+    Ok(false)
+}
+
+fn ext4_parent_dir_blocks(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode: &Ext4Inode,
+) -> Result<Vec<(u32, u64)>, &'static str> {
+    let mut out = Vec::new();
+    let total_blocks = ((inode.size.saturating_add(sb.block_size - 1)) / sb.block_size) as u32;
+    for logical in 0..total_blocks.max(1) {
+        if let Some(phys) = ext4_resolve_file_block(disk, part, sb, inode, logical)? {
+            out.push((logical, phys));
+        }
+    }
+    Ok(out)
+}
+
+fn ext4_append_dir_entry(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    parent_ino: u32,
+    parent_inode: &Ext4Inode,
+    child_ino: u32,
+    child_type: u8,
+    name: &str,
+) -> Result<(), &'static str> {
+    if (parent_inode.mode & EXT4_S_IFDIR) == 0 {
+        return Err("storage: parent is not a directory");
+    }
+
+    for (_logical, phys) in ext4_parent_dir_blocks(disk, part, sb, parent_inode)? {
+        let mut block = ext4_read_block(disk, part, sb, phys)?;
+        if ext4_append_dir_entry_to_block(block.as_mut_slice(), child_ino, child_type, name)? {
+            ext4_write_block(disk, part, sb, phys, block.as_slice())?;
+            return Ok(());
+        }
+    }
+
+    let block_size = sb.block_size as usize;
+    if block_size == 0 {
+        return Err("storage: invalid ext4 block size");
+    }
+
+    let mut parent_shadow = *parent_inode;
+    let new_logical = ((parent_shadow.size.saturating_add(sb.block_size - 1)) / sb.block_size) as u32;
+    let new_phys = ext4_append_file_block(disk, part, sb, parent_ino, &mut parent_shadow, new_logical)?;
+    let mut block = vec![0u8; block_size];
+    let inserted = ext4_append_dir_entry_to_block(block.as_mut_slice(), child_ino, child_type, name)?;
+    if !inserted {
+        return Err("storage: ext4 new directory block had no room for entry");
+    }
+    ext4_write_block(disk, part, sb, new_phys, block.as_slice())?;
+    ext4_write_inode_size(
+        disk,
+        part,
+        sb,
+        parent_ino,
+        parent_shadow.size.saturating_add(sb.block_size),
+    )?;
+    Ok(())
+}
+
+fn ext4_remove_dir_entry_from_block(block: &mut [u8], name: &str) -> Result<bool, &'static str> {
+    let mut at = 0usize;
+    let mut prev_at: Option<usize> = None;
+    while at + 8 <= block.len() {
+        let rec_len = le_u16(block, at + 4).unwrap_or(0) as usize;
+        if rec_len < 8 || at + rec_len > block.len() {
+            return Err("storage: ext4 directory block is malformed");
+        }
+        let ino = le_u32(block, at).unwrap_or(0);
+        let name_len = *block.get(at + 6).unwrap_or(&0) as usize;
+        if ino != 0 && name_len <= rec_len.saturating_sub(8) {
+            let name_bytes = &block[at + 8..at + 8 + name_len];
+            if alloc::string::String::from_utf8_lossy(name_bytes) == name {
+                if let Some(prev) = prev_at {
+                    let prev_len = le_u16(block, prev + 4).unwrap_or(0) as usize;
+                    put_u16_le(block, prev + 4, prev_len.saturating_add(rec_len) as u16)?;
+                    block[at..at + rec_len].fill(0);
+                } else {
+                    put_u32_le(block, at, 0)?;
+                    block[at + 6] = 0;
+                    block[at + 7] = 0;
+                    block[at + 8..at + rec_len].fill(0);
+                }
+                return Ok(true);
+            }
+            prev_at = Some(at);
+        }
+        at = at.saturating_add(rec_len);
+    }
+    Ok(false)
+}
+
+fn ext4_remove_dir_entry(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    parent_inode: &Ext4Inode,
+    name: &str,
+) -> Result<(), &'static str> {
+    for (_logical, phys) in ext4_parent_dir_blocks(disk, part, sb, parent_inode)? {
+        let mut block = ext4_read_block(disk, part, sb, phys)?;
+        if ext4_remove_dir_entry_from_block(block.as_mut_slice(), name)? {
+            ext4_write_block(disk, part, sb, phys, block.as_slice())?;
+            return Ok(());
+        }
+    }
+    Err("path not found")
+}
+
+fn ext4_file_type_from_mode(mode: u16) -> u8 {
+    if (mode & EXT4_S_IFDIR) != 0 {
+        EXT4_FT_DIR
+    } else {
+        EXT4_FT_REG_FILE
+    }
+}
+
+fn ext4_collect_inode_blocks(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode: &Ext4Inode,
+) -> Result<Vec<u64>, &'static str> {
+    let total_blocks = ((inode.size.saturating_add(sb.block_size - 1)) / sb.block_size) as u32;
+    let mut out = Vec::new();
+    for logical in 0..total_blocks {
+        if let Some(phys) = ext4_resolve_file_block(disk, part, sb, inode, logical)?
+            && !out.contains(&phys)
+        {
+            out.push(phys);
+        }
+    }
+    Ok(out)
+}
+
+fn ext4_delete_path(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    rel: &str,
+) -> Result<(), &'static str> {
+    let (parent_rel, name) = split_parent(rel).ok_or("storage: invalid path")?;
+    let sb = ext4_load_superblock(disk, part)?;
+    let (_target_sb, _target_ino, target_inode) = ext4_lookup_path(disk, part, rel)?;
+    let (_parent_sb, _parent_ino, parent_inode) = ext4_lookup_path(disk, part, parent_rel.as_str())?;
+    let entries = ext4_list_dir(disk, part, &sb, &parent_inode)?;
+    let target_ino = entries
+        .iter()
+        .find(|ent| ent.name == name)
+        .map(|ent| ent.inode)
+        .ok_or("path not found")?;
+
+    if (target_inode.mode & EXT4_S_IFDIR) != 0 {
+        let child_entries = ext4_list_dir(disk, part, &sb, &target_inode)?;
+        if child_entries.iter().any(|ent| ent.name != "." && ent.name != "..") {
+            return Err("directory not empty");
+        }
+    }
+
+    ext4_remove_dir_entry(disk, part, &sb, &parent_inode, name.as_str())?;
+    for phys in ext4_collect_inode_blocks(disk, part, &sb, &target_inode)? {
+        ext4_free_block_scaffold(disk, part, &sb, phys)?;
+    }
+    ext4_clear_inode_scaffold(disk, part, &sb, target_ino)?;
+    ext4_free_inode_scaffold(disk, part, &sb, target_ino)
+}
+
+fn ext4_rename_path(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    from_rel: &str,
+    to_rel: &str,
+) -> Result<(), &'static str> {
+    let (from_parent_rel, from_name) = split_parent(from_rel).ok_or("storage: invalid source path")?;
+    let (to_parent_rel, to_name) = split_parent(to_rel).ok_or("storage: invalid destination path")?;
+    let sb = ext4_load_superblock(disk, part)?;
+    let (_src_sb, _src_ino, src_inode) = ext4_lookup_path(disk, part, from_rel)?;
+    let (_from_parent_sb, _from_parent_ino, from_parent_inode) =
+        ext4_lookup_path(disk, part, from_parent_rel.as_str())?;
+    let (_to_parent_sb, to_parent_ino, to_parent_inode) =
+        ext4_lookup_path(disk, part, to_parent_rel.as_str())?;
+
+    let from_entries = ext4_list_dir(disk, part, &sb, &from_parent_inode)?;
+    let target_ino = from_entries
+        .iter()
+        .find(|ent| ent.name == from_name)
+        .map(|ent| ent.inode)
+        .ok_or("path not found")?;
+    let to_entries = ext4_list_dir(disk, part, &sb, &to_parent_inode)?;
+    if to_entries.iter().any(|ent| ent.name == to_name) {
+        return Err("destination exists");
+    }
+
+    ext4_append_dir_entry(
+        disk,
+        part,
+        &sb,
+        to_parent_ino,
+        &to_parent_inode,
+        target_ino,
+        ext4_file_type_from_mode(src_inode.mode),
+        to_name.as_str(),
+    )?;
+    ext4_remove_dir_entry(disk, part, &sb, &from_parent_inode, from_name.as_str())
+}
+
+fn ext4_create_empty_file(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    rel: &str,
+) -> Result<(), &'static str> {
+    let (parent_rel, name) = split_parent(rel).ok_or("storage: invalid path")?;
+    let sb = ext4_load_superblock(disk, part)?;
+    let (_parent_sb, parent_ino, parent_inode) = ext4_lookup_path(disk, part, parent_rel.as_str())?;
+    if (parent_inode.mode & EXT4_S_IFDIR) == 0 {
+        return Err("storage: parent is not a directory");
+    }
+
+    let entries = ext4_list_dir(disk, part, &sb, &parent_inode)?;
+    if entries.iter().any(|ent| ent.name == name) {
+        return Err("already exists");
+    }
+
+    let inode_no = ext4_alloc_inode_scaffold(disk, part, &sb)?;
+    ext4_write_inode_basic_scaffold(disk, part, &sb, inode_no, EXT4_S_IFREG | 0o644)?;
+    ext4_append_dir_entry(
+        disk,
+        part,
+        &sb,
+        parent_ino,
+        &parent_inode,
+        inode_no,
+        EXT4_FT_REG_FILE,
+        name.as_str(),
+    )
+}
+
+fn ext4_initialize_directory_block(block: &mut [u8], self_ino: u32, parent_ino: u32) -> Result<(), &'static str> {
+    if block.len() < 24 {
+        return Err("storage: ext4 directory block too small");
+    }
+    block.fill(0);
+
+    put_u32_le(block, 0, self_ino)?;
+    put_u16_le(block, 4, 12)?;
+    block[6] = 1;
+    block[7] = EXT4_FT_DIR;
+    block[8] = b'.';
+
+    put_u32_le(block, 12, parent_ino)?;
+    put_u16_le(block, 16, (block.len() - 12) as u16)?;
+    block[18] = 2;
+    block[19] = EXT4_FT_DIR;
+    block[20] = b'.';
+    block[21] = b'.';
+    Ok(())
+}
+
+fn ext4_create_directory(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    rel: &str,
+) -> Result<(), &'static str> {
+    let (parent_rel, name) = split_parent(rel).ok_or("storage: invalid path")?;
+    let sb = ext4_load_superblock(disk, part)?;
+    let (_parent_sb, parent_ino, parent_inode) = ext4_lookup_path(disk, part, parent_rel.as_str())?;
+    if (parent_inode.mode & EXT4_S_IFDIR) == 0 {
+        return Err("storage: parent is not a directory");
+    }
+
+    let entries = ext4_list_dir(disk, part, &sb, &parent_inode)?;
+    if entries.iter().any(|ent| ent.name == name) {
+        return Err("already exists");
+    }
+
+    let inode_no = ext4_alloc_inode_scaffold(disk, part, &sb)?;
+    ext4_write_inode_basic_scaffold(disk, part, &sb, inode_no, EXT4_S_IFDIR | 0o755)?;
+
+    let mut inode_shadow = ext4_load_inode(disk, part, &sb, inode_no)?;
+    let phys = ext4_append_file_block(disk, part, &sb, inode_no, &mut inode_shadow, 0)?;
+    let mut block = vec![0u8; sb.block_size as usize];
+    ext4_initialize_directory_block(block.as_mut_slice(), inode_no, parent_ino)?;
+    ext4_write_block(disk, part, &sb, phys, block.as_slice())?;
+    ext4_write_inode_size(disk, part, &sb, inode_no, sb.block_size)?;
+
+    ext4_append_dir_entry(
+        disk,
+        part,
+        &sb,
+        parent_ino,
+        &parent_inode,
+        inode_no,
+        EXT4_FT_DIR,
+        name.as_str(),
+    )
 }
 
 fn ext4_load_inode(
@@ -3332,6 +3765,9 @@ pub fn fs_create(path: &str) -> Result<(), &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
+        if rel == "/" {
+            return Err("storage: invalid path");
+        }
         if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
@@ -3344,12 +3780,13 @@ pub fn fs_create(path: &str) -> Result<(), &'static str> {
         if vol_fs == FilesystemKind::Ext4
             && is_native_ext4_read_only_volume(state, vol_name.as_str())
         {
-            return if EXT4_NATIVE_STAGE8_EXPERIMENTAL {
-                ext4_journal_intent_scaffold(state, vol_name.as_str(), "create");
-                Err("storage: ext4 native create stage8 path is scaffolded but incomplete")
-            } else {
-                Err("storage: ext4 native create requires stage8 allocators+dir+journal")
-            };
+            let create_result = ext4_with_volume_mut(state, vol_name.as_str(), |disk, part| {
+                ext4_create_empty_file(disk, part, rel.as_str())
+            });
+            if create_result.is_ok() {
+                ext4_invalidate_volume_cache(state, vol_name.as_str());
+            }
+            return create_result;
         }
 
         ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
@@ -3387,6 +3824,9 @@ pub fn fs_mkdir(path: &str) -> Result<(), &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
+        if rel == "/" {
+            return Err("storage: invalid path");
+        }
         if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
@@ -3399,12 +3839,13 @@ pub fn fs_mkdir(path: &str) -> Result<(), &'static str> {
         if vol_fs == FilesystemKind::Ext4
             && is_native_ext4_read_only_volume(state, vol_name.as_str())
         {
-            return if EXT4_NATIVE_STAGE8_EXPERIMENTAL {
-                ext4_journal_intent_scaffold(state, vol_name.as_str(), "mkdir");
-                Err("storage: ext4 native mkdir stage8 path is scaffolded but incomplete")
-            } else {
-                Err("storage: ext4 native mkdir requires stage8 allocators+dir+journal")
-            };
+            let mkdir_result = ext4_with_volume_mut(state, vol_name.as_str(), |disk, part| {
+                ext4_create_directory(disk, part, rel.as_str())
+            });
+            if mkdir_result.is_ok() {
+                ext4_invalidate_volume_cache(state, vol_name.as_str());
+            }
+            return mkdir_result;
         }
 
         ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
@@ -3457,12 +3898,13 @@ pub fn fs_delete(path: &str) -> Result<(), &'static str> {
         if vol_fs == FilesystemKind::Ext4
             && is_native_ext4_read_only_volume(state, vol_name.as_str())
         {
-            return if EXT4_NATIVE_STAGE8_EXPERIMENTAL {
-                ext4_journal_intent_scaffold(state, vol_name.as_str(), "delete");
-                Err("storage: ext4 native delete stage8 path is scaffolded but incomplete")
-            } else {
-                Err("storage: ext4 native delete requires stage8 directory+journal semantics")
-            };
+            let delete_result = ext4_with_volume_mut(state, vol_name.as_str(), |disk, part| {
+                ext4_delete_path(disk, part, rel.as_str())
+            });
+            if delete_result.is_ok() {
+                ext4_invalidate_volume_cache(state, vol_name.as_str());
+            }
+            return delete_result;
         }
 
         ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;
@@ -3524,12 +3966,13 @@ pub fn fs_rename(from: &str, to: &str) -> Result<(), &'static str> {
         if from_fs == FilesystemKind::Ext4
             && is_native_ext4_read_only_volume(state, from_name.as_str())
         {
-            return if EXT4_NATIVE_STAGE8_EXPERIMENTAL {
-                ext4_journal_intent_scaffold(state, from_name.as_str(), "rename");
-                Err("storage: ext4 native rename stage8 path is scaffolded but incomplete")
-            } else {
-                Err("storage: ext4 native rename requires stage8 directory+journal semantics")
-            };
+            let rename_result = ext4_with_volume_mut(state, from_name.as_str(), |disk, part| {
+                ext4_rename_path(disk, part, from_rel.as_str(), to_rel.as_str())
+            });
+            if rename_result.is_ok() {
+                ext4_invalidate_volume_cache(state, from_name.as_str());
+            }
+            return rename_result;
         }
 
         ensure_volume_mounted(state, from_name.as_str(), from_fs)?;

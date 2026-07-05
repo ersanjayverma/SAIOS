@@ -1,10 +1,10 @@
 //! Built-in shell programs and program execution helpers.
 //!
 //! This module implements the user-space commands available in the SAIOS
-//! shell. The `cc` command is currently a stub: it parses a tiny subset of C
-//! source, extracts a string literal and writes a `SAIOS_CC_STUB` marker file
-//! that [`execute_compiled_stub`] can later "run". Real compilation and
-//! dynamic linking are not yet implemented.
+//! shell. The `cc` command compiles a constrained C subset into `SAIOS_BIN_V1`
+//! executables that the process loader can dispatch directly. The supported
+//! subset currently targets simple print-only programs with a single embedded
+//! string literal.
 
 use crate::console;
 use crate::kernel::process;
@@ -143,12 +143,47 @@ fn extract_first_string_literal(source: &str) -> Option<String> {
     None
 }
 
-/// Stub C compiler: extracts a string literal from the source file and
-/// writes a `SAIOS_CC_STUB` marker file at the requested output path.
+fn is_supported_c_source(source: &str) -> bool {
+    let compact = source.replace(char::is_whitespace, "");
+    compact.contains("main(")
+        && (compact.contains("puts(")
+            || compact.contains("printf(")
+            || compact.contains("print("))
+}
+
+fn encode_program_text_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\n', "\\n")
+}
+
+fn decode_program_text_value(value: &str) -> String {
+    let mut out = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Compiles a constrained C source file into a `SAIOS_BIN_V1` executable.
 fn cc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let src_arg = args.first().copied().ok_or("cc: missing source file")?;
     let src = resolve_relative_path(src_arg);
     let source = saifs::read_text(src.as_str()).map_err(|_| "cc: source read failed")?;
+
+    if !is_supported_c_source(source.as_str()) {
+        return Err("cc: unsupported source; expected print-only main() program");
+    }
 
     let out = if let Some(o) = parse_cc_output(args) {
         resolve_relative_path(o.as_str())
@@ -160,9 +195,9 @@ fn cc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
         extract_first_string_literal(source.as_str()).unwrap_or_else(|| "Hello World".to_string());
 
     let payload = format!(
-        "SAIOS_CC_STUB\nsource={}\nmessage={}\n",
+        "SAIOS_BIN_V1\nentry=cc_print\nsource={}\nmessage={}\n",
         src,
-        message.replace('\n', "\\n")
+        encode_program_text_value(message.as_str())
     );
 
     let _ = saifs::touch(out.as_str());
@@ -173,6 +208,31 @@ fn cc_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
 
     console::println!("cc: compiled {} -> {}", src, out);
     Ok(0)
+}
+
+fn compiled_c_message(path: &str) -> Option<String> {
+    let text = saifs::read_text(path).ok()?;
+    if !text.starts_with("SAIOS_BIN_V1") {
+        return None;
+    }
+
+    let mut entry_matches = false;
+    let mut message: Option<String> = None;
+    for line in text.lines() {
+        if let Some(entry) = line.strip_prefix("entry=") {
+            entry_matches = entry.trim().eq_ignore_ascii_case("cc_print");
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("message=") {
+            message = Some(decode_program_text_value(value));
+        }
+    }
+
+    if entry_matches {
+        return Some(message.unwrap_or_else(|| "Hello World".to_string()));
+    }
+
+    None
 }
 
 /// Reads the message embedded in a `SAIOS_CC_STUB` file, if any.
@@ -191,9 +251,13 @@ fn compiled_stub_message(path: &str) -> Option<String> {
     Some("Hello World".to_string())
 }
 
-/// "Executes" a `SAIOS_CC_STUB` file by printing its embedded message.
-fn execute_compiled_stub(path: &str, args: &[&str]) -> ProgramResult {
-    let Some(msg) = compiled_stub_message(path) else {
+/// Executes a compiled print-only C program or legacy stub by printing its embedded message.
+fn execute_compiled_print_program(path: &str, args: &[&str]) -> ProgramResult {
+    let msg = if let Some(msg) = compiled_c_message(path) {
+        msg
+    } else if let Some(msg) = compiled_stub_message(path) {
+        msg
+    } else {
         return Err("program not found");
     };
 
@@ -817,8 +881,8 @@ pub fn execute_path(
     args: &[&str],
     env: &[(String, String)],
 ) -> ProgramResult {
-    if compiled_stub_message(path).is_some() {
-        return execute_compiled_stub(path, args);
+    if compiled_c_message(path).is_some() || compiled_stub_message(path).is_some() {
+        return execute_compiled_print_program(path, args);
     }
 
     let entry = binary_metadata_checked(path).map(|m| m.entry)?;
@@ -847,5 +911,7 @@ pub fn exec(name: &str, args: &[&str], env: &[(String, String)]) -> ProgramResul
 
 /// Returns true if `path` refers to a recognized binary or compiled stub.
 pub fn supports_binary(path: &str) -> bool {
-    binary_metadata(path).is_some() || compiled_stub_message(path).is_some()
+    binary_metadata(path).is_some()
+        || compiled_c_message(path).is_some()
+        || compiled_stub_message(path).is_some()
 }

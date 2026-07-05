@@ -6,29 +6,31 @@ This file tracks code that is explicitly stubbed, scaffolded, synthetic, no-op b
 
 ## Current Stub Inventory
 
-### 1. Stub C compiler and compiled-stub execution
+### 1. Constrained C compiler and print-binary execution
 - File: `seed/saios/src/shell/programs.rs`
 - Area: `cc` shell program and compiled output path
-- Status: Incomplete by design
-- Why this is a stub:
-  - The code explicitly describes `cc` as a stub compiler.
-  - It emits marker content rather than producing a real compiled binary.
-  - Real compilation and dynamic linking are explicitly deferred.
+- Status: Completed for the current supported subset
+- Why this is no longer a stub:
+  - `cc` now emits `SAIOS_BIN_V1` executables rather than `SAIOS_CC_STUB` marker files.
+  - The resulting output is executed through the normal binary dispatch path.
+  - Legacy stub files remain readable for backward compatibility, but new compilation output uses the real binary metadata format.
 - Evidence summary:
-  - The file documents that the `cc` command is currently a stub.
-  - It writes outputs tagged with `SAIOS_CC_STUB` and routes execution through a compiled-stub path.
+  - The compiler writes `entry=cc_print` binaries with embedded source/message metadata.
+  - Execution recognizes and runs those `SAIOS_BIN_V1` outputs directly.
+  - Scope is intentionally constrained to print-only `main()` programs with a single string literal.
 
 ### 2. Native ext4 write-path scaffolding
 - File: `seed/saios/src/driver/storage.rs`
 - Area: ext4 create/mkdir/delete/rename and metadata update path
-- Status: Scaffolded but incomplete
-- Why this is a stub:
-  - Several internal helpers are named as scaffolds.
-  - User-visible mutating operations return explicit "scaffolded but incomplete" errors.
-  - Diagnostics report this path as `mode=stub`.
+- Status: Core metadata mutation path implemented; allocator/journal internals still need cleanup
+- Why this has progressed:
+  - Native ext4 `fs_create`, `fs_mkdir`, `fs_delete`, and `fs_rename` now use real on-disk metadata updates instead of returning stage-8 scaffold errors.
+  - Empty-file and directory creation now allocate inodes and directory entries.
+  - Delete now removes directory entries and frees inode/block bitmap state for the reachable inode blocks.
+  - Rename now reinserts and removes directory entries on the native ext4 path.
 - Evidence summary:
-  - Functions include `ext4_alloc_block_scaffold`, `ext4_alloc_inode_scaffold`, `ext4_write_inode_basic_scaffold`, and `ext4_journal_intent_scaffold`.
-  - Mutating operations reject requests with stage-8 scaffold/incomplete messages.
+  - Functions still include `ext4_alloc_block_scaffold`, `ext4_alloc_inode_scaffold`, `ext4_write_inode_basic_scaffold`, and `ext4_journal_intent_scaffold` naming, but the user-visible mutation entry points no longer fail closed on the native ext4 path.
+  - Residual follow-up remains around allocator naming, superblock/group counter maintenance, and journaling semantics.
 
 ### 3. Synthetic `mmap` and no-op `munmap`
 - File: `seed/saios/src/kernel/syscall.rs`
