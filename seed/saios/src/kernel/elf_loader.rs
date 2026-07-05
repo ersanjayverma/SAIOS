@@ -481,44 +481,6 @@ fn jump_to_entry_with_rsp(entry: u64, rsp: u64) -> ! {
         let kernel_rsp0 = hal::arch::x86_64::seed_support::user_transition_kernel_rsp0();
         hal::arch::x86_64::tss::set_rsp0(kernel_rsp0);
         hal::arch::x86_64::syscall::set_kernel_rsp0(kernel_rsp0);
-        let syscall = hal::arch::x86_64::syscall::snapshot();
-        let tss_rsp0 = hal::arch::x86_64::tss::rsp0();
-        let (_, _, _, ext_edx) = hal::arch::x86_64::cpuid::cpuid(0x8000_0001);
-        let syscall_supported = (ext_edx & (1 << 11)) != 0;
-        let idtr = hal::arch::x86_64::cpu::read_idt_ptr();
-        let gdtr = hal::arch::x86_64::cpu::read_gdt_ptr();
-        crate::console::println!(
-            "syscall: cpuid_syscall={} ext_edx=0x{:x} efer=0x{:x} star=0x{:x} lstar=0x{:x} fmask=0x{:x} entry=0x{:x} kcs=0x{:x} kss=0x{:x} sysret_ucs=0x{:x} sysret_uss=0x{:x} iret_ucs=0x{:x} iret_uss=0x{:x} rsp0=0x{:x} tss.rsp0=0x{:x}",
-            syscall_supported,
-            ext_edx,
-            syscall.efer,
-            syscall.star,
-            syscall.lstar,
-            syscall.fmask,
-            syscall.entry,
-            syscall.syscall_kernel_cs,
-            syscall.syscall_kernel_ss,
-            syscall.sysret_user_cs,
-            syscall.sysret_user_ss,
-            syscall.iret_user_cs,
-            syscall.iret_user_ss,
-            syscall.rsp0,
-            tss_rsp0,
-        );
-        crate::console::println!(
-            "syscall: idt base=0x{:x} limit=0x{:x} gdt base=0x{:x} limit=0x{:x} cr3=0x{:x}",
-            idtr.base,
-            idtr.limit,
-            gdtr.base,
-            gdtr.limit,
-            hal::arch::paging::read_cr3(),
-        );
-        crate::console::println!("walk:lstar {}", vmm::debug_walk_page(syscall.lstar));
-        crate::console::println!("walk:rsp0 {}", vmm::debug_walk_page(syscall.rsp0.saturating_sub(8)));
-        crate::console::println!("walk:idtr {}", vmm::debug_walk_page(idtr.base));
-        crate::console::println!("walk:gdtr {}", vmm::debug_walk_page(gdtr.base));
-        crate::console::println!("walk:user_entry {}", vmm::debug_walk_page(entry));
-        crate::console::println!("walk:user_rsp {}", vmm::debug_walk_page(rsp));
         hal::arch::x86_64::seed_support::enter_user_mode(entry, rsp);
     }
 }
