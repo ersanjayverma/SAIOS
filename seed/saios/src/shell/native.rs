@@ -2502,7 +2502,7 @@ fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             console::println!("volumes mounts          Show VFS mounts and volumes");
             console::println!("volumes scan            Request background storage discovery");
             console::println!("volumes info <vol>      Show volume details");
-            console::println!("volumes format <vol> <fs>  Format a volume (fat32|ext4|ntfs)");
+            console::println!("volumes format <vol> <fs>  Format a volume (fat32|ext4|extf4|ntfs)");
             console::println!("volumes mount <vol> <path> [ro]  Mount a volume");
             console::println!("volumes umount <path>   Unmount a mounted path");
             console::println!("volumes check           Storage check summary");
@@ -2534,7 +2534,7 @@ fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
                 fs_str
             };
             let fs = disk::FilesystemKind::from_str(fs_norm)
-                .ok_or("volumes format: unknown filesystem; use fat32 or ext4")?;
+                .ok_or("volumes format: unknown filesystem; use fat32, ext4/extf4, or ntfs")?;
             disk::format_volume(name, fs)?;
             console::println!("volumes: '{}' formatted as {}", name, fs.as_str());
             Ok(())

@@ -4,9 +4,9 @@
 //! allocating kernel virtual address space. All operations are serialized with
 //! a simple spinlock.
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::arch::asm;
 use core::sync::atomic::{AtomicBool, Ordering, fence};
 
 use hal::arch::paging;
@@ -22,12 +22,14 @@ pub type PhysAddr = u64;
 
 /// Size of a page in bytes.
 pub const PAGE_SIZE: u64 = 4096;
+const HUGE_PAGE_SIZE_2M: u64 = 2 * 1024 * 1024;
 /// Base of the kernel's higher-half virtual address space.
-pub const KERNEL_VIRT_BASE: VirtAddr = 0xFFFF_8000_0000_0000;
+pub const KERNEL_VIRT_BASE: VirtAddr = 0xFFFF_FFFF_8000_0000;
 /// Dedicated higher-half mirror window used for early kernel image mappings.
-pub const KERNEL_IMAGE_MIRROR_BASE: VirtAddr = 0xFFFF_9000_0000_0000;
+pub const KERNEL_IMAGE_MIRROR_BASE: VirtAddr = 0xFFFF_FFFF_8000_0000;
 /// Page-table slot used for recursive mapping.
-const RECURSIVE_SLOT: u64 = 511;
+const RECURSIVE_SLOT: u64 = 510;
+const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 const EARLY_TABLE_MIN_PHYS: u64 = 0x0010_0000; // 1 MiB
 const EARLY_TABLE_MAX_PHYS: u64 = 0x4000_0000; // 1 GiB
 const EARLY_TABLE_FALLBACK_MIN_PHYS: u64 = 0x0000_1000; // avoid page 0
@@ -112,6 +114,28 @@ impl VmmState {
 static STATE: StaticCell<Option<VmmState>> = StaticCell::new(None);
 static LOCK: AtomicBool = AtomicBool::new(false);
 static NX_PAGE_PROTECTION_ENABLED: AtomicBool = AtomicBool::new(true);
+static KERNEL_IMAGE_START: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static KERNEL_IMAGE_END: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn set_kernel_image_range(start: u64, end: u64) {
+    KERNEL_IMAGE_START.store(start, Ordering::Release);
+    KERNEL_IMAGE_END.store(end, Ordering::Release);
+}
+
+pub fn kernel_image_range() -> (u64, u64) {
+    (
+        KERNEL_IMAGE_START.load(Ordering::Acquire),
+        KERNEL_IMAGE_END.load(Ordering::Acquire),
+    )
+}
+
+pub fn overlaps_kernel_image(start: u64, end: u64) -> bool {
+    let (ks, ke) = kernel_image_range();
+    if ks == 0 || ke <= ks {
+        return false;
+    }
+    ranges_overlap(start, end, ks, ke)
+}
 
 pub fn set_nx_page_protection_enabled(enabled: bool) {
     NX_PAGE_PROTECTION_ENABLED.store(enabled, Ordering::Release);
@@ -295,33 +319,52 @@ fn leaf_flags(vmm_flags: u64) -> u64 {
 }
 
 fn invlpg(virt: VirtAddr) {
-    unsafe {
-        asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+    paging::invlpg(virt);
+}
+
+fn flush_current_address_space() {
+    let cr3 = paging::read_cr3() & ADDR_MASK;
+    if cr3 != 0 {
+        unsafe { paging::write_cr3(cr3) };
     }
 }
 
 fn map_page_hw(virt: VirtAddr, phys: PhysAddr, flags: u64) -> Result<(), &'static str> {
     let (l4, l3, l2, l1, _) = level_indices(virt);
+    let nonleaf = nonleaf_flags(flags);
 
     let pml4 = unsafe { &mut *pml4_table_ptr() };
     if !pml4.entries[l4].is_present() {
         let new_page = pmm::alloc_page().ok_or("vmm: out of memory for pdpt")?;
-        pml4.entries[l4].set_page(new_page, nonleaf_flags(flags));
+        pml4.entries[l4].set_page(new_page, nonleaf);
         unsafe { (&mut *pdpt_table_ptr(l4)).clear() };
+    } else {
+        pml4.entries[l4].set_flags(nonleaf & paging::FLAG_USER);
     }
 
     let pdpt = unsafe { &mut *pdpt_table_ptr(l4) };
     if !pdpt.entries[l3].is_present() {
         let new_page = pmm::alloc_page().ok_or("vmm: out of memory for pd")?;
-        pdpt.entries[l3].set_page(new_page, nonleaf_flags(flags));
+        pdpt.entries[l3].set_page(new_page, nonleaf);
         unsafe { (&mut *pd_table_ptr(l4, l3)).clear() };
+    } else if (pdpt.entries[l3].0 & paging::FLAG_HUGE) != 0 {
+        return Err("vmm: cannot map 4KiB page through existing 1GiB huge PDPTE");
+    } else {
+        pdpt.entries[l3].set_flags(nonleaf & paging::FLAG_USER);
     }
 
     let pd = unsafe { &mut *pd_table_ptr(l4, l3) };
     if !pd.entries[l2].is_present() {
         let new_page = pmm::alloc_page().ok_or("vmm: out of memory for pt")?;
-        pd.entries[l2].set_page(new_page, nonleaf_flags(flags));
+        pd.entries[l2].set_page(new_page, nonleaf);
         unsafe { (&mut *pt_table_ptr(l4, l3, l2)).clear() };
+    } else if (pd.entries[l2].0 & paging::FLAG_HUGE) != 0 {
+        let new_page = pmm::alloc_page().ok_or("vmm: out of memory for pt")?;
+        pd.entries[l2].set_page(new_page, nonleaf);
+        unsafe { (&mut *pt_table_ptr(l4, l3, l2)).clear() };
+        flush_current_address_space();
+    } else {
+        pd.entries[l2].set_flags(nonleaf & paging::FLAG_USER);
     }
 
     let pt = unsafe { &mut *pt_table_ptr(l4, l3, l2) };
@@ -347,9 +390,44 @@ fn unmap_page_hw(virt: VirtAddr) -> Result<(), &'static str> {
         return Err("vmm: page not mapped");
     }
 
+    // 1 GiB huge mapping (PDPTE.PS). Clear the huge entry directly instead of
+    // treating it as a pointer to a PD table.
+    if (pdpt.entries[l3].0 & paging::FLAG_HUGE) != 0 {
+        let huge_start = align_down(virt, 0x4000_0000);
+        let huge_end = huge_start.saturating_add(0x4000_0000);
+        if overlaps_kernel_image(huge_start, huge_end) {
+            return Err("vmm: refusing to unmap 1GiB huge PDPTE covering kernel image");
+        }
+        pdpt.entries[l3] = paging::Entry::new();
+        flush_current_address_space();
+        if !has_any_present_entries(pdpt) {
+            pml4.entries[l4] = paging::Entry::new();
+        }
+        return Ok(());
+    }
+
     let pd = unsafe { &mut *pd_table_ptr(l4, l3) };
     if !pd.entries[l2].is_present() {
         return Err("vmm: page not mapped");
+    }
+
+    // 2 MiB huge mapping (PDE.PS). Clear the huge entry directly instead of
+    // treating its physical base as a pointer to a PT table.
+    if (pd.entries[l2].0 & paging::FLAG_HUGE) != 0 {
+        let huge_start = align_down(virt, 0x0020_0000);
+        let huge_end = huge_start.saturating_add(0x0020_0000);
+        if overlaps_kernel_image(huge_start, huge_end) {
+            return Err("vmm: refusing to unmap 2MiB huge PDE covering kernel image");
+        }
+        pd.entries[l2] = paging::Entry::new();
+        flush_current_address_space();
+        if !has_any_present_entries(pd) {
+            pdpt.entries[l3] = paging::Entry::new();
+            if !has_any_present_entries(pdpt) {
+                pml4.entries[l4] = paging::Entry::new();
+            }
+        }
+        return Ok(());
     }
 
     let pt = unsafe { &mut *pt_table_ptr(l4, l3, l2) };
@@ -397,6 +475,54 @@ fn translate_hw(virt: VirtAddr) -> Option<PhysAddr> {
     }
 
     pt.entries[l1].address().checked_add(off)
+}
+
+fn clone_table_recursive(src_phys: PhysAddr, level: u8) -> Result<PhysAddr, &'static str> {
+    let dst_phys = alloc_zeroed_table()?;
+    let src = unsafe { &*(src_phys as *const paging::Table) };
+    let dst = unsafe { &mut *(dst_phys as *mut paging::Table) };
+
+    for i in 0..paging::ENTRY_COUNT {
+        if level == 4 && i == RECURSIVE_SLOT as usize {
+            continue;
+        }
+
+        let entry = src.entries[i];
+        if !entry.is_present() {
+            continue;
+        }
+
+        // PDPT/PD huge mappings are leaf entries and can be copied directly.
+        let is_huge = (entry.0 & paging::FLAG_HUGE) != 0;
+        if level > 1 && !is_huge {
+            let child_src = entry.address();
+            let child_dst = clone_table_recursive(child_src, level - 1)?;
+            dst.entries[i] = paging::Entry((entry.0 & !ADDR_MASK) | child_dst);
+        } else {
+            dst.entries[i] = entry;
+        }
+    }
+
+    Ok(dst_phys)
+}
+
+fn destroy_table_recursive(root_phys: PhysAddr, level: u8) {
+    let table = unsafe { &*(root_phys as *const paging::Table) };
+    for i in 0..paging::ENTRY_COUNT {
+        if level == 4 && i == RECURSIVE_SLOT as usize {
+            continue;
+        }
+        let entry = table.entries[i];
+        if !entry.is_present() {
+            continue;
+        }
+
+        let is_huge = (entry.0 & paging::FLAG_HUGE) != 0;
+        if level > 1 && !is_huge {
+            destroy_table_recursive(entry.address(), level - 1);
+        }
+    }
+    let _ = pmm::free_page(root_phys);
 }
 
 fn alloc_zeroed_table() -> Result<PhysAddr, &'static str> {
@@ -508,10 +634,7 @@ fn map_identity_low_mem(root: &mut paging::Table) -> Result<(), &'static str> {
 }
 
 fn map_boot_stack(root: &mut paging::Table) -> Result<(), &'static str> {
-    let rsp: u64;
-    unsafe {
-        asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
-    }
+    let rsp = hal::arch::x86_64::cpu::read_rsp();
     // The stack grows downward on x86_64; ensure pages below current RSP are mapped.
     let below_pages = PAGE_SIZE.saturating_mul(16);
     let start = align_down(rsp.saturating_sub(below_pages), PAGE_SIZE as u64);
@@ -657,7 +780,7 @@ pub fn bootstrap_kernel_page_tables(
     }
     map_boot_stack(root)?;
 
-    root.entries[511].set_page(root_phys, paging::FLAG_WRITABLE);
+    root.entries[RECURSIVE_SLOT as usize].set_page(root_phys, paging::FLAG_WRITABLE);
 
     Ok(root_phys)
 }
@@ -691,7 +814,16 @@ pub fn init(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
 
         state.cr3 = kernel_pml4_phys;
         state.initialized = true;
-        state.next_kernel_virt = KERNEL_VIRT_BASE;
+        // Advance dynamic kernel mappings past the whole 2 MiB region that
+        // contains the image. The boot trampoline maps the higher-half image
+        // with huge PDEs, and splitting the tail PDE for MMIO would otherwise
+        // unmap live kernel data that still resides in that span.
+        let (ks, ke) = kernel_image_range();
+        state.next_kernel_virt = if ke > ks && ks >= KERNEL_VIRT_BASE {
+            align_up(ke, HUGE_PAGE_SIZE_2M)
+        } else {
+            KERNEL_VIRT_BASE
+        };
         Ok(())
     })
 }
@@ -710,6 +842,200 @@ pub fn set_active_cr3(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
         state.cr3 = target;
         Ok(())
     })
+}
+
+/// Creates a deep-cloned page-table root of the current address space.
+///
+/// All table pages are duplicated, while leaf mappings continue to point at
+/// the same underlying physical frames.
+pub fn clone_current_address_space_root() -> Result<PhysAddr, &'static str> {
+    with_state(|state| {
+        if !state.initialized {
+            return Err("vmm: not initialized");
+        }
+
+        let src_root = paging::read_cr3() & ADDR_MASK;
+        if src_root == 0 {
+            return Err("vmm: current cr3 is invalid");
+        }
+
+        let new_root = clone_table_recursive(src_root, 4)?;
+        let root = unsafe { &mut *(new_root as *mut paging::Table) };
+        root.entries[RECURSIVE_SLOT as usize]
+            .set_page(new_root, paging::FLAG_WRITABLE);
+        Ok(new_root)
+    })
+}
+
+/// Creates a fresh user-process page-table root.
+///
+/// Kernel high-half PML4 entries are copied into the new root;
+/// user-space low-half indices (0..=255) are left empty so that the user
+/// binary can be mapped without conflicting with any low-half identity
+/// mapping. The recursive slot is set to point at the new root
+/// so page-table edits work via the recursive mapping.
+///
+/// This is the long-term primitive for user address spaces once the kernel
+/// runs from the higher half. It intentionally does **not** carry over any
+/// low-half identity or huge-page mappings from the kernel image.
+pub fn create_user_address_space_root() -> Result<PhysAddr, &'static str> {
+    with_state(|state| {
+        if !state.initialized {
+            return Err("vmm: not initialized");
+        }
+
+        let src_root = paging::read_cr3() & ADDR_MASK;
+        if src_root == 0 {
+            return Err("vmm: current cr3 is invalid");
+        }
+
+        let new_root = alloc_zeroed_table()?;
+        let src = unsafe { &*(src_root as *const paging::Table) };
+        let dst = unsafe { &mut *(new_root as *mut paging::Table) };
+
+        // Copy high-half kernel entries only (skip low-half user range and
+        // reserve the recursive slot for the new root).
+        for i in 256..512usize {
+            if i == RECURSIVE_SLOT as usize {
+                continue;
+            }
+            let entry = src.entries[i];
+            if entry.is_present() {
+                dst.entries[i] = entry;
+            }
+        }
+
+        dst.entries[RECURSIVE_SLOT as usize].set_page(new_root, paging::FLAG_WRITABLE);
+        Ok(new_root)
+    })
+}
+
+/// Destroys a page-table root previously created by
+/// [`clone_current_address_space_root`].
+pub fn destroy_address_space_root(root_phys: PhysAddr) -> Result<(), &'static str> {
+    if !is_page_aligned(root_phys) || root_phys == 0 {
+        return Err("vmm: root page table must be page aligned and non-zero");
+    }
+    with_state(|state| {
+        if !state.initialized {
+            return Err("vmm: not initialized");
+        }
+        destroy_table_recursive(root_phys, 4);
+        Ok(())
+    })
+}
+
+/// Runs a closure while temporarily switching to `root_phys` CR3.
+pub fn with_address_space<T>(root_phys: PhysAddr, f: impl FnOnce() -> T) -> Result<T, &'static str> {
+    if !is_page_aligned(root_phys) || root_phys == 0 {
+        return Err("vmm: root page table must be page aligned and non-zero");
+    }
+
+    let initialized = with_state(|state| state.initialized);
+    if !initialized {
+        return Err("vmm: not initialized");
+    }
+
+    let previous = paging::read_cr3() & ADDR_MASK;
+    if previous == 0 {
+        return Err("vmm: current cr3 is invalid");
+    }
+
+    let interrupts_enabled = hal::arch::x86_64::interrupt::are_enabled();
+    hal::arch::x86_64::interrupt::disable();
+
+    // Ensure page-table writes are visible before switching contexts.
+    fence(Ordering::SeqCst);
+    unsafe {
+        paging::write_cr3(root_phys & ADDR_MASK);
+    }
+
+    let out = f();
+
+    fence(Ordering::SeqCst);
+    unsafe {
+        paging::write_cr3(previous);
+        if interrupts_enabled {
+            hal::arch::x86_64::interrupt::enable();
+        }
+    }
+
+    Ok(out)
+}
+
+/// Best-effort page unmap that operates on the active CR3 directly and does
+/// not rely on VMM mapping records.
+pub fn unmap_pages_untracked(virt_start: VirtAddr, pages: usize) -> Result<(), &'static str> {
+    if pages == 0 {
+        return Err("vmm: pages must be > 0");
+    }
+    if !is_page_aligned(virt_start) {
+        return Err("vmm: virtual address must be page aligned");
+    }
+
+    with_state(|state| {
+        if !state.initialized {
+            return Err("vmm: not initialized");
+        }
+
+        for page in 0..pages {
+            let v = virt_start.saturating_add((page as u64).saturating_mul(PAGE_SIZE));
+            let _ = unmap_page_hw(v);
+        }
+        Ok(())
+    })
+}
+
+pub fn debug_walk_page(virt: VirtAddr) -> String {
+    let (l4, l3, l2, l1, _) = level_indices(virt);
+
+    let pml4 = unsafe { &*pml4_table_ptr() };
+    let pml4e = pml4.entries[l4].0;
+    if (pml4e & paging::FLAG_PRESENT) == 0 {
+        return format!(
+            "walk va=0x{:x} l4={} l3={} l2={} l1={} pml4e=0x{:x} present=0",
+            virt, l4, l3, l2, l1, pml4e
+        );
+    }
+
+    let pdpt = unsafe { &*pdpt_table_ptr(l4) };
+    let pdpte = pdpt.entries[l3].0;
+    if (pdpte & paging::FLAG_PRESENT) == 0 {
+        return format!(
+            "walk va=0x{:x} l4={} l3={} l2={} l1={} pml4e=0x{:x} pdpte=0x{:x} present=0",
+            virt, l4, l3, l2, l1, pml4e, pdpte
+        );
+    }
+
+    if (pdpte & paging::FLAG_HUGE) != 0 {
+        return format!(
+            "walk va=0x{:x} l4={} l3={} l2={} l1={} pml4e=0x{:x} pdpte=0x{:x} huge=1",
+            virt, l4, l3, l2, l1, pml4e, pdpte
+        );
+    }
+
+    let pd = unsafe { &*pd_table_ptr(l4, l3) };
+    let pde = pd.entries[l2].0;
+    if (pde & paging::FLAG_PRESENT) == 0 {
+        return format!(
+            "walk va=0x{:x} l4={} l3={} l2={} l1={} pml4e=0x{:x} pdpte=0x{:x} pde=0x{:x} present=0",
+            virt, l4, l3, l2, l1, pml4e, pdpte, pde
+        );
+    }
+
+    if (pde & paging::FLAG_HUGE) != 0 {
+        return format!(
+            "walk va=0x{:x} l4={} l3={} l2={} l1={} pml4e=0x{:x} pdpte=0x{:x} pde=0x{:x} huge=1",
+            virt, l4, l3, l2, l1, pml4e, pdpte, pde
+        );
+    }
+
+    let pt = unsafe { &*pt_table_ptr(l4, l3, l2) };
+    let pte = pt.entries[l1].0;
+    format!(
+        "walk va=0x{:x} l4={} l3={} l2={} l1={} pml4e=0x{:x} pdpte=0x{:x} pde=0x{:x} pte=0x{:x}",
+        virt, l4, l3, l2, l1, pml4e, pdpte, pde, pte
+    )
 }
 
 /// Maps `pages` pages from `phys_start` to `virt_start` with the given flags.

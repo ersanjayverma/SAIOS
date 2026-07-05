@@ -31,8 +31,8 @@ const UART_FCR_CLEAR_RX: u8 = 0x02;
 const UART_FCR_CLEAR_TX: u8 = 0x04;
 const UART_FCR_TRIGGER_14: u8 = 0xC0;
 const UART_MCR_READY: u8 = 0x03;
-const UART_DIVISOR_LOW_115200: u8 = 0x01;
-const UART_DIVISOR_HIGH_115200: u8 = 0x00;
+const UART_DIVISOR_LOW_38400: u8 = 0x03;
+const UART_DIVISOR_HIGH_38400: u8 = 0x00;
 const UART_INTERRUPTS_DISABLED: u8 = 0x00;
 
 /// 16550 UART driver.
@@ -79,7 +79,7 @@ impl Serial {
         }
     }
 
-    /// Initialize the UART for 115200 8N1 with FIFO enabled.
+    /// Initialize the UART for 38400 8N1 with FIFO enabled.
     fn init(&mut self) -> SerialResult<()> {
         // Disable interrupts.
         super::io::outb(self.base + UART_INTERRUPT_ENABLE, UART_INTERRUPTS_DISABLED);
@@ -87,9 +87,9 @@ impl Serial {
         // Enable DLAB (divisor latch access bit).
         super::io::outb(self.base + UART_LINE_CONTROL, UART_LCR_DLAB);
 
-        // Divisor = 1 → 115200 baud.
-        super::io::outb(self.base + UART_DATA, UART_DIVISOR_LOW_115200);
-        super::io::outb(self.base + UART_INTERRUPT_ENABLE, UART_DIVISOR_HIGH_115200);
+        // Divisor = 3 -> 38400 baud, matching the UEFI bootloader.
+        super::io::outb(self.base + UART_DATA, UART_DIVISOR_LOW_38400);
+        super::io::outb(self.base + UART_INTERRUPT_ENABLE, UART_DIVISOR_HIGH_38400);
 
         // 8 data bits, no parity, one stop bit.
         super::io::outb(self.base + UART_LINE_CONTROL, UART_LCR_8N1);

@@ -29,7 +29,6 @@ fn io_in8(port: u16) -> u8 {
 }
 
 fn boot_log(message: &str) {
-    println!("[boot] {}", message);
     serial_write_str("[boot] ");
     serial_write_str(message);
     serial_write_str("\n");
@@ -104,8 +103,11 @@ fn main() -> Status {
         if ph.p_type != efi_main::ProgramHeaderType::Load as u32 {
             continue;
         }
-        image_start = image_start.min(ph.p_vaddr);
-        image_end = image_end.max(ph.p_vaddr + ph.p_memsz);
+        // Higher-half kernel: p_vaddr is the runtime VMA, p_paddr is the
+        // physical load address (LMA). Bootloader must place bytes at LMA
+        // so that CR3-switch code executes correctly.
+        image_start = image_start.min(ph.p_paddr);
+        image_end = image_end.max(ph.p_paddr + ph.p_memsz);
     }
     const PAGE_SIZE: u64 = 4096;
     let aligned_start = image_start & !(PAGE_SIZE - 1);
@@ -136,7 +138,7 @@ fn main() -> Status {
         }
         let src = &loader.image.bytes[ph.p_offset as usize..(ph.p_offset + ph.p_filesz) as usize];
 
-        let dst = (base.as_ptr() as u64 + (ph.p_vaddr - aligned_start)) as *mut u8;
+        let dst = (base.as_ptr() as u64 + (ph.p_paddr - aligned_start)) as *mut u8;
         unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), dst, ph.p_filesz as usize);
         }

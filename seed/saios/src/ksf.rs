@@ -208,8 +208,19 @@ impl ServiceManager {
                     continue;
                 }
 
-                if self.deps_ready_to_start(idx) && self.start_at(idx).is_ok() {
-                    progressed = true;
+                if self.deps_ready_to_start(idx) {
+                    match self.start_at(idx) {
+                        Ok(()) => {
+                            progressed = true;
+                        }
+                        Err(e) => {
+                            crate::console::println!(
+                                "ksf: service '{}' failed: {}",
+                                self.services[idx].name(),
+                                e
+                            );
+                        }
+                    }
                 }
             }
 

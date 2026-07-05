@@ -24,6 +24,17 @@ const DT_RELASZ: i64 = 8;
 const DT_RELAENT: i64 = 9;
 const DT_RELACOUNT: i64 = 0x6ffffff9;
 const R_X86_64_RELATIVE: u32 = 8;
+const ET_EXEC_ISOLATED_ADDRESS_SPACE: bool = true;
+const ET_DYN_PROCESS_ADDRESS_SPACE: bool = true;
+const USER_STACK_BASE: u64 = 0x0070_0000;
+const USER_STACK_PAGES: usize = 64;
+const AT_NULL: u64 = 0;
+const AT_PHDR: u64 = 3;
+const AT_PHENT: u64 = 4;
+const AT_PHNUM: u64 = 5;
+const AT_PAGESZ: u64 = 6;
+const AT_ENTRY: u64 = 9;
+const AT_EXECFN: u64 = 31;
 
 #[derive(Copy, Clone)]
 struct ElfHeader {
@@ -322,6 +333,20 @@ fn map_and_load(
     let mut mapped_starts = Vec::new();
 
     for ph in phs {
+        if ph.p_type != PT_LOAD {
+            continue;
+        }
+        crate::console::println!(
+            "elf: PT_LOAD vaddr=0x{:x} off=0x{:x} filesz=0x{:x} memsz=0x{:x} flags=0x{:x}",
+            ph.p_vaddr,
+            ph.p_offset,
+            ph.p_filesz,
+            ph.p_memsz,
+            ph.p_flags
+        );
+    }
+
+    for ph in phs {
         if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
             continue;
         }
@@ -341,12 +366,31 @@ fn map_and_load(
         let size = r.end.saturating_sub(r.start);
         let pages =
             usize::try_from(size / vmm::PAGE_SIZE).map_err(|_| "elf: segment pages overflow")?;
+
+        crate::console::println!(
+            "elf: map 0x{:x}-0x{:x} {}{}{}",
+            r.start,
+            r.end,
+            if (r.flags & vmm::FLAG_READ) != 0 { "R" } else { "-" },
+            if (r.flags & vmm::FLAG_WRITE) != 0 { "W" } else { "-" },
+            if (r.flags & vmm::FLAG_EXEC) != 0 { "X" } else { "-" },
+        );
+
+        if h.e_type == ET_EXEC {
+            let _ = vmm::unmap_pages_untracked(r.start, pages);
+        }
+
         let phys = pmm::alloc_pages(pages).ok_or("elf: no physical memory for segment")?;
         let owner = format!("elf-seg@0x{:x}", r.start);
         if let Err(e) = vmm::map_owned(r.start, phys, pages, r.flags, owner.as_str()) {
             let _ = pmm::free_pages_range(phys, pages);
             for s in &mapped_starts {
                 let _ = vmm::unmap(*s);
+            }
+            if h.e_type == ET_EXEC && e == "vmm: page already mapped" {
+                return Err(
+                    "elf: ET_EXEC load address overlaps existing kernel mappings; rebuild binary as static PIE (ET_DYN)",
+                );
             }
             return Err(e);
         }
@@ -361,6 +405,14 @@ fn map_and_load(
         if ph.p_type != PT_LOAD || ph.p_filesz == 0 {
             continue;
         }
+
+        crate::console::println!(
+            "elf: copy seg vaddr=0x{:x} off=0x{:x} filesz=0x{:x} memsz=0x{:x}",
+            ph.p_vaddr,
+            ph.p_offset,
+            ph.p_filesz,
+            ph.p_memsz
+        );
 
         let src_off = usize::try_from(ph.p_offset).map_err(|_| "elf: file offset overflow")?;
         let src_len = usize::try_from(ph.p_filesz).map_err(|_| "elf: file size overflow")?;
@@ -379,6 +431,12 @@ fn map_and_load(
             core::ptr::copy_nonoverlapping(bytes[src_off..src_end].as_ptr(), dst, src_len);
         }
 
+        crate::console::println!(
+            "elf: copied seg vaddr=0x{:x} len=0x{:x}",
+            ph.p_vaddr,
+            ph.p_filesz
+        );
+
         if ph.p_memsz > ph.p_filesz {
             let bss_off = usize::try_from(ph.p_filesz).map_err(|_| "elf: bss offset overflow")?;
             let bss_len =
@@ -386,6 +444,11 @@ fn map_and_load(
             unsafe {
                 core::ptr::write_bytes(dst.add(bss_off), 0, bss_len);
             }
+            crate::console::println!(
+                "elf: zeroed bss vaddr=0x{:x} len=0x{:x}",
+                ph.p_vaddr.saturating_add(ph.p_filesz),
+                ph.p_memsz.saturating_sub(ph.p_filesz)
+            );
         }
     }
 
@@ -410,24 +473,333 @@ fn jump_to_entry(entry: u64) -> i32 {
     f()
 }
 
-pub fn load_and_run(path: &str, image_base: u64) -> Result<i32, &'static str> {
+fn jump_to_entry_with_rsp(entry: u64, rsp: u64) -> ! {
+    // SAFETY: caller guarantees `entry` is executable and `rsp` points to a
+    // mapped writable user stack. Transition to CPL3 with iretq so faults and
+    // syscalls are handled with kernel/user privilege separation.
+    unsafe {
+        let kernel_rsp0 = hal::arch::x86_64::seed_support::user_transition_kernel_rsp0();
+        hal::arch::x86_64::tss::set_rsp0(kernel_rsp0);
+        hal::arch::x86_64::syscall::set_kernel_rsp0(kernel_rsp0);
+        let syscall = hal::arch::x86_64::syscall::snapshot();
+        let tss_rsp0 = hal::arch::x86_64::tss::rsp0();
+        let (_, _, _, ext_edx) = hal::arch::x86_64::cpuid::cpuid(0x8000_0001);
+        let syscall_supported = (ext_edx & (1 << 11)) != 0;
+        let idtr = hal::arch::x86_64::cpu::read_idt_ptr();
+        let gdtr = hal::arch::x86_64::cpu::read_gdt_ptr();
+        crate::console::println!(
+            "syscall: cpuid_syscall={} ext_edx=0x{:x} efer=0x{:x} star=0x{:x} lstar=0x{:x} fmask=0x{:x} entry=0x{:x} kcs=0x{:x} kss=0x{:x} sysret_ucs=0x{:x} sysret_uss=0x{:x} iret_ucs=0x{:x} iret_uss=0x{:x} rsp0=0x{:x} tss.rsp0=0x{:x}",
+            syscall_supported,
+            ext_edx,
+            syscall.efer,
+            syscall.star,
+            syscall.lstar,
+            syscall.fmask,
+            syscall.entry,
+            syscall.syscall_kernel_cs,
+            syscall.syscall_kernel_ss,
+            syscall.sysret_user_cs,
+            syscall.sysret_user_ss,
+            syscall.iret_user_cs,
+            syscall.iret_user_ss,
+            syscall.rsp0,
+            tss_rsp0,
+        );
+        crate::console::println!(
+            "syscall: idt base=0x{:x} limit=0x{:x} gdt base=0x{:x} limit=0x{:x} cr3=0x{:x}",
+            idtr.base,
+            idtr.limit,
+            gdtr.base,
+            gdtr.limit,
+            hal::arch::paging::read_cr3(),
+        );
+        crate::console::println!("walk:lstar {}", vmm::debug_walk_page(syscall.lstar));
+        crate::console::println!("walk:rsp0 {}", vmm::debug_walk_page(syscall.rsp0.saturating_sub(8)));
+        crate::console::println!("walk:idtr {}", vmm::debug_walk_page(idtr.base));
+        crate::console::println!("walk:gdtr {}", vmm::debug_walk_page(gdtr.base));
+        crate::console::println!("walk:user_entry {}", vmm::debug_walk_page(entry));
+        crate::console::println!("walk:user_rsp {}", vmm::debug_walk_page(rsp));
+        hal::arch::x86_64::seed_support::enter_user_mode(entry, rsp);
+    }
+}
+
+fn stack_push_bytes(mut sp: u64, bytes: &[u8]) -> Result<u64, &'static str> {
+    sp = sp.saturating_sub(bytes.len() as u64);
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), sp as *mut u8, bytes.len());
+    }
+    Ok(sp)
+}
+
+fn stack_push_u64(mut sp: u64, value: u64) -> Result<u64, &'static str> {
+    sp = sp.saturating_sub(8);
+    unsafe {
+        core::ptr::write_unaligned(sp as *mut u64, value);
+    }
+    Ok(sp)
+}
+
+fn stack_align_down(sp: u64, align: u64) -> u64 {
+    sp & !(align - 1)
+}
+
+fn auxv_phdr_addr(phs: &[ProgramHeader], h: &ElfHeader, base: u64) -> Option<u64> {
+    let phoff = h.e_phoff;
+    for ph in phs {
+        if ph.p_type != PT_LOAD || ph.p_filesz == 0 {
+            continue;
+        }
+        let seg_start = ph.p_offset;
+        let seg_end = ph.p_offset.checked_add(ph.p_filesz)?;
+        if phoff >= seg_start && phoff < seg_end {
+            let delta = phoff.checked_sub(seg_start)?;
+            return ph.p_vaddr.checked_add(base)?.checked_add(delta);
+        }
+    }
+    None
+}
+
+fn map_initial_user_stack(
+    path: &str,
+    h: &ElfHeader,
+    phs: &[ProgramHeader],
+    entry: u64,
+    base: u64,
+    mapped_starts: &mut Vec<u64>,
+) -> Result<u64, &'static str> {
+    let stack_start = USER_STACK_BASE;
+    let stack_size = (USER_STACK_PAGES as u64).saturating_mul(vmm::PAGE_SIZE);
+    let stack_top = stack_start.saturating_add(stack_size);
+
+    let _ = vmm::unmap_pages_untracked(stack_start, USER_STACK_PAGES);
+
+    let phys = pmm::alloc_pages(USER_STACK_PAGES).ok_or("elf: no physical memory for user stack")?;
+    if let Err(e) = vmm::map_owned(
+        stack_start,
+        phys,
+        USER_STACK_PAGES,
+        vmm::FLAG_USER | vmm::FLAG_READ | vmm::FLAG_WRITE,
+        "elf-user-stack",
+    ) {
+        let _ = pmm::free_pages_range(phys, USER_STACK_PAGES);
+        return Err(e);
+    }
+    mapped_starts.push(stack_start);
+
+    unsafe {
+        core::ptr::write_bytes(stack_start as *mut u8, 0, stack_size as usize);
+    }
+
+    let mut sp = stack_top;
+
+    let mut arg0 = Vec::new();
+    arg0.extend_from_slice(path.as_bytes());
+    arg0.push(0);
+    sp = stack_push_bytes(sp, arg0.as_slice())?;
+    let arg0_ptr = sp;
+
+    sp = stack_align_down(sp, 16);
+
+    // auxv: minimal Linux-compatible vector.
+    sp = stack_push_u64(sp, arg0_ptr)?;
+    sp = stack_push_u64(sp, AT_EXECFN)?;
+    sp = stack_push_u64(sp, entry)?;
+    sp = stack_push_u64(sp, AT_ENTRY)?;
+    sp = stack_push_u64(sp, h.e_phnum as u64)?;
+    sp = stack_push_u64(sp, AT_PHNUM)?;
+    sp = stack_push_u64(sp, h.e_phentsize as u64)?;
+    sp = stack_push_u64(sp, AT_PHENT)?;
+    sp = stack_push_u64(
+        sp,
+        auxv_phdr_addr(phs, h, base).ok_or("elf: failed to compute AT_PHDR")?,
+    )?;
+    sp = stack_push_u64(sp, AT_PHDR)?;
+    sp = stack_push_u64(sp, vmm::PAGE_SIZE)?;
+    sp = stack_push_u64(sp, AT_PAGESZ)?;
+
+    // auxv terminator (AT_NULL, 0)
+    sp = stack_push_u64(sp, 0)?;
+    sp = stack_push_u64(sp, AT_NULL)?;
+
+    // envp terminator
+    sp = stack_push_u64(sp, 0)?;
+
+    // argv[1] = NULL, argv[0] = arg0
+    sp = stack_push_u64(sp, 0)?;
+    sp = stack_push_u64(sp, arg0_ptr)?;
+    let argv_ptr = sp;
+
+    // argc
+    sp = stack_push_u64(sp, 1)?;
+
+    crate::console::println!(
+        "elf: startup argc=1 argv=0x{:x} argv0=0x{:x}",
+        argv_ptr,
+        arg0_ptr
+    );
+
+    Ok(sp)
+}
+
+fn current_rsp() -> u64 {
+    hal::arch::x86_64::cpu::read_rsp()
+}
+
+fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> Result<i32, &'static str> {
+    crate::kernel::fault::begin_user_exec(pid);
+    crate::console::println!(
+        "elf: entry=0x{:x} rsp=0x{:x} cr3=0x{:x}",
+        entry,
+        initial_rsp.unwrap_or_else(current_rsp),
+        hal::arch::paging::read_cr3()
+    );
+    if let Some(sp) = initial_rsp {
+        jump_to_entry_with_rsp(entry, sp);
+    }
+
+    let code = jump_to_entry(entry);
+    let faulted = crate::kernel::fault::take_active_exec_faulted();
+    crate::kernel::fault::end_user_exec();
+    if faulted {
+        return Err("elf: user process page fault");
+    }
+    Ok(code)
+}
+
+fn can_use_fresh_user_root() -> bool {
+    let (ks, _ke) = vmm::kernel_image_range();
+    ks >= vmm::KERNEL_VIRT_BASE
+}
+
+pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'static str> {
     let handle = saifs::open(path).map_err(|_| "elf: open failed")?;
     let bytes = handle.read().map_err(|_| "elf: read failed")?;
 
     let header = parse_header(bytes.as_slice())?;
     let phs = parse_program_headers(bytes.as_slice(), &header)?;
     let base = runtime_base(&header, image_base);
+    let use_isolated_exec = header.e_type == ET_EXEC && ET_EXEC_ISOLATED_ADDRESS_SPACE;
 
-    let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base)?;
-
-    if let Some(dyn_info) = parse_dynamic(bytes.as_slice(), phs.as_slice(), base)? {
-        if let Err(e) = apply_relocations(dyn_info, base) {
-            unmap_loaded(&img);
-            return Err(e);
+    if header.e_type == ET_EXEC && !use_isolated_exec {
+        let (ks, ke) = vmm::kernel_image_range();
+        if ks != 0 && ke > ks {
+            for ph in &phs {
+                if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
+                    continue;
+                }
+                let seg_start = ph.p_vaddr;
+                let seg_end = ph.p_vaddr.saturating_add(ph.p_memsz);
+                if seg_start < ke && ks < seg_end {
+                    crate::console::println!(
+                        "elf: ET_EXEC segment 0x{:x}-0x{:x} overlaps live kernel image 0x{:x}-0x{:x}",
+                        seg_start,
+                        seg_end,
+                        ks,
+                        ke
+                    );
+                    return Err(
+                        "elf: ET_EXEC image overlaps live kernel memory; rebuild as PIE (ET_DYN) or link above kernel image",
+                    );
+                }
+            }
         }
     }
 
-    let code = jump_to_entry(img.entry);
-    unmap_loaded(&img);
-    Ok(code)
+    let use_isolated_dyn =
+        header.e_type == ET_DYN && ET_DYN_PROCESS_ADDRESS_SPACE && can_use_fresh_user_root();
+
+    if use_isolated_exec || use_isolated_dyn {
+        let exec_root = if header.e_type == ET_DYN {
+            crate::console::println!("elf: ET_DYN using fresh user address-space root");
+            vmm::create_user_address_space_root()?
+        } else {
+            vmm::clone_current_address_space_root()?
+        };
+
+        let run_result = vmm::with_address_space(exec_root, || {
+            crate::console::println!(
+                "elf: phase=map_load et={} isolated",
+                if header.e_type == ET_DYN { "ET_DYN" } else { "ET_EXEC" }
+            );
+            let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base)?;
+            let mut img = img;
+
+            let initial_rsp = if header.e_type == ET_EXEC {
+                Some(map_initial_user_stack(
+                    path,
+                    &header,
+                    phs.as_slice(),
+                    img.entry,
+                    base,
+                    &mut img.mapped_starts,
+                )?)
+            } else {
+                None
+            };
+
+            if let Some(dyn_info) = parse_dynamic(bytes.as_slice(), phs.as_slice(), base)? {
+                crate::console::println!(
+                    "elf: phase=reloc rela=0x{:x} sz=0x{:x} ent=0x{:x} count={}",
+                    dyn_info.rela_addr,
+                    dyn_info.rela_sz,
+                    dyn_info.rela_ent,
+                    dyn_info.rela_count
+                );
+                if let Err(e) = apply_relocations(dyn_info, base) {
+                    unmap_loaded(&img);
+                    return Err(e);
+                }
+                crate::console::println!("elf: phase=reloc done");
+            }
+
+            crate::console::println!("elf: phase=jump");
+            let code = jump_to_entry_recoverable(img.entry, pid, initial_rsp)?;
+            unmap_loaded(&img);
+            Ok(code)
+        })?;
+        let _ = vmm::destroy_address_space_root(exec_root);
+        run_result
+    } else {
+        if header.e_type == ET_DYN && ET_DYN_PROCESS_ADDRESS_SPACE {
+            crate::console::println!(
+                "elf: ET_DYN user-root path deferred (kernel still low-half); using shared bring-up path"
+            );
+        }
+        crate::console::println!("elf: phase=map_load");
+        let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base)?;
+        let mut img = img;
+
+        let initial_rsp = if header.e_type == ET_EXEC {
+            Some(map_initial_user_stack(
+                path,
+                &header,
+                phs.as_slice(),
+                img.entry,
+                base,
+                &mut img.mapped_starts,
+            )?)
+        } else {
+            None
+        };
+
+        if let Some(dyn_info) = parse_dynamic(bytes.as_slice(), phs.as_slice(), base)? {
+            crate::console::println!(
+                "elf: phase=reloc rela=0x{:x} sz=0x{:x} ent=0x{:x} count={}",
+                dyn_info.rela_addr,
+                dyn_info.rela_sz,
+                dyn_info.rela_ent,
+                dyn_info.rela_count
+            );
+            if let Err(e) = apply_relocations(dyn_info, base) {
+                unmap_loaded(&img);
+                return Err(e);
+            }
+            crate::console::println!("elf: phase=reloc done");
+        }
+
+        crate::console::println!("elf: phase=jump");
+        let code = jump_to_entry_recoverable(img.entry, pid, initial_rsp)?;
+        unmap_loaded(&img);
+        Ok(code)
+    }
 }

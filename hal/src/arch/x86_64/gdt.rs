@@ -8,8 +8,8 @@ use core::{arch::asm, mem::size_of};
 pub const KERNEL_CODE: SegmentSelector = SegmentSelector::new(1, 0);
 pub const KERNEL_DATA: SegmentSelector = SegmentSelector::new(2, 0);
 
-pub const USER_CODE: SegmentSelector = SegmentSelector::new(3, 3);
-pub const USER_DATA: SegmentSelector = SegmentSelector::new(4, 3);
+pub const USER_DATA: SegmentSelector = SegmentSelector::new(3, 3);
+pub const USER_CODE: SegmentSelector = SegmentSelector::new(4, 3);
 
 pub const TSS_SELECTOR: SegmentSelector = SegmentSelector::new(5, 0);
 
@@ -68,11 +68,11 @@ impl GlobalDescriptorTable {
         // Kernel data
         self.entries[2] = GDT_KERNEL_DATA_DESCRIPTOR;
 
-        // User code
-        self.entries[3] = GDT_USER_CODE_DESCRIPTOR;
+        // User data. Must immediately precede user code for SYSCALL/SYSRET STAR layout.
+        self.entries[3] = GDT_USER_DATA_DESCRIPTOR;
 
-        // User data
-        self.entries[4] = GDT_USER_DATA_DESCRIPTOR;
+        // User code
+        self.entries[4] = GDT_USER_CODE_DESCRIPTOR;
     }
 
     fn install_tss(&mut self, tss: *const TaskStateSegment) {

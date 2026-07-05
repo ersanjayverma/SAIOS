@@ -4,7 +4,6 @@
 //! interrupts on IRQ0. The interrupt stub saves scratch registers, calls
 //! [`saios_timer_tick`] and acknowledges the interrupt with an EOI.
 
-use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
 
@@ -38,35 +37,6 @@ const PIT_DIVISOR_LOW_BYTE_MASK: u16 = 0x00FF;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static TICKS: AtomicU64 = AtomicU64::new(0);
-
-global_asm!(
-    ".global saios_timer_irq0_stub",
-    "saios_timer_irq0_stub:",
-    "push rax",
-    "push rcx",
-    "push rdx",
-    "push rsi",
-    "push rdi",
-    "push r8",
-    "push r9",
-    "push r10",
-    "push r11",
-    "call saios_timer_tick",
-    "pop r11",
-    "pop r10",
-    "pop r9",
-    "pop r8",
-    "pop rdi",
-    "pop rsi",
-    "pop rdx",
-    "pop rcx",
-    "pop rax",
-    "iretq",
-);
-
-unsafe extern "C" {
-    fn saios_timer_irq0_stub();
-}
 
 #[unsafe(no_mangle)]
 extern "C" fn saios_timer_tick() {
@@ -136,7 +106,7 @@ pub fn init() {
 
     remap_pic();
     init_pit();
-    idt::register_raw(TIMER_VECTOR, saios_timer_irq0_stub as *const () as usize);
+    idt::register_raw(TIMER_VECTOR, hal::arch::x86_64::seed_support::timer_irq0_stub_addr());
 }
 
 /// Returns the number of timer ticks since initialization.

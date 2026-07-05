@@ -9,6 +9,8 @@ use alloc::vec::Vec;
 use core::mem;
 use core::ptr;
 
+use hal::arch::x86_64::{idt, interrupt, io};
+
 use crate::heap;
 use crate::vmm;
 
@@ -723,14 +725,7 @@ impl AcpiManager {
             let pm_value = (S5_SLP_TYP << 10) | SLP_EN;
 
             // Write to I/O port
-            unsafe {
-                core::arch::asm!(
-                    "out dx, ax",
-                    in("dx") pm1a_cnt_addr,
-                    in("ax") pm_value,
-                    options(nomem, nostack, preserves_flags)
-                );
-            }
+            io::outw(pm1a_cnt_addr, pm_value);
 
             // Wait for shutdown to take effect
             loop {
@@ -746,14 +741,7 @@ impl AcpiManager {
     fn platform_shutdown(&self) -> Result<(), &'static str> {
         // Try x86 CMOS/IO shutdown via port 0xCF9
         // Value 0x0E triggers system shutdown on most x86 systems
-        unsafe {
-            core::arch::asm!(
-                "out dx, al",
-                in("dx") 0xCF9u16,
-                in("al") 0x0Eu8,
-                options(nomem, nostack, preserves_flags)
-            );
-        }
+        io::outb(0xCF9u16, 0x0Eu8);
 
         // Wait for shutdown
         loop {
@@ -783,14 +771,7 @@ impl AcpiManager {
                 // Write reset value to the reset register
                 if gas.is_io_port() {
                     // IO port access
-                    unsafe {
-                        core::arch::asm!(
-                            "out dx, al",
-                            in("dx") gas.address as u16,
-                            in("al") fadt.reset_value,
-                            options(nomem, nostack, preserves_flags)
-                        );
-                    }
+                    io::outb(gas.address as u16, fadt.reset_value);
 
                     // Wait for reset
                     loop {
@@ -819,26 +800,13 @@ impl AcpiManager {
     fn platform_reset(&self) -> Result<(), &'static str> {
         // Try x86 reset via port 0xCF9
         // Value 0x06 triggers system reset on most x86 systems
-        unsafe {
-            core::arch::asm!(
-                "out dx, al",
-                in("dx") 0xCF9u16,
-                in("al") 0x06u8,
-                options(nomem, nostack, preserves_flags)
-            );
-        }
+        io::outb(0xCF9u16, 0x06u8);
 
         // If that doesn't work, try triple fault
         // Create invalid IDT descriptor to trigger fault
-        unsafe {
-            let idt_desc: u64 = 0;
-            core::arch::asm!(
-                "lidt [{}]",
-                in(reg) &idt_desc,
-            );
-            // Trigger interrupt to cause triple fault
-            core::arch::asm!("int 0");
-        }
+        idt::load_null_idt();
+        // Trigger interrupt to cause triple fault.
+        interrupt::int0();
 
         // Should not reach here
         Err("ACPI: Platform reset failed")

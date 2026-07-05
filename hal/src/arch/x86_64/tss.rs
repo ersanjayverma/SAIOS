@@ -71,3 +71,7 @@ pub fn set_rsp0(stack: u64) {
         tss.rsp[0] = stack;
     }
 }
+
+pub fn rsp0() -> u64 {
+    unsafe { (*TSS.get()).rsp[0] }
+}

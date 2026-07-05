@@ -54,8 +54,11 @@ impl Entry {
     }
 
     pub fn set_page(&mut self, addr: u64, flags: u64) {
-        self.set_address(addr);
-        self.0 |= flags | FLAG_PRESENT;
+        debug_assert!(
+            (addr & (PAGE_SIZE - 1)) == 0,
+            "page address must be 4 KiB aligned"
+        );
+        self.0 = (addr & ADDR_MASK) | flags | FLAG_PRESENT;
     }
 }
 
@@ -110,5 +113,12 @@ pub fn read_cr3() -> u64 {
 pub unsafe fn write_cr3(value: u64) {
     unsafe {
         asm!("mov cr3, {}", in(reg) value, options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[inline(always)]
+pub fn invlpg(addr: u64) {
+    unsafe {
+        asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags));
     }
 }

@@ -1137,9 +1137,15 @@ fn ensure_volume_mounted(
     }
 
     // Native ext4: all I/O is demand-paged through the per-volume cache.
-    // No upfront partition scan; mount completes in O(1) disk reads.
+    // Managed/store ext4 volumes still need the mounted node tree loaded.
     if fs == FilesystemKind::Ext4 {
-        return Ok(());
+        let is_native = ext4_with_volume(state, volume, |disk, part| {
+            ext4_load_superblock(disk, part)
+        })
+        .is_ok();
+        if is_native {
+            return Ok(());
+        }
     }
 
     let nodes = if fs_supports_rw_tree(fs) {
@@ -1876,41 +1882,201 @@ fn ext4_write_inode_data_inplace(
     disk: &mut DiskDevice,
     part: &Partition,
     sb: &Ext4Superblock,
+    inode_no: u32,
     inode: &Ext4Inode,
     data: &[u8],
 ) -> Result<(), &'static str> {
     if (inode.mode & EXT4_S_IFREG) == 0 {
         return Err("not a file");
     }
-
-    if data.len() > inode.size as usize {
-        return Err("storage: ext4 native write cannot grow file yet");
+    if (inode.flags & EXT4_INLINE_DATA_FL) != 0 {
+        return Err("storage: ext4 inline-data writes are not supported yet");
     }
 
     let block_size = sb.block_size as usize;
     if block_size == 0 {
         return Err("storage: invalid ext4 block size");
     }
-
-    let mut image = vec![0u8; inode.size as usize];
-    if !data.is_empty() {
-        image[..data.len()].copy_from_slice(data);
-    }
-
-    let blocks = image.len().div_ceil(block_size);
+    let mut inode_shadow = *inode;
+    let blocks = data.len().div_ceil(block_size);
     for lb in 0..blocks as u32 {
-        let Some(pb) = ext4_resolve_file_block(disk, part, sb, inode, lb)? else {
-            return Err("storage: ext4 native write hit sparse/unmapped block");
+        let pb = match ext4_resolve_file_block(disk, part, sb, &inode_shadow, lb)? {
+            Some(pb) => pb,
+            None => ext4_append_file_block(disk, part, sb, inode_no, &mut inode_shadow, lb)?,
         };
 
         let start = (lb as usize).saturating_mul(block_size);
-        let end = min(start.saturating_add(block_size), image.len());
+        let end = min(start.saturating_add(block_size), data.len());
         let mut blk = ext4_read_block(disk, part, sb, pb)?;
-        blk[..end - start].copy_from_slice(&image[start..end]);
+        let copy_len = end.saturating_sub(start);
+        if copy_len > 0 {
+            blk[..copy_len].copy_from_slice(&data[start..end]);
+        }
+        if copy_len < block_size {
+            blk[copy_len..block_size].fill(0);
+        }
         ext4_write_block(disk, part, sb, pb, blk.as_slice())?;
     }
 
+    ext4_write_inode_size(disk, part, sb, inode_no, data.len() as u64)?;
     Ok(())
+}
+
+fn ext4_append_file_block(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode_no: u32,
+    inode: &mut Ext4Inode,
+    logical_block: u32,
+) -> Result<u64, &'static str> {
+    if (inode.flags & EXT4_EXTENTS_FL) == 0 {
+        if logical_block >= 12 {
+            return Err("storage: ext4 indirect-block growth is not supported yet");
+        }
+
+        let at = (logical_block as usize).saturating_mul(4);
+        let existing = le_u32(inode.block.as_slice(), at).unwrap_or(0) as u64;
+        if existing != 0 {
+            return Ok(existing);
+        }
+
+        let new_phys = ext4_alloc_block_scaffold(disk, part, sb)?;
+        if new_phys > u32::MAX as u64 {
+            return Err("storage: ext4 direct block address exceeds 32-bit range");
+        }
+        put_u32_le(inode.block.as_mut_slice(), at, new_phys as u32)?;
+        ext4_write_inode_block_map(disk, part, sb, inode_no, inode.block.as_slice())?;
+        return Ok(new_phys);
+    }
+
+    let hdr_magic = le_u16(inode.block.as_slice(), 0).unwrap_or(0);
+    if hdr_magic != 0xF30A {
+        return Err("storage: ext4 extent header magic invalid");
+    }
+    let entries = le_u16(inode.block.as_slice(), 2).unwrap_or(0) as usize;
+    let max_entries = le_u16(inode.block.as_slice(), 4).unwrap_or(0) as usize;
+    let depth = le_u16(inode.block.as_slice(), 6).unwrap_or(0);
+    if depth != 0 {
+        return Err("storage: ext4 indexed extent growth is not supported yet");
+    }
+    if max_entries == 0 {
+        return Err("storage: ext4 extent header max entries is zero");
+    }
+
+    let new_phys = ext4_alloc_block_scaffold(disk, part, sb)?;
+    if entries == 0 {
+        put_u32_le(inode.block.as_mut_slice(), 12, logical_block)?;
+        put_u16_le(inode.block.as_mut_slice(), 16, 1)?;
+        put_u16_le(inode.block.as_mut_slice(), 18, (new_phys >> 32) as u16)?;
+        put_u32_le(inode.block.as_mut_slice(), 20, new_phys as u32)?;
+        put_u16_le(inode.block.as_mut_slice(), 2, 1)?;
+        ext4_write_inode_block_map(disk, part, sb, inode_no, inode.block.as_slice())?;
+        return Ok(new_phys);
+    }
+
+    let last_at = 12 + (entries - 1).saturating_mul(12);
+    if last_at + 12 > inode.block.len() {
+        return Err("storage: ext4 extent entry overflow");
+    }
+
+    let last_block = le_u32(inode.block.as_slice(), last_at).unwrap_or(0);
+    let last_len_raw = le_u16(inode.block.as_slice(), last_at + 4).unwrap_or(0);
+    let last_len = (last_len_raw & 0x7FFF) as u32;
+    let last_start_hi = le_u16(inode.block.as_slice(), last_at + 6).unwrap_or(0) as u64;
+    let last_start_lo = le_u32(inode.block.as_slice(), last_at + 8).unwrap_or(0) as u64;
+    let last_start = (last_start_hi << 32) | last_start_lo;
+    let expected_logical = last_block.saturating_add(last_len);
+
+    if logical_block != expected_logical {
+        return Err("storage: ext4 non-append sparse growth is not supported");
+    }
+
+    let last_end_phys = last_start.saturating_add(last_len as u64);
+    let can_extend_last = new_phys == last_end_phys && last_len < 0x7FFF;
+    if can_extend_last {
+        put_u16_le(
+            inode.block.as_mut_slice(),
+            last_at + 4,
+            (last_len_raw & 0x8000) | ((last_len + 1) as u16),
+        )?;
+        ext4_write_inode_block_map(disk, part, sb, inode_no, inode.block.as_slice())?;
+        return Ok(new_phys);
+    }
+
+    if entries >= max_entries {
+        return Err("storage: ext4 extent header full; cannot append new extent");
+    }
+
+    let at = 12 + entries.saturating_mul(12);
+    if at + 12 > inode.block.len() {
+        return Err("storage: ext4 extent entry overflow");
+    }
+    put_u32_le(inode.block.as_mut_slice(), at, logical_block)?;
+    put_u16_le(inode.block.as_mut_slice(), at + 4, 1)?;
+    put_u16_le(inode.block.as_mut_slice(), at + 6, (new_phys >> 32) as u16)?;
+    put_u32_le(inode.block.as_mut_slice(), at + 8, new_phys as u32)?;
+    put_u16_le(inode.block.as_mut_slice(), 2, (entries + 1) as u16)?;
+    ext4_write_inode_block_map(disk, part, sb, inode_no, inode.block.as_slice())?;
+    Ok(new_phys)
+}
+
+fn ext4_inode_offset(
+    disk: &DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode_no: u32,
+) -> Result<u64, &'static str> {
+    if inode_no == 0 {
+        return Err("storage: ext4 inode 0 invalid");
+    }
+
+    let ino_index = inode_no - 1;
+    let group = ino_index / sb.inodes_per_group;
+    let index = ino_index % sb.inodes_per_group;
+
+    let gd = ext4_read_group_desc(disk, part, sb, group)?;
+    let inode_table_lo = le_u32(gd.as_slice(), 8).ok_or("storage: ext4 group desc truncated")?;
+    let inode_table_hi = if sb.desc_size >= 64 {
+        le_u32(gd.as_slice(), 40).unwrap_or(0)
+    } else {
+        0
+    };
+    let inode_table_block = ((inode_table_hi as u64) << 32) | (inode_table_lo as u64);
+    Ok(inode_table_block
+        .saturating_mul(sb.block_size)
+        .saturating_add((index as u64).saturating_mul(sb.inode_size as u64)))
+}
+
+fn ext4_write_inode_size(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode_no: u32,
+    new_size: u64,
+) -> Result<(), &'static str> {
+    let inode_offset = ext4_inode_offset(disk, part, sb, inode_no)?;
+    write_partition_at(disk, part, inode_offset.saturating_add(4), &(new_size as u32).to_le_bytes())?;
+    write_partition_at(
+        disk,
+        part,
+        inode_offset.saturating_add(108),
+        &((new_size >> 32) as u32).to_le_bytes(),
+    )
+}
+
+fn ext4_write_inode_block_map(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode_no: u32,
+    block_map: &[u8],
+) -> Result<(), &'static str> {
+    if block_map.len() != 60 {
+        return Err("storage: ext4 inode block map length mismatch");
+    }
+    let inode_offset = ext4_inode_offset(disk, part, sb, inode_no)?;
+    write_partition_at(disk, part, inode_offset.saturating_add(40), block_map)
 }
 
 fn ext4_parse_dir_entries(data: &[u8], block_size: usize) -> Vec<Ext4DirEntryParsed> {
@@ -2289,6 +2455,18 @@ fn ext4_with_volume_and_cache_mut<R>(
     let disk = &disks[disk_idx];
     let part = &disk.partitions[part_idx];
     f(disk, part, cache)
+}
+
+fn ext4_invalidate_volume_cache(state: &mut StorageState, volume: &str) {
+    if let Some(cache) = state
+        .ext4_caches
+        .iter_mut()
+        .find(|c| c.volume.eq_ignore_ascii_case(volume))
+    {
+        let sb = cache.sb;
+        let name = cache.volume.clone();
+        *cache = Ext4VolumeCache::new(name, sb);
+    }
 }
 
 // ── cache-aware low-level ext4 helpers ──────────────────────────────────────
@@ -3462,10 +3640,14 @@ pub fn fs_write(path: &str, data: &[u8]) -> Result<(), &'static str> {
         if vol_fs == FilesystemKind::Ext4
             && is_native_ext4_read_only_volume(state, vol_name.as_str())
         {
-            return ext4_with_volume_mut(state, vol_name.as_str(), |disk, part| {
-                let (sb, _ino, inode) = ext4_lookup_path(disk, part, rel.as_str())?;
-                ext4_write_inode_data_inplace(disk, part, &sb, &inode, data)
+            let write_result = ext4_with_volume_mut(state, vol_name.as_str(), |disk, part| {
+                let (sb, ino, inode) = ext4_lookup_path(disk, part, rel.as_str())?;
+                ext4_write_inode_data_inplace(disk, part, &sb, ino, &inode, data)
             });
+            if write_result.is_ok() {
+                ext4_invalidate_volume_cache(state, vol_name.as_str());
+            }
+            return write_result;
         }
 
         ensure_volume_mounted(state, vol_name.as_str(), vol_fs)?;

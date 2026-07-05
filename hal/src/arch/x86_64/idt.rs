@@ -12,6 +12,14 @@ const IDT_INTERRUPT_GATE_ATTRIBUTES: u8 = 0x8E;
 const ERROR_CODE_VECTORS: &[u8] = &[8, 10, 11, 12, 13, 14, 17, 21, 29, 30];
 
 static IDT: StaticCell<InterruptDescriptorTable> = StaticCell::new(InterruptDescriptorTable::new());
+type InvalidOpcodeHandler = fn(stack_ptr: usize) -> bool;
+type GeneralProtectionHandler = fn(error_code: usize, stack_ptr: usize) -> bool;
+type PageFaultHandler = fn(fault_addr: usize, error_code: usize, stack_ptr: usize) -> bool;
+type UserFaultAbortHandler = extern "C" fn() -> !;
+static INVALID_OPCODE_HANDLER: StaticCell<Option<InvalidOpcodeHandler>> = StaticCell::new(None);
+static GENERAL_PROTECTION_HANDLER: StaticCell<Option<GeneralProtectionHandler>> = StaticCell::new(None);
+static PAGE_FAULT_HANDLER: StaticCell<Option<PageFaultHandler>> = StaticCell::new(None);
+static USER_FAULT_ABORT_HANDLER: StaticCell<Option<UserFaultAbortHandler>> = StaticCell::new(None);
 
 global_asm!(
     ".global saios_default_interrupt_stub",
@@ -35,28 +43,120 @@ global_asm!(
     "jmp 2b",
     ".global saios_invalid_opcode_stub",
     "saios_invalid_opcode_stub:",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "lea rdi, [rsp + 64]",
     "call invalid_opcode",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "test rax, rax",
+    "jnz 3f",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    "3:",
+    "call saios_user_fault_abort",
     "2:",
     "hlt",
     "jmp 2b",
     ".global saios_double_fault_stub",
     "saios_double_fault_stub:",
-    "mov rdi, [rsp]",
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "mov rdi, [rsp + 72]",
     "call double_fault",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "pop rax",
     "2:",
     "hlt",
     "jmp 2b",
     ".global saios_general_protection_stub",
     "saios_general_protection_stub:",
-    "mov rdi, [rsp]",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "mov rdi, [rsp + 64]",
+    "lea rsi, [rsp + 64]",
     "call general_protection",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "test rax, rax",
+    "jnz 3f",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    "3:",
+    "add rsp, 8",
+    "call saios_user_fault_abort",
     "2:",
     "hlt",
     "jmp 2b",
     ".global saios_page_fault_stub",
     "saios_page_fault_stub:",
-    "mov rdi, [rsp]",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "mov rdi, [rsp + 64]",
+    "lea rsi, [rsp + 64]",
     "call page_fault",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "test rax, rax",
+    "jnz 3f",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    "3:",
+    "add rsp, 8",
+    "call saios_user_fault_abort",
     "2:",
     "hlt",
     "jmp 2b",
@@ -112,7 +212,8 @@ impl IdtEntry {
         self.reserved = 0;
     }
 }
-
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct InterruptDescriptorTable {
     entries: [IdtEntry; IDT_ENTRY_COUNT],
 }
@@ -152,6 +253,14 @@ pub fn register_raw(vector: u8, handler_addr: usize) {
         idt.entries[vector as usize].set_handler_addr(handler_addr);
     }
 }
+
+#[inline(always)]
+pub fn load_null_idt() {
+    let raw: [u8; 10] = [0; 10];
+    unsafe {
+        asm!("lidt [{}]", in(reg) raw.as_ptr(), options(readonly, nostack, preserves_flags));
+    }
+}
 pub fn load() {
     unsafe {
         let idt = &*IDT.get();
@@ -186,23 +295,82 @@ pub fn init() {
 
     load();
 }
+
+pub fn set_page_fault_handler(handler: PageFaultHandler) {
+    unsafe {
+        *PAGE_FAULT_HANDLER.get() = Some(handler);
+    }
+}
+
+pub fn set_invalid_opcode_handler(handler: InvalidOpcodeHandler) {
+    unsafe {
+        *INVALID_OPCODE_HANDLER.get() = Some(handler);
+    }
+}
+
+pub fn set_general_protection_handler(handler: GeneralProtectionHandler) {
+    unsafe {
+        *GENERAL_PROTECTION_HANDLER.get() = Some(handler);
+    }
+}
+
+pub fn set_user_fault_abort_handler(handler: UserFaultAbortHandler) {
+    unsafe {
+        *USER_FAULT_ABORT_HANDLER.get() = Some(handler);
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn saios_user_fault_abort() -> ! {
+    let handler = unsafe { *USER_FAULT_ABORT_HANDLER.get() };
+    if let Some(h) = handler {
+        h();
+    }
+
+    loop {
+        crate::arch::x86_64::cpu::hlt();
+    }
+}
 #[unsafe(no_mangle)]
 extern "C" fn divide_error() -> ! {
+    crate::arch::x86_64::console::_print_force(format_args!("[fault] #DE\n"));
     panic!("Divide Error");
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn breakpoint() -> ! {
+    crate::arch::x86_64::console::_print_force(format_args!("[fault] #BP\n"));
     panic!("Breakpoint");
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn invalid_opcode() -> ! {
+extern "C" fn invalid_opcode(stack_ptr: usize) -> usize {
+    let saved_rip = unsafe { *(stack_ptr as *const usize) };
+    let cr3 = crate::arch::x86_64::paging::read_cr3();
+    crate::arch::x86_64::console::_print_force(format_args!("[fault] #UD sp={:#x}\n", stack_ptr));
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[fault] #UD rip={:#x} cr3={:#x}\n",
+        saved_rip,
+        cr3
+    ));
+    let handled = unsafe {
+        (*INVALID_OPCODE_HANDLER.get())
+            .map(|h| h(stack_ptr))
+            .unwrap_or(false)
+    };
+    if handled {
+        return 1;
+    }
+
     panic!("Invalid Opcode");
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn double_fault(error_code: usize) -> ! {
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[fault] #DF err={:#x}\n",
+        error_code
+    ));
     panic!(
         "Double Fault (error={:#x}, reason={})",
         error_code,
@@ -215,7 +383,30 @@ extern "C" fn double_fault(error_code: usize) -> ! {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn general_protection(error_code: usize) -> ! {
+extern "C" fn general_protection(error_code: usize, stack_ptr: usize) -> usize {
+    let saved_rip = unsafe { *((stack_ptr as *const usize).add(1)) };
+    let saved_rsp = unsafe { *((stack_ptr as *const usize).add(4)) };
+    let cr3 = crate::arch::x86_64::paging::read_cr3();
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[fault] #GP err={:#x} sp={:#x}\n",
+        error_code,
+        stack_ptr
+    ));
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[fault] #GP rip={:#x} rsp={:#x} cr3={:#x}\n",
+        saved_rip,
+        saved_rsp,
+        cr3
+    ));
+    let handled = unsafe {
+        (*GENERAL_PROTECTION_HANDLER.get())
+            .map(|h| h(error_code, stack_ptr))
+            .unwrap_or(false)
+    };
+    if handled {
+        return 1;
+    }
+
     let ext = (error_code & 0x1) != 0;
     let idt = (error_code & 0x2) != 0;
     let ti = (error_code & 0x4) != 0;
@@ -231,8 +422,23 @@ extern "C" fn general_protection(error_code: usize) -> ! {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn page_fault(error_code: usize) -> ! {
+extern "C" fn page_fault(error_code: usize, stack_ptr: usize) -> usize {
     let fault_addr = crate::arch::x86_64::cpu::read_cr2();
+    let saved_rip = unsafe { *((stack_ptr as *const usize).add(1)) };
+    let saved_rsp = unsafe { *((stack_ptr as *const usize).add(4)) };
+    let cr3 = crate::arch::x86_64::paging::read_cr3();
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[fault] #PF err={:#x} cr2={:#x} sp={:#x}\n",
+        error_code,
+        fault_addr,
+        stack_ptr
+    ));
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[fault] #PF rip={:#x} rsp={:#x} cr3={:#x}\n",
+        saved_rip,
+        saved_rsp,
+        cr3
+    ));
     let present = (error_code & (1 << 0)) != 0;
     let write = (error_code & (1 << 1)) != 0;
     let user = (error_code & (1 << 2)) != 0;
@@ -241,6 +447,16 @@ extern "C" fn page_fault(error_code: usize) -> ! {
     let protection_key = (error_code & (1 << 5)) != 0;
     let shadow_stack = (error_code & (1 << 6)) != 0;
     let sgx = (error_code & (1 << 15)) != 0;
+
+    let handled = unsafe {
+        (*PAGE_FAULT_HANDLER.get())
+            .map(|h| h(fault_addr as usize, error_code, stack_ptr))
+            .unwrap_or(false)
+    };
+    if handled {
+        return 1;
+    }
+
     panic!(
         "Page Fault (error={:#x}, cr2={:#x}, present={}, write={}, user={}, rsvd={}, ifetch={}, pkey={}, sstk={}, sgx={})",
         error_code,

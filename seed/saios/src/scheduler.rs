@@ -9,7 +9,6 @@ use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::x86_64::interrupt;
@@ -177,30 +176,6 @@ impl Scheduler {
 static SCHEDULER: StaticCell<Option<Scheduler>> = StaticCell::new(None);
 static USER_SESSION_STARTED: AtomicBool = AtomicBool::new(false);
 
-global_asm!(
-    ".global saios_context_switch",
-    "saios_context_switch:",
-    "mov [rdi + 0x00], rsp",
-    "mov [rdi + 0x08], rbx",
-    "mov [rdi + 0x10], rbp",
-    "mov [rdi + 0x18], r12",
-    "mov [rdi + 0x20], r13",
-    "mov [rdi + 0x28], r14",
-    "mov [rdi + 0x30], r15",
-    "mov rsp, [rsi + 0x00]",
-    "mov rbx, [rsi + 0x08]",
-    "mov rbp, [rsi + 0x10]",
-    "mov r12, [rsi + 0x18]",
-    "mov r13, [rsi + 0x20]",
-    "mov r14, [rsi + 0x28]",
-    "mov r15, [rsi + 0x30]",
-    "ret",
-);
-
-unsafe extern "C" {
-    fn saios_context_switch(old: *mut CpuContext, new: *const CpuContext);
-}
-
 fn scheduler_mut() -> Option<&'static mut Scheduler> {
     unsafe { (&mut *SCHEDULER.get()).as_mut() }
 }
@@ -292,7 +267,10 @@ fn do_schedule() {
     let new_ctx = &scheduler.threads[next_idx].thread.context as *const CpuContext;
 
     unsafe {
-        saios_context_switch(old_ctx, new_ctx);
+        hal::arch::x86_64::seed_support::context_switch(
+            old_ctx.cast::<u8>(),
+            new_ctx.cast::<u8>(),
+        );
     }
 }
 

@@ -10,7 +10,7 @@ use crate::saifs;
 use crate::shell;
 
 const DEFAULT_INIT_SCRIPT: &str = "/system/init";
-const DEFAULT_LOGIN_SHELL: &str = "snsh";
+const DEFAULT_LOGIN_SHELL: &str = "busybox";
 const DEFAULT_ROOT_USER: &str = "root";
 const DEFAULT_ROOT_PASSWORD: &str = "root";
 
@@ -249,6 +249,14 @@ fn authenticate(state: &RuntimeState, username: &str, password: &str) -> bool {
         .any(|a| a.username == username && a.password == password)
 }
 
+fn login_shell_args(shell: &str) -> &'static [&'static str] {
+    if shell.eq_ignore_ascii_case("busybox") {
+        &["sh"]
+    } else {
+        &[]
+    }
+}
+
 fn prompt_line(prompt: &str) -> String {
     console::set_input_prompt(prompt);
     console::print(prompt);
@@ -295,7 +303,13 @@ pub fn boot_to_login_shell() -> ! {
         );
     }
 
-    shell::run_init_script(state.config.init_script.as_str());
+    if let Err(e) = shell::run_init_script(state.config.init_script.as_str()) {
+        console::println!("init: script failed: {}", e);
+        console::println!("init: entering emergency shell");
+        ensure_user_home_files("/root");
+        let _ = crate::saifs::cd("/root");
+        shell::run_shell_session(state.config.root_user.as_str(), None);
+    }
 
     console::println!("init: ready (hostname={})", state.config.hostname);
 
@@ -324,5 +338,20 @@ pub fn boot_to_login_shell() -> ! {
     let _ = process::create_session(shell_pid);
     let _ = process::set_foreground_process_group(shell_pid);
 
-    shell::run_shell_session(username.as_str(), Some(state.config.init_script.as_str()));
+    let shell_name = state.config.login_shell.as_str();
+    let shell_args = login_shell_args(shell_name);
+    match process::exec_from(Some(shell_pid), shell_name, shell_args, &[]) {
+        Ok(code) => {
+            console::println!("session: shell exited code={}", code);
+        }
+        Err(e) => {
+            console::println!(
+                "session: ring3 shell '{}' failed: {} (fallback to kernel SNSH)",
+                shell_name,
+                e
+            );
+        }
+    }
+
+    shell::run_shell_session(username.as_str(), None);
 }

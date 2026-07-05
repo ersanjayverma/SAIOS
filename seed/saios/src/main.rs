@@ -34,10 +34,7 @@ pub mod taskman;
 pub mod timer;
 pub mod vfs;
 pub mod vmm;
-use core::{
-    arch::{asm, global_asm},
-    mem::size_of,
-};
+use core::mem::size_of;
 use efi_main::SaiosBootInfo;
 use hal::arch::x86_64::{gdt, idt, interrupt, paging};
 use seed::Seed;
@@ -47,25 +44,9 @@ unsafe extern "C" {
     static _kernel_end: u8;
 }
 
-global_asm!(
-    ".section .text.boot, \"ax\"",
-    ".global _start",
-    "_start:",
-    "cli",
-    "cld",
-    "mov dx, 0x3f8",
-    "mov al, 'K'",
-    "out dx, al",
-    "and rsp, -16",
-    "call saios_kernel_main",
-    "2:",
-    "hlt",
-    "jmp 2b",
-);
-
 const FALLBACK_IDENTITY_HEAP_MAX_PHYS: u64 = 0x0400_0000;
 const LATE_CR3_MIN_SWITCH_PHYS: u64 = 0x0010_0000;
-const EARLY_CR3_SWITCH_ENABLED: bool = true;
+const EARLY_CR3_SWITCH_ENABLED: bool = false;
 
 fn detect_nx_page_protection_policy() -> bool {
     let features = hal::arch::x86_64::cpuid::features();
@@ -77,50 +58,22 @@ fn detect_nx_page_protection_policy() -> bool {
     features.nx && efer_nxe
 }
 
-#[derive(Copy, Clone)]
-struct DescriptorTablePtr {
-    limit: u16,
-    base: u64,
-}
+type DescriptorTablePtr = hal::arch::x86_64::cpu::DescriptorTablePtr;
 
 fn read_rsp() -> u64 {
-    let rsp: u64;
-    unsafe {
-        asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
-    }
-    rsp
+    hal::arch::x86_64::cpu::read_rsp()
 }
 
 fn read_rip() -> u64 {
-    let rip: u64;
-    unsafe {
-        asm!("lea {}, [rip]", out(reg) rip, options(nostack, preserves_flags));
-    }
-    rip
+    hal::arch::x86_64::cpu::read_rip()
 }
 
 fn read_idt_ptr() -> DescriptorTablePtr {
-    let mut raw = [0u8; 10];
-    unsafe {
-        asm!("sidt [{}]", in(reg) raw.as_mut_ptr(), options(nostack, preserves_flags));
-    }
-    let limit = u16::from_le_bytes([raw[0], raw[1]]);
-    let base = u64::from_le_bytes([
-        raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9],
-    ]);
-    DescriptorTablePtr { limit, base }
+    hal::arch::x86_64::cpu::read_idt_ptr()
 }
 
 fn read_gdt_ptr() -> DescriptorTablePtr {
-    let mut raw = [0u8; 10];
-    unsafe {
-        asm!("sgdt [{}]", in(reg) raw.as_mut_ptr(), options(nostack, preserves_flags));
-    }
-    let limit = u16::from_le_bytes([raw[0], raw[1]]);
-    let base = u64::from_le_bytes([
-        raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9],
-    ]);
-    DescriptorTablePtr { limit, base }
+    hal::arch::x86_64::cpu::read_gdt_ptr()
 }
 
 #[inline(never)]
@@ -132,7 +85,7 @@ fn late_cr3_smoke_test() {
         let marker = core::ptr::read_volatile(marker_ptr);
         stack_word ^= marker as u64;
         core::ptr::write_volatile(&mut stack_word as *mut u64, stack_word.rotate_left(7));
-        asm!("", in("rax") stack_word, options(nomem, nostack, preserves_flags));
+        core::hint::black_box(stack_word);
     }
 }
 
@@ -147,6 +100,7 @@ static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
 /// with interrupts in a defined state.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> ! {
+    hal::arch::x86_64::seed_support::ensure_linked();
     let boot_info = unsafe { &*boot_info };
     let framebuffer_info = boot_info.framebuffer;
 
@@ -157,6 +111,12 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
 
     gdt::init();
     idt::init();
+    if let Err(e) = hal::arch::x86_64::syscall::init() {
+        hal::arch::x86_64::console::_print(format_args!(
+            "kernel: syscall init failed: {}\n",
+            e
+        ));
+    }
     kernel::fault::init();
 
     // Convert the raw pointer and count into a temporary Rust slice
@@ -165,13 +125,21 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
     };
     pmm::init(_entries_slice);
 
-    let kernel_start = unsafe { &_kernel_start as *const u8 as u64 };
-    let kernel_end = unsafe { &_kernel_end as *const u8 as u64 };
+    let kernel_vma_start = unsafe { &_kernel_start as *const u8 as u64 };
+    let kernel_vma_end = unsafe { &_kernel_end as *const u8 as u64 };
+    // Physical kernel image starts at the boot trampoline (KERNEL_PHYS_BASE)
+    // and ends where the higher-half sections end (kernel_vma_end - offset).
+    const KERNEL_PHYS_BASE: u64 = 0x100000;
+    let kernel_start = KERNEL_PHYS_BASE;
+    let kernel_end = kernel_vma_end.saturating_sub(vmm::KERNEL_IMAGE_MIRROR_BASE);
     let boot_info_ptr = boot_info as *const SaiosBootInfo as u64;
     let boot_info_size = size_of::<SaiosBootInfo>();
 
     let nx_enabled = detect_nx_page_protection_policy();
     vmm::set_nx_page_protection_enabled(nx_enabled);
+    // Track the kernel image using its higher-half VMA range so user-space
+    // ELF overlap checks compare against where the kernel actually executes.
+    vmm::set_kernel_image_range(kernel_vma_start, kernel_vma_end);
 
     let (prepared_kernel_pml4, mut active_cr3, mut vmm_bootstrap_ok) =
         match vmm::bootstrap_kernel_page_tables(
@@ -360,11 +328,22 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
         console::attach_framebuffer_direct(framebuffer_info);
     }
 
+    // Higher-half bring-up can still have edge cases in the dynamic mapping
+    // path. If mapped attach did not become visible, retry with direct GOP
+    // pointer path (works while low-memory identity window is active).
+    if !console::framebuffer_attached() {
+        console::attach_framebuffer_direct(framebuffer_info);
+    }
+
     driver::console::init();
     console::set_serial_logging(true);
     kernel::timeline::mark("Heap");
 
-    let fb_ready = console::promote_framebuffer_renderer();
+    let mut fb_ready = console::promote_framebuffer_renderer();
+    if !fb_ready {
+        console::attach_framebuffer_direct(framebuffer_info);
+        fb_ready = console::promote_framebuffer_renderer();
+    }
     if fb_ready {
         console::println!("SAIOS kernel framebuffer online");
         console::println!("Starting kernel services...");
@@ -375,29 +354,12 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
 
     // Initialize ACPI subsystem
     if boot_info.acpi.rsdp != 0 {
-        if !vmm_bootstrap_ok {
-            console::println!("kernel: ACPI init running in fallback mode");
-        }
         match kernel::acpi::init(boot_info.acpi.rsdp) {
             Ok(()) => {
-                if let Some(acpi_mgr) = kernel::acpi::get_manager()
-                    && let Ok((oem_id, revision)) = acpi_mgr.oem_info()
-                {
-                    console::println!(
-                        "kernel: ACPI v{} initialized, OEM={}, processors={}",
-                        revision,
-                        oem_id,
-                        acpi_mgr.processor_count()
-                    );
-                    kernel::timeline::mark("ACPI");
-                }
+                kernel::timeline::mark("ACPI");
             }
-            Err(e) => {
-                console::println!("kernel: ACPI init failed: {}", e);
-            }
+            Err(_e) => {}
         }
-    } else {
-        console::println!("kernel: ACPI init skipped (no RSDP)");
     }
 
     interrupt::enable();

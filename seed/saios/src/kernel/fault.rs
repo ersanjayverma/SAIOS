@@ -5,6 +5,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use hal::arch::paging;
 use hal::arch::x86_64::sync::StaticCell;
 
 const PAGE_FAULT_USER_BIT: usize = 1 << 2;
@@ -26,6 +27,8 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static HAS_POLICY: AtomicBool = AtomicBool::new(false);
 static LAST_FAULT: StaticCell<Option<FaultSnapshot>> = StaticCell::new(None);
 static LAST_FAULT_LOCK: AtomicBool = AtomicBool::new(false);
+static ACTIVE_EXEC_PID: StaticCell<Option<u64>> = StaticCell::new(None);
+static ACTIVE_EXEC_FAULTED: AtomicBool = AtomicBool::new(false);
 
 fn lock() {
     while LAST_FAULT_LOCK
@@ -46,6 +49,10 @@ pub fn init() {
     }
 
     HAS_POLICY.store(true, Ordering::Release);
+    hal::arch::x86_64::idt::set_invalid_opcode_handler(handle_invalid_opcode);
+    hal::arch::x86_64::idt::set_general_protection_handler(handle_general_protection);
+    hal::arch::x86_64::idt::set_page_fault_handler(handle_page_fault);
+    hal::arch::x86_64::idt::set_user_fault_abort_handler(abort_active_exec);
 }
 
 pub fn domain_from_page_fault_error(error_code: usize) -> FaultDomain {
@@ -81,4 +88,97 @@ pub fn last_fault() -> Option<FaultSnapshot> {
 
 pub fn policy_ready() -> bool {
     INITIALIZED.load(Ordering::Acquire) && HAS_POLICY.load(Ordering::Acquire)
+}
+
+pub fn begin_user_exec(pid: u64) {
+    lock();
+    unsafe {
+        *ACTIVE_EXEC_PID.get() = Some(pid);
+    }
+    ACTIVE_EXEC_FAULTED.store(false, Ordering::Release);
+    unlock();
+}
+
+pub fn end_user_exec() {
+    lock();
+    unsafe {
+        *ACTIVE_EXEC_PID.get() = None;
+    }
+    unlock();
+}
+
+pub fn active_exec_pid() -> Option<u64> {
+    lock();
+    let pid = unsafe { *ACTIVE_EXEC_PID.get() };
+    unlock();
+    pid
+}
+
+pub fn mark_active_exec_faulted() {
+    ACTIVE_EXEC_FAULTED.store(true, Ordering::Release);
+}
+
+pub fn take_active_exec_faulted() -> bool {
+    ACTIVE_EXEC_FAULTED.swap(false, Ordering::AcqRel)
+}
+
+fn handle_page_fault(fault_addr: usize, error_code: usize, stack_ptr: usize) -> bool {
+    record_page_fault(fault_addr, error_code);
+
+    if active_exec_pid().is_none() {
+        return false;
+    }
+
+    let _ = stack_ptr;
+
+    mark_active_exec_faulted();
+    true
+}
+
+fn handle_invalid_opcode(stack_ptr: usize) -> bool {
+    if active_exec_pid().is_none() {
+        return false;
+    }
+
+    let _ = stack_ptr;
+    mark_active_exec_faulted();
+    true
+}
+
+fn handle_general_protection(_error_code: usize, stack_ptr: usize) -> bool {
+    if active_exec_pid().is_none() {
+        return false;
+    }
+
+    let _ = stack_ptr;
+    mark_active_exec_faulted();
+    true
+}
+
+pub extern "C" fn abort_active_exec() -> ! {
+    const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+    let pid = active_exec_pid();
+    mark_active_exec_faulted();
+
+    // Fault recovery runs while the isolated process CR3 is still active.
+    // Switch back to the kernel root before touching process/scheduler state.
+    let kernel_cr3 = crate::vmm::stats().cr3 & ADDR_MASK;
+    let current_cr3 = paging::read_cr3() & ADDR_MASK;
+    if kernel_cr3 != 0 && kernel_cr3 != current_cr3 {
+        unsafe {
+            paging::write_cr3(kernel_cr3);
+        }
+    }
+
+    end_user_exec();
+
+    if let Some(pid) = pid {
+        let _ = crate::kernel::process::kill(pid);
+    }
+
+    loop {
+        crate::scheduler::yield_now();
+        hal::arch::x86_64::cpu::hlt();
+    }
 }

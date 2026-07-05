@@ -715,11 +715,19 @@ pub fn spawn_from(
     );
 
     let run = if metadata.load_segments > 0 {
-        crate::kernel::elf_loader::load_and_run(resolved.as_str(), image_base)
+        crate::kernel::elf_loader::load_and_run(resolved.as_str(), image_base, pid)
     } else {
         programs::execute_path(resolved.as_str(), program_name, args, env)
     };
-    let exit_code = run.unwrap_or(127);
+
+    let mut run_error: Option<&'static str> = None;
+    let exit_code = match run {
+        Ok(code) => code,
+        Err(e) => {
+            run_error = Some(e);
+            127
+        }
+    };
 
     with_manager_mut(|m| {
         let _ = m.set_running(pid);
@@ -730,6 +738,15 @@ pub fn spawn_from(
         "process",
         alloc::format!("pid={} exit={}", pid, exit_code).as_str(),
     );
+
+    if let Some(e) = run_error {
+        event::publish(
+            EventKind::ProcessStopped,
+            "process",
+            alloc::format!("pid={} exec-failed {}", pid, e).as_str(),
+        );
+        return Err(e);
+    }
 
     Ok(pid)
 }

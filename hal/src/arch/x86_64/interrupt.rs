@@ -56,3 +56,10 @@ pub fn int3() {
         asm!("int3", options(nomem, nostack));
     }
 }
+
+#[inline(always)]
+pub fn int0() {
+    unsafe {
+        asm!("int 0", options(nomem, nostack));
+    }
+}

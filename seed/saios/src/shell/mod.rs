@@ -155,10 +155,10 @@ pub fn program_main() {
     run_shell_session("root", Some("/system/init"));
 }
 
-pub fn run_init_script(path: &str) {
+pub fn run_init_script(path: &str) -> Result<(), &'static str> {
     let mut engine = engine::ShellEngine::new();
     let line = alloc::format!("source {}", path);
-    let _ = engine.execute_line(line.as_str());
+    engine.execute_line(line.as_str())
 }
 
 pub fn run_shell_session(user: &str, init_script: Option<&str>) -> ! {
