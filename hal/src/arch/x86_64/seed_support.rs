@@ -115,27 +115,44 @@ global_asm!(
     "mov r15, [rsi + 0x30]",
     "ret",
 
-    // PIT IRQ0 raw stub.
+    // PIT IRQ0 interrupt trampoline.
     ".global hal_timer_irq0_stub",
     "hal_timer_irq0_stub:",
     "push rax",
+    "push rbx",
     "push rcx",
     "push rdx",
+    "push rbp",
     "push rsi",
     "push rdi",
     "push r8",
     "push r9",
     "push r10",
     "push r11",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    // Rust assumes DF=0 and a SysV-aligned stack at call boundaries.
+    "cld",
+    "mov rbp, rsp",
+    "and rsp, -16",
     "call saios_timer_tick",
+    "mov rsp, rbp",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
     "pop r11",
     "pop r10",
     "pop r9",
     "pop r8",
     "pop rdi",
     "pop rsi",
+    "pop rbp",
     "pop rdx",
     "pop rcx",
+    "pop rbx",
     "pop rax",
     "iretq",
 );
@@ -191,6 +208,26 @@ pub unsafe fn enter_user_mode(entry: u64, user_rsp: u64) -> ! {
 
     let user_cs = crate::arch::x86_64::gdt::USER_CODE.0 as u64;
     let user_ss = crate::arch::x86_64::gdt::USER_DATA.0 as u64;
+    let gdt = crate::arch::x86_64::cpu::read_gdt_ptr();
+    let idt = crate::arch::x86_64::cpu::read_idt_ptr();
+    let rsp0 = crate::arch::x86_64::tss::rsp0();
+
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[user-jump] rip={:#x} rsp={:#x} rflags={:#x} cs={:#x} ss={:#x} rsp0={:#x}\n",
+        entry,
+        user_rsp,
+        rflags,
+        user_cs,
+        user_ss,
+        rsp0
+    ));
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[user-jump] gdt=({:#x},limit={:#x}) idt=({:#x},limit={:#x})\n",
+        gdt.base,
+        gdt.limit,
+        idt.base,
+        idt.limit
+    ));
 
     unsafe {
         core::arch::asm!(
@@ -199,14 +236,17 @@ pub unsafe fn enter_user_mode(entry: u64, user_rsp: u64) -> ! {
             "push rcx", // RFLAGS
             "push r8",  // CS
             "push rdi", // RIP
+            "push rax",
+            "mov dx, 0x3f8",
+            "mov al, 'J'",
+            "out dx, al",
+            "pop rax",
             // Linux-style process entry expects rdx=0 (rtld_fini for static
             // binaries). iretq does not consume general registers, so clear
-            // the user-visible register state after building the frame.
+            // the user-visible state after building the frame and avoid
+            // touching those registers again before the privilege transition.
+            "xor eax, eax",
             "xor edx, edx",
-            // Raw ring0 marker just before iretq: confirms frame was built.
-            "mov dx, 0x3f8",
-            "mov al, 'U'",
-            "out dx, al",
             "iretq",
             in("rdi") entry,
             in("rsi") user_rsp,

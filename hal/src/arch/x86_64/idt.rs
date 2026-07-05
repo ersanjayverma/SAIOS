@@ -96,6 +96,105 @@ global_asm!(
     "2:",
     "hlt",
     "jmp 2b",
+    ".global saios_invalid_tss_stub",
+    "saios_invalid_tss_stub:",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "mov edi, 10",
+    "mov rsi, [rsp + 64]",
+    "lea rdx, [rsp + 64]",
+    "call selector_fault",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "test rax, rax",
+    "jnz 3f",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    "3:",
+    "add rsp, 8",
+    "call saios_user_fault_abort",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    ".global saios_segment_not_present_stub",
+    "saios_segment_not_present_stub:",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "mov edi, 11",
+    "mov rsi, [rsp + 64]",
+    "lea rdx, [rsp + 64]",
+    "call selector_fault",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "test rax, rax",
+    "jnz 3f",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    "3:",
+    "add rsp, 8",
+    "call saios_user_fault_abort",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    ".global saios_stack_segment_stub",
+    "saios_stack_segment_stub:",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "mov edi, 12",
+    "mov rsi, [rsp + 64]",
+    "lea rdx, [rsp + 64]",
+    "call selector_fault",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "test rax, rax",
+    "jnz 3f",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    "3:",
+    "add rsp, 8",
+    "call saios_user_fault_abort",
+    "2:",
+    "hlt",
+    "jmp 2b",
     ".global saios_general_protection_stub",
     "saios_general_protection_stub:",
     "push rcx",
@@ -169,6 +268,9 @@ unsafe extern "C" {
     fn saios_breakpoint_stub();
     fn saios_invalid_opcode_stub();
     fn saios_double_fault_stub();
+    fn saios_invalid_tss_stub();
+    fn saios_segment_not_present_stub();
+    fn saios_stack_segment_stub();
     fn saios_general_protection_stub();
     fn saios_page_fault_stub();
 }
@@ -290,6 +392,12 @@ pub fn init() {
     register_raw(3, saios_breakpoint_stub as *const () as usize);
     register_raw(6, saios_invalid_opcode_stub as *const () as usize);
     register_raw(8, saios_double_fault_stub as *const () as usize);
+    // Task-switch, segment-not-present, and stack-segment faults commonly
+    // surface during CPL3 entry via iretq and use the same error-code frame
+    // shape as #GP, so route them through the same logging/recovery path.
+    register_raw(10, saios_invalid_tss_stub as *const () as usize);
+    register_raw(11, saios_segment_not_present_stub as *const () as usize);
+    register_raw(12, saios_stack_segment_stub as *const () as usize);
     register_raw(13, saios_general_protection_stub as *const () as usize);
     register_raw(14, saios_page_fault_stub as *const () as usize);
 
@@ -413,6 +521,55 @@ extern "C" fn general_protection(error_code: usize, stack_ptr: usize) -> usize {
     let selector_index = (error_code >> 3) & 0x1FFF;
     panic!(
         "General Protection Fault (error={:#x}, ext={}, idt={}, table={}, selector_index={})",
+        error_code,
+        ext,
+        idt,
+        if ti { "ldt" } else { "gdt" },
+        selector_index
+    );
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn selector_fault(vector: usize, error_code: usize, stack_ptr: usize) -> usize {
+    let saved_rip = unsafe { *((stack_ptr as *const usize).add(1)) };
+    let saved_rsp = unsafe { *((stack_ptr as *const usize).add(4)) };
+    let cr3 = crate::arch::x86_64::paging::read_cr3();
+    let name = match vector {
+        10 => "#TS",
+        11 => "#NP",
+        12 => "#SS",
+        _ => "#SEL",
+    };
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[fault] {} err={:#x} sp={:#x}\n",
+        name,
+        error_code,
+        stack_ptr
+    ));
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[fault] {} rip={:#x} rsp={:#x} cr3={:#x}\n",
+        name,
+        saved_rip,
+        saved_rsp,
+        cr3
+    ));
+
+    let handled = unsafe {
+        (*GENERAL_PROTECTION_HANDLER.get())
+            .map(|h| h(error_code, stack_ptr))
+            .unwrap_or(false)
+    };
+    if handled {
+        return 1;
+    }
+
+    let ext = (error_code & 0x1) != 0;
+    let idt = (error_code & 0x2) != 0;
+    let ti = (error_code & 0x4) != 0;
+    let selector_index = (error_code >> 3) & 0x1FFF;
+    panic!(
+        "{} (error={:#x}, ext={}, idt={}, table={}, selector_index={})",
+        name,
         error_code,
         ext,
         idt,

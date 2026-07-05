@@ -1,8 +1,9 @@
 //! Programmable Interval Timer (PIT) based kernel timer.
 //!
 //! Configures the legacy 8259 PIC and PIT channel 0 to deliver 100 Hz timer
-//! interrupts on IRQ0. The interrupt stub saves scratch registers, calls
-//! [`saios_timer_tick`] and acknowledges the interrupt with an EOI.
+//! interrupts on IRQ0. The interrupt trampoline preserves full CPU register
+//! state, calls [`saios_timer_tick`], and the handler acknowledges the
+//! interrupt with an EOI.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
