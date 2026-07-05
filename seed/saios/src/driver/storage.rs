@@ -1428,7 +1428,13 @@ fn ext4_read_inode_data(
     let total_blocks = (inode.size.saturating_add(sb.block_size - 1) / sb.block_size) as u32;
     for lb in 0..total_blocks {
         let Some(pb) = ext4_resolve_file_block(disk, part, sb, inode, lb)? else {
-            break;
+            // Sparse regions are valid in ext4. Keep logical offsets aligned by
+            // appending a zero-filled block instead of terminating the read.
+            out.resize(out.len().saturating_add(sb.block_size as usize), 0);
+            if out.len() >= inode.size as usize {
+                break;
+            }
+            continue;
         };
         let block = ext4_read_block(disk, part, sb, pb)?;
         out.extend_from_slice(block.as_slice());
