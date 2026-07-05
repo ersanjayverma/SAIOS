@@ -1,3 +1,4 @@
+mod cat;
 mod command;
 mod commands;
 mod compatibility;

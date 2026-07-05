@@ -11,6 +11,7 @@ use crate::kernel::process;
 use crate::kernel::telemetry;
 use crate::saifs;
 use crate::saifs::Handle;
+use crate::shell::cat;
 use crate::timer;
 use crate::vfs;
 use alloc::format;
@@ -199,37 +200,11 @@ fn ls_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
 
 fn cat_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {
     let path = resolve_relative_path(args.first().copied().ok_or("cat: missing path")?);
-    let fd =
-        vfs::open(path.as_str(), vfs::OpenOptions::read_only()).map_err(|_| "cat: open failed")?;
-    let read_result = vfs::read(fd, usize::MAX);
-    let close_result = vfs::close(fd);
-    let data = read_result.map_err(|_| "cat: read failed")?;
-    close_result.map_err(|_| "cat: close failed")?;
-    let text = String::from_utf8_lossy(&data);
-    let rendered = sanitize_for_terminal(text.as_ref());
+    let rendered = cat::read_rendered(path.as_str()).map_err(cat::map_read_error)?;
     if !rendered.is_empty() {
         console::println!("{}", rendered);
     }
     Ok(0)
-}
-
-fn sanitize_for_terminal(input: &str) -> String {
-    let mut out = String::new();
-    for ch in input.chars() {
-        match ch {
-            '\n' | '\t' => out.push(ch),
-            '\r' => out.push('\n'),
-            c if c.is_control() => {
-                if (c as u32) <= 0xFF {
-                    out.push_str(format!("\\x{:02x}", c as u32).as_str());
-                } else {
-                    out.push_str(format!("\\u{{{:x}}}", c as u32).as_str());
-                }
-            }
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 fn mkdir_program(args: &[&str], _env: &[(String, String)]) -> ProgramResult {

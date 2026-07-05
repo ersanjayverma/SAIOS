@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use crate::console;
 use crate::saifs;
+use crate::shell::cat;
 use crate::shell::command::{ShellResult, StaticCommand};
 use crate::shell::registry::CommandRegistry;
 use crate::shell::session::CommandContext;
@@ -257,36 +258,11 @@ fn cmd_cat(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     let path = resolve_relative_path(positionals[0]);
-    let data = vfs::read_path(path.as_str()).map_err(|e| match e {
-        "path not found" => "cat: path not found",
-        "not a file" => "cat: not a file",
-        _ => "cat failed",
-    })?;
-    let text = String::from_utf8_lossy(data.as_slice());
-    let rendered = sanitize_for_terminal(text.as_ref());
+    let rendered = cat::read_rendered(path.as_str()).map_err(cat::map_read_error)?;
     if !rendered.is_empty() {
         console::println!("{}", rendered);
     }
     Ok(())
-}
-
-fn sanitize_for_terminal(input: &str) -> String {
-    let mut out = String::new();
-    for ch in input.chars() {
-        match ch {
-            '\n' | '\t' => out.push(ch),
-            '\r' => out.push('\n'),
-            c if c.is_control() => {
-                if (c as u32) <= 0xFF {
-                    out.push_str(format!("\\x{:02x}", c as u32).as_str());
-                } else {
-                    out.push_str(format!("\\u{{{:x}}}", c as u32).as_str());
-                }
-            }
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 fn cmd_rm(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
