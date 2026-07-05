@@ -4,9 +4,12 @@
 //! on the VFS, process manager and timer. Unsupported or unimplemented
 //! syscalls return negative error codes compatible with POSIX errno values.
 
+use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::mem::size_of;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
@@ -250,6 +253,1589 @@ impl SyscallNumber {
     }
 }
 
+const LINUX_ENOSYS: i64 = -38;
+const LINUX_EBADF: i64 = -9;
+const LINUX_EEXIST: i64 = -17;
+const LINUX_ENOTDIR: i64 = -20;
+const LINUX_EISDIR: i64 = -21;
+const LINUX_EINVAL: i64 = -22;
+const LINUX_EFAULT: i64 = -14;
+const LINUX_ENOENT: i64 = -2;
+
+const O_ACCMODE: u64 = 0o3;
+const O_WRONLY: u64 = 0o1;
+const O_RDWR: u64 = 0o2;
+const O_CREAT: u64 = 0o100;
+const O_TRUNC: u64 = 0o1000;
+const O_APPEND: u64 = 0o2000;
+const O_NONBLOCK: u64 = 0o4000;
+
+const AT_FDCWD: i64 = -100;
+const AT_EMPTY_PATH: u64 = 0x1000;
+const S_IFMT: u32 = 0o170000;
+const S_IFDIR: u32 = 0o040000;
+
+const F_DUPFD: u64 = 0;
+const F_GETFD: u64 = 1;
+const F_SETFD: u64 = 2;
+const F_GETFL: u64 = 3;
+const F_SETFL: u64 = 4;
+const F_DUPFD_CLOEXEC: u64 = 1030;
+
+const ARCH_SET_FS: u64 = 0x1002;
+const ARCH_GET_FS: u64 = 0x1003;
+const IA32_FS_BASE: u32 = 0xC000_0100;
+
+const SEEK_SET: u64 = 0;
+const DT_DIR: u8 = 4;
+const DT_REG: u8 = 8;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LinuxIovec {
+    base: u64,
+    len: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LinuxPollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LinuxTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LinuxTimeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LinuxTms {
+    tms_utime: i64,
+    tms_stime: i64,
+    tms_cutime: i64,
+    tms_cstime: i64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LinuxRlimit {
+    rlim_cur: u64,
+    rlim_max: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LinuxUtsname {
+    sysname: [u8; 65],
+    nodename: [u8; 65],
+    release: [u8; 65],
+    version: [u8; 65],
+    machine: [u8; 65],
+    domainname: [u8; 65],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LinuxStat {
+    st_dev: u64,
+    st_ino: u64,
+    st_nlink: u64,
+    st_mode: u32,
+    st_uid: u32,
+    st_gid: u32,
+    __pad0: u32,
+    st_rdev: u64,
+    st_size: i64,
+    st_blksize: i64,
+    st_blocks: i64,
+    st_atime: i64,
+    st_atime_nsec: i64,
+    st_mtime: i64,
+    st_mtime_nsec: i64,
+    st_ctime: i64,
+    st_ctime_nsec: i64,
+    __reserved: [i64; 3],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LinuxSysinfo {
+    uptime: i64,
+    loads: [u64; 3],
+    totalram: u64,
+    freeram: u64,
+    sharedram: u64,
+    bufferram: u64,
+    totalswap: u64,
+    freeswap: u64,
+    procs: u16,
+    pad: u16,
+    totalhigh: u64,
+    freehigh: u64,
+    mem_unit: u32,
+    _f: [u8; 0],
+}
+
+fn linux_errno(err: SyscallError) -> i64 {
+    match err {
+        SyscallError::Unimplemented | SyscallError::InvalidNumber => LINUX_ENOSYS,
+        _ => err.code(),
+    }
+}
+
+static UMASK: AtomicU32 = AtomicU32::new(0o022);
+
+fn linux_ctx(pid: u64) -> SyscallContext {
+    SyscallContext { pid }
+}
+
+fn active_linux_pid() -> Result<u64, i64> {
+    crate::kernel::fault::active_exec_pid().ok_or(LINUX_EINVAL)
+}
+
+fn decode_open_options(flags: u64) -> vfs::OpenOptions {
+    let access = flags & O_ACCMODE;
+    let read = access != O_WRONLY;
+    let write = access == O_WRONLY || access == O_RDWR;
+    vfs::OpenOptions {
+        read,
+        write,
+        create: (flags & O_CREAT) != 0,
+        truncate: (flags & O_TRUNC) != 0,
+        append: (flags & O_APPEND) != 0,
+    }
+}
+
+unsafe fn user_slice<'a>(ptr: u64, len: usize) -> Result<&'a [u8], i64> {
+    if len == 0 {
+        return Ok(&[]);
+    }
+    if ptr == 0 {
+        return Err(LINUX_EFAULT);
+    }
+    Ok(unsafe { core::slice::from_raw_parts(ptr as *const u8, len) })
+}
+
+unsafe fn user_slice_mut<'a>(ptr: u64, len: usize) -> Result<&'a mut [u8], i64> {
+    if len == 0 {
+        return Ok(unsafe {
+            core::slice::from_raw_parts_mut(core::ptr::NonNull::<u8>::dangling().as_ptr(), 0)
+        });
+    }
+    if ptr == 0 {
+        return Err(LINUX_EFAULT);
+    }
+    Ok(unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len) })
+}
+
+unsafe fn user_ref<'a, T>(ptr: u64) -> Result<&'a T, i64> {
+    if ptr == 0 {
+        return Err(LINUX_EFAULT);
+    }
+    Ok(unsafe { &*(ptr as *const T) })
+}
+
+fn read_user_cstr(ptr: u64, max_len: usize) -> Result<String, i64> {
+    if ptr == 0 {
+        return Err(LINUX_EFAULT);
+    }
+    let mut bytes = Vec::new();
+    for idx in 0..max_len {
+        let byte = unsafe { *((ptr + idx as u64) as *const u8) };
+        if byte == 0 {
+            return String::from_utf8(bytes).map_err(|_| LINUX_EINVAL);
+        }
+        bytes.push(byte);
+    }
+    Err(LINUX_EINVAL)
+}
+
+fn read_user_argv(argv_ptr: u64, max_args: usize) -> Result<Vec<String>, i64> {
+    if argv_ptr == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for idx in 0..max_args {
+        let arg_ptr = unsafe { *((argv_ptr as *const u64).add(idx)) };
+        if arg_ptr == 0 {
+            break;
+        }
+        out.push(read_user_cstr(arg_ptr, 4096)?);
+    }
+    Ok(out)
+}
+
+fn write_user_bytes(ptr: u64, data: &[u8]) -> Result<(), i64> {
+    let dst = unsafe { user_slice_mut(ptr, data.len())? };
+    dst.copy_from_slice(data);
+    Ok(())
+}
+
+fn write_user_struct<T: Copy>(ptr: u64, value: &T) -> Result<(), i64> {
+    let bytes = unsafe {
+        core::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>())
+    };
+    write_user_bytes(ptr, bytes)
+}
+
+fn zero_user_bytes(ptr: u64, len: usize) -> Result<(), i64> {
+    let dst = unsafe { user_slice_mut(ptr, len)? };
+    dst.fill(0);
+    Ok(())
+}
+
+fn linux_stat_mode(kind: vfs::FileType) -> u32 {
+    match kind {
+        vfs::FileType::Directory => 0o040755,
+        vfs::FileType::File => 0o100644,
+    }
+}
+
+fn linux_stat_from_vfs(st: &vfs::FileStat) -> LinuxStat {
+    let size = st.size as i64;
+    let blocks = ((st.size as u64).saturating_add(511) / 512) as i64;
+    LinuxStat {
+        st_dev: 1,
+        st_ino: 1,
+        st_nlink: 1,
+        st_mode: linux_stat_mode(st.kind),
+        st_uid: 0,
+        st_gid: 0,
+        __pad0: 0,
+        st_rdev: 0,
+        st_size: size,
+        st_blksize: 4096,
+        st_blocks: blocks,
+        st_atime: 0,
+        st_atime_nsec: 0,
+        st_mtime: 0,
+        st_mtime_nsec: 0,
+        st_ctime: 0,
+        st_ctime_nsec: 0,
+        __reserved: [0; 3],
+    }
+}
+
+fn dispatch_custom(number: SyscallNumber, args: [u64; 6], pid: u64) -> Result<u64, i64> {
+    dispatch(SyscallRequest { number, args }, linux_ctx(pid)).map_err(linux_errno)
+}
+
+fn dispatch_wait4(pid: u64, target: u64, options: u64, status_ptr: u64) -> Result<u64, i64> {
+    let packed = dispatch_custom(
+        SyscallNumber::WaitPid,
+        [target, options, 0, 0, 0, 0],
+        pid,
+    )?;
+    let waited_pid = packed >> 32;
+    let status = (packed & 0xFFFF_FFFF) as i32;
+    if status_ptr != 0 {
+        write_user_struct(status_ptr, &status)?;
+    }
+    Ok(waited_pid)
+}
+
+fn join_dir_path(base: &str, child: &str) -> String {
+    if child.starts_with('/') {
+        return child.to_string();
+    }
+    if base == "/" {
+        let mut out = String::from("/");
+        out.push_str(child);
+        return out;
+    }
+    let mut out = base.to_string();
+    if !out.ends_with('/') {
+        out.push('/');
+    }
+    out.push_str(child);
+    out
+}
+
+fn descriptor_path(state: &SyscallState, pid: u64, fd: u64) -> Result<String, SyscallError> {
+    let obj_idx = state.obj_for_fd(pid, fd).ok_or(SyscallError::InvalidArgument)?;
+    let obj = state
+        .objects
+        .get(obj_idx)
+        .and_then(|o| o.as_ref())
+        .ok_or(SyscallError::InvalidArgument)?;
+    match &obj.kind {
+        DescriptorKind::Vfs { path, .. } | DescriptorKind::Directory(path) => Ok(path.clone()),
+        DescriptorKind::PipeRead(_) | DescriptorKind::PipeWrite(_) => {
+            Err(SyscallError::InvalidArgument)
+        }
+    }
+}
+
+fn resolve_at_path(pid: u64, dirfd: u64, path_ptr: u64) -> Result<String, i64> {
+    let path = read_user_cstr(path_ptr, 4096)?;
+    resolve_at_path_str(pid, dirfd, path.as_str())
+}
+
+fn resolve_at_path_str(pid: u64, dirfd: u64, path: &str) -> Result<String, i64> {
+    if path.starts_with('/') {
+        return Ok(path.to_string());
+    }
+    let dirfd_i64 = dirfd as i64;
+    if dirfd_i64 == AT_FDCWD {
+        return Ok(join_dir_path(vfs::pwd().as_str(), path));
+    }
+    let base = with_state_mut(|state| descriptor_path(state, pid, dirfd)).map_err(linux_errno)?;
+    match vfs::stat(base.as_str()) {
+        Ok(stat) if stat.kind == vfs::FileType::Directory => Ok(join_dir_path(base.as_str(), path)),
+        Ok(_) => Err(LINUX_ENOTDIR),
+        Err(_) => Err(LINUX_EBADF),
+    }
+}
+
+fn linux_open_path(pid: u64, path: &str, flags: u64) -> Result<u64, i64> {
+    let opts = decode_open_options(flags);
+    if let Ok(stat) = vfs::stat(path)
+        && stat.kind == vfs::FileType::Directory
+    {
+        if opts.write || opts.create || opts.truncate || opts.append {
+            return Err(LINUX_EISDIR);
+        }
+        let fd = with_state_mut(|state| {
+            let obj = state.alloc_object(DescriptorKind::Directory(path.to_string()));
+            state.alloc_fd(pid, obj)
+        });
+        return Ok(fd);
+    }
+
+    let vfd = vfs::open(path, opts).map_err(|_| LINUX_ENOENT)?;
+    let fd = with_state_mut(|state| {
+        let obj = state.alloc_object(DescriptorKind::Vfs {
+            fd: vfd,
+            path: path.to_string(),
+        });
+        state.alloc_fd(pid, obj)
+    });
+    Ok(fd)
+}
+
+fn linux_open(pid: u64, path_ptr: u64, flags: u64) -> Result<u64, i64> {
+    let path = read_user_cstr(path_ptr, 4096)?;
+    linux_open_path(pid, path.as_str(), flags)
+}
+
+fn linux_close(pid: u64, fd: u64) -> Result<u64, i64> {
+    dispatch_custom(SyscallNumber::Close, [fd, 0, 0, 0, 0, 0], pid)
+}
+
+fn linux_read(pid: u64, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
+    let max_len = len as usize;
+    match fd {
+        0 => Ok(0),
+        1 | 2 => Err(LINUX_EINVAL),
+        _ => {
+            let data = with_state_mut(|state| {
+                let obj_idx = state.obj_for_fd(pid, fd).ok_or(SyscallError::InvalidArgument)?;
+                let obj = state
+                    .objects
+                    .get(obj_idx)
+                    .and_then(|o| o.as_ref())
+                    .ok_or(SyscallError::InvalidArgument)?;
+                match obj.kind {
+                    DescriptorKind::Vfs { fd: vfd, .. } => {
+                        vfs::read(vfd, max_len).map_err(|_| SyscallError::InvalidArgument)
+                    }
+                    DescriptorKind::Directory(_) => Err(SyscallError::InvalidArgument),
+                    DescriptorKind::PipeRead(pipe_id) => {
+                        let pipe = state
+                            .pipes
+                            .get_mut(pipe_id)
+                            .and_then(|p| p.as_mut())
+                            .ok_or(SyscallError::InvalidArgument)?;
+                        let available = pipe.data.len().saturating_sub(pipe.read_pos);
+                        let take = available.min(max_len);
+                        let start = pipe.read_pos;
+                        let end = start + take;
+                        let out = pipe.data[start..end].to_vec();
+                        pipe.read_pos = end;
+                        if pipe.read_pos >= pipe.data.len() {
+                            pipe.data.clear();
+                            pipe.read_pos = 0;
+                        }
+                        Ok(out)
+                    }
+                    DescriptorKind::PipeWrite(_) => Err(SyscallError::InvalidArgument),
+                }
+            })
+            .map_err(linux_errno)?;
+            write_user_bytes(buf, data.as_slice())?;
+            Ok(data.len() as u64)
+        }
+    }
+}
+
+fn linux_write(pid: u64, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
+    let data = unsafe { user_slice(buf, len as usize)? };
+    match fd {
+        1 => {
+            let text = core::str::from_utf8(data).unwrap_or("<binary>");
+            console::print(text);
+            Ok(data.len() as u64)
+        }
+        2 => {
+            let text = core::str::from_utf8(data).unwrap_or("<binary>");
+            console::stderr_write_str(text);
+            Ok(data.len() as u64)
+        }
+        _ => {
+            let written = with_state_mut(|state| {
+                let obj_idx = state.obj_for_fd(pid, fd).ok_or(SyscallError::InvalidArgument)?;
+                let obj = state
+                    .objects
+                    .get(obj_idx)
+                    .and_then(|o| o.as_ref())
+                    .ok_or(SyscallError::InvalidArgument)?;
+                match obj.kind {
+                    DescriptorKind::Vfs { fd: vfd, .. } => {
+                        vfs::write(vfd, data).map_err(|_| SyscallError::InvalidArgument)
+                    }
+                    DescriptorKind::Directory(_) => Err(SyscallError::InvalidArgument),
+                    DescriptorKind::PipeWrite(pipe_id) => {
+                        let pipe = state
+                            .pipes
+                            .get_mut(pipe_id)
+                            .and_then(|p| p.as_mut())
+                            .ok_or(SyscallError::InvalidArgument)?;
+                        pipe.data.extend_from_slice(data);
+                        Ok(data.len())
+                    }
+                    DescriptorKind::PipeRead(_) => Err(SyscallError::InvalidArgument),
+                }
+            })
+            .map_err(linux_errno)?;
+            Ok(written as u64)
+        }
+    }
+}
+
+fn linux_pread64(pid: u64, fd: u64, buf: u64, len: u64, off: u64) -> Result<u64, i64> {
+    let saved = with_state_mut(|state| {
+        let vfd = resolve_vfs_fd(state, pid, fd)?;
+        vfs::seek(vfd, vfs::SeekFrom::Current(0)).map_err(|_| SyscallError::InvalidArgument)
+    })
+    .map_err(linux_errno)?;
+    let _ = dispatch_custom(SyscallNumber::Lseek, [fd, off, SEEK_SET, 0, 0, 0], pid)?;
+    let out = linux_read(pid, fd, buf, len);
+    let _ = dispatch_custom(SyscallNumber::Lseek, [fd, saved as u64, SEEK_SET, 0, 0, 0], pid);
+    out
+}
+
+fn linux_pwrite64(pid: u64, fd: u64, buf: u64, len: u64, off: u64) -> Result<u64, i64> {
+    let saved = with_state_mut(|state| {
+        let vfd = resolve_vfs_fd(state, pid, fd)?;
+        vfs::seek(vfd, vfs::SeekFrom::Current(0)).map_err(|_| SyscallError::InvalidArgument)
+    })
+    .map_err(linux_errno)?;
+    let _ = dispatch_custom(SyscallNumber::Lseek, [fd, off, SEEK_SET, 0, 0, 0], pid)?;
+    let out = linux_write(pid, fd, buf, len);
+    let _ = dispatch_custom(SyscallNumber::Lseek, [fd, saved as u64, SEEK_SET, 0, 0, 0], pid);
+    out
+}
+
+fn linux_writev(pid: u64, fd: u64, iov_ptr: u64, iovcnt: u64) -> Result<u64, i64> {
+    let mut total = 0u64;
+    for idx in 0..iovcnt as usize {
+        let iov = unsafe { *user_ref::<LinuxIovec>(iov_ptr + (idx * size_of::<LinuxIovec>()) as u64)? };
+        total = total.saturating_add(linux_write(pid, fd, iov.base, iov.len)?);
+    }
+    Ok(total)
+}
+
+fn linux_readv(pid: u64, fd: u64, iov_ptr: u64, iovcnt: u64) -> Result<u64, i64> {
+    let mut total = 0u64;
+    for idx in 0..iovcnt as usize {
+        let iov = unsafe { *user_ref::<LinuxIovec>(iov_ptr + (idx * size_of::<LinuxIovec>()) as u64)? };
+        let got = linux_read(pid, fd, iov.base, iov.len)?;
+        total = total.saturating_add(got);
+        if got < iov.len {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+fn linux_pipe(pid: u64, pipefd_ptr: u64) -> Result<u64, i64> {
+    let packed = dispatch_custom(SyscallNumber::Pipe, [0, 0, 0, 0, 0, 0], pid)?;
+    let pair = [(packed & 0xFFFF_FFFF) as i32, (packed >> 32) as i32];
+    write_user_struct(pipefd_ptr, &pair)?;
+    Ok(0)
+}
+
+fn linux_select(
+    pid: u64,
+    nfds: u64,
+    readfds_ptr: u64,
+    writefds_ptr: u64,
+    exceptfds_ptr: u64,
+    timeout_ptr: u64,
+) -> Result<u64, i64> {
+    fn read_fdset(ptr: u64, nfds: u64) -> Result<Vec<u64>, i64> {
+        let words = (nfds as usize).saturating_add(63) / 64;
+        let mut out = vec![0u64; words];
+        if ptr == 0 || words == 0 {
+            return Ok(out);
+        }
+        let bytes = unsafe { user_slice(ptr, words * size_of::<u64>())? };
+        for (idx, chunk) in bytes.chunks_exact(size_of::<u64>()).enumerate() {
+            let mut word = [0u8; size_of::<u64>()];
+            word.copy_from_slice(chunk);
+            out[idx] = u64::from_le_bytes(word);
+        }
+        Ok(out)
+    }
+
+    fn write_fdset(ptr: u64, words: &[u64]) -> Result<(), i64> {
+        if ptr == 0 || words.is_empty() {
+            return Ok(());
+        }
+        let mut bytes = Vec::with_capacity(words.len() * size_of::<u64>());
+        for word in words {
+            bytes.extend_from_slice(word.to_le_bytes().as_slice());
+        }
+        write_user_bytes(ptr, bytes.as_slice())
+    }
+
+    fn evaluate(
+        pid: u64,
+        read_words: &[u64],
+        write_words: &[u64],
+        except_words: &[u64],
+        nfds: u64,
+    ) -> Result<(Vec<u64>, Vec<u64>, Vec<u64>, u64), i64> {
+        let mut read_out = vec![0u64; read_words.len()];
+        let mut write_out = vec![0u64; write_words.len()];
+        let mut except_out = vec![0u64; except_words.len()];
+        let mut ready = 0u64;
+
+        for fd in 0..nfds {
+            let idx = (fd / 64) as usize;
+            let bit = 1u64 << (fd % 64);
+            let mut counted = false;
+
+            if idx < read_words.len() && (read_words[idx] & bit) != 0 {
+                let mask = with_state_mut(|state| poll_fd_mask(state, pid, fd, POLLIN))
+                    .map_err(linux_errno)?;
+                if (mask & POLLIN) != 0 {
+                    read_out[idx] |= bit;
+                    counted = true;
+                }
+            }
+
+            if idx < write_words.len() && (write_words[idx] & bit) != 0 {
+                let mask = with_state_mut(|state| poll_fd_mask(state, pid, fd, POLLOUT))
+                    .map_err(linux_errno)?;
+                if (mask & POLLOUT) != 0 {
+                    write_out[idx] |= bit;
+                    counted = true;
+                }
+            }
+
+            if idx < except_words.len() && (except_words[idx] & bit) != 0 {
+                let mask = with_state_mut(|state| poll_fd_mask(state, pid, fd, POLLERR))
+                    .map_err(linux_errno)?;
+                if (mask & (POLLERR | POLLHUP | POLLNVAL)) != 0 {
+                    except_out[idx] |= bit;
+                    counted = true;
+                }
+            }
+
+            if counted {
+                ready = ready.saturating_add(1);
+            }
+        }
+
+        Ok((read_out, write_out, except_out, ready))
+    }
+
+    let timeout_ms = if timeout_ptr == 0 {
+        0
+    } else {
+        let tv = unsafe { *user_ref::<LinuxTimeval>(timeout_ptr)? };
+        (tv.tv_sec.max(0) as u64)
+            .saturating_mul(1000)
+            .saturating_add((tv.tv_usec.max(0) as u64) / 1000)
+    };
+    let read_words = read_fdset(readfds_ptr, nfds)?;
+    let write_words = read_fdset(writefds_ptr, nfds)?;
+    let except_words = read_fdset(exceptfds_ptr, nfds)?;
+    let (mut read_out, mut write_out, mut except_out, mut ready) =
+        evaluate(pid, &read_words, &write_words, &except_words, nfds)?;
+    if ready == 0 && timeout_ms > 0 {
+        timer::sleep(timeout_ms);
+        (read_out, write_out, except_out, ready) =
+            evaluate(pid, &read_words, &write_words, &except_words, nfds)?;
+    }
+    write_fdset(readfds_ptr, read_out.as_slice())?;
+    write_fdset(writefds_ptr, write_out.as_slice())?;
+    write_fdset(exceptfds_ptr, except_out.as_slice())?;
+    Ok(ready)
+}
+
+fn linux_truncate_path(path: &str, len: usize) -> Result<u64, i64> {
+    let stat = vfs::stat(path).map_err(|_| LINUX_ENOENT)?;
+    if stat.kind != vfs::FileType::File {
+        return Err(LINUX_EISDIR);
+    }
+    let mut bytes = vfs::read_path(path).map_err(|_| LINUX_EINVAL)?;
+    bytes.resize(len, 0);
+    vfs::write_path(path, bytes.as_slice()).map_err(|_| LINUX_EINVAL)?;
+    Ok(0)
+}
+
+fn linux_truncate(path_ptr: u64, len: u64) -> Result<u64, i64> {
+    let path = read_user_cstr(path_ptr, 4096)?;
+    linux_truncate_path(path.as_str(), len as usize)
+}
+
+fn linux_ftruncate(pid: u64, fd: u64, len: u64) -> Result<u64, i64> {
+    let path = with_state_mut(|state| descriptor_path(state, pid, fd)).map_err(linux_errno)?;
+    linux_truncate_path(path.as_str(), len as usize)
+}
+
+fn linux_fchdir(pid: u64, fd: u64) -> Result<u64, i64> {
+    let path = with_state_mut(|state| descriptor_path(state, pid, fd)).map_err(linux_errno)?;
+    let stat = vfs::stat(path.as_str()).map_err(|_| LINUX_EBADF)?;
+    if stat.kind != vfs::FileType::Directory {
+        return Err(LINUX_ENOTDIR);
+    }
+    vfs::cd(path.as_str()).map(|_| 0).map_err(|_| LINUX_EINVAL)
+}
+
+fn linux_link_paths(old_path: &str, new_path: &str) -> Result<u64, i64> {
+    if vfs::stat(new_path).is_ok() {
+        return Err(LINUX_EEXIST);
+    }
+    let stat = vfs::stat(old_path).map_err(|_| LINUX_ENOENT)?;
+    if stat.kind != vfs::FileType::File {
+        return Err(LINUX_EISDIR);
+    }
+    let bytes = vfs::read_path(old_path).map_err(|_| LINUX_EINVAL)?;
+    vfs::write_path(new_path, bytes.as_slice()).map_err(|_| LINUX_EINVAL)?;
+    Ok(0)
+}
+
+fn linux_link(old_ptr: u64, new_ptr: u64) -> Result<u64, i64> {
+    let old_path = read_user_cstr(old_ptr, 4096)?;
+    let new_path = read_user_cstr(new_ptr, 4096)?;
+    linux_link_paths(old_path.as_str(), new_path.as_str())
+}
+
+fn linux_getdents64(pid: u64, fd: u64, dirp: u64, count: u64) -> Result<u64, i64> {
+    let (path, cursor) = with_state_mut(|state| {
+        let obj_idx = state.obj_for_fd(pid, fd).ok_or(SyscallError::InvalidArgument)?;
+        let obj = state
+            .objects
+            .get(obj_idx)
+            .and_then(|o| o.as_ref())
+            .ok_or(SyscallError::InvalidArgument)?;
+        match &obj.kind {
+            DescriptorKind::Directory(path) => Ok::<(String, usize), SyscallError>((path.clone(), obj.cursor)),
+            _ => Err(SyscallError::InvalidArgument),
+        }
+    })
+    .map_err(linux_errno)?;
+
+    let entries = vfs::readdir(path.as_str()).map_err(|_| LINUX_ENOTDIR)?;
+    let max_bytes = count as usize;
+    let mut out = Vec::new();
+    let mut consumed = 0usize;
+
+    for (idx, name) in entries.iter().enumerate().skip(cursor) {
+        let child_path = join_dir_path(path.as_str(), name.as_str());
+        let dtype = match vfs::stat(child_path.as_str()) {
+            Ok(stat) if stat.kind == vfs::FileType::Directory => DT_DIR,
+            _ => DT_REG,
+        };
+        let reclen = ((19 + name.len() + 1) + 7) & !7;
+        if reclen > max_bytes {
+            return Err(LINUX_EINVAL);
+        }
+        if out.len().saturating_add(reclen) > max_bytes {
+            break;
+        }
+        out.extend_from_slice(((idx + 1) as u64).to_le_bytes().as_slice());
+        out.extend_from_slice(((idx + 1) as i64).to_le_bytes().as_slice());
+        out.extend_from_slice((reclen as u16).to_le_bytes().as_slice());
+        out.push(dtype);
+        out.extend_from_slice(name.as_bytes());
+        out.push(0);
+        while out.len() % 8 != 0 {
+            out.push(0);
+        }
+        consumed = consumed.saturating_add(1);
+    }
+
+    write_user_bytes(dirp, out.as_slice())?;
+    with_state_mut(|state| {
+        let obj_idx = state.obj_for_fd(pid, fd).ok_or(SyscallError::InvalidArgument)?;
+        let obj = state
+            .objects
+            .get_mut(obj_idx)
+            .and_then(|o| o.as_mut())
+            .ok_or(SyscallError::InvalidArgument)?;
+        obj.cursor = obj.cursor.saturating_add(consumed);
+        Ok::<(), SyscallError>(())
+    })
+    .map_err(linux_errno)?;
+    Ok(out.len() as u64)
+}
+
+fn linux_openat(pid: u64, dirfd: u64, path_ptr: u64, flags: u64) -> Result<u64, i64> {
+    let path = resolve_at_path(pid, dirfd, path_ptr)?;
+    linux_open_path(pid, path.as_str(), flags)
+}
+
+fn linux_mkdirat(pid: u64, dirfd: u64, path_ptr: u64) -> Result<u64, i64> {
+    let path = resolve_at_path(pid, dirfd, path_ptr)?;
+    vfs::mkdir(path.as_str()).map(|_| 0).map_err(|_| LINUX_EINVAL)
+}
+
+fn linux_mknodat(pid: u64, dirfd: u64, path_ptr: u64, mode: u64) -> Result<u64, i64> {
+    let path = resolve_at_path(pid, dirfd, path_ptr)?;
+    let file_type = (mode as u32) & S_IFMT;
+    if file_type == S_IFDIR {
+        return vfs::mkdir(path.as_str()).map(|_| 0).map_err(|_| LINUX_EINVAL);
+    }
+    linux_open_path(pid, path.as_str(), O_CREAT | O_WRONLY)
+}
+
+fn linux_newfstatat(pid: u64, dirfd: u64, path_ptr: u64, stat_ptr: u64, flags: u64) -> Result<u64, i64> {
+    if path_ptr == 0 {
+        return Err(LINUX_EFAULT);
+    }
+    let path = read_user_cstr(path_ptr, 4096)?;
+    let resolved = if path.is_empty() && (flags & AT_EMPTY_PATH) != 0 {
+        with_state_mut(|state| descriptor_path(state, pid, dirfd)).map_err(linux_errno)?
+    } else {
+        resolve_at_path_str(pid, dirfd, path.as_str())?
+    };
+    let st = vfs::stat(resolved.as_str()).map_err(|_| LINUX_ENOENT)?;
+    let linux_st = linux_stat_from_vfs(&st);
+    write_user_struct(stat_ptr, &linux_st)?;
+    Ok(0)
+}
+
+fn linux_unlinkat(pid: u64, dirfd: u64, path_ptr: u64) -> Result<u64, i64> {
+    let path = resolve_at_path(pid, dirfd, path_ptr)?;
+    vfs::unlink(path.as_str()).map(|_| 0).map_err(|_| LINUX_EINVAL)
+}
+
+fn linux_renameat(pid: u64, olddirfd: u64, old_ptr: u64, newdirfd: u64, new_ptr: u64) -> Result<u64, i64> {
+    let old_path = resolve_at_path(pid, olddirfd, old_ptr)?;
+    let new_path = resolve_at_path(pid, newdirfd, new_ptr)?;
+    vfs::rename(old_path.as_str(), new_path.as_str())
+        .map(|_| 0)
+        .map_err(|_| LINUX_EINVAL)
+}
+
+fn linux_linkat(pid: u64, olddirfd: u64, old_ptr: u64, newdirfd: u64, new_ptr: u64) -> Result<u64, i64> {
+    let old_path = resolve_at_path(pid, olddirfd, old_ptr)?;
+    let new_path = resolve_at_path(pid, newdirfd, new_ptr)?;
+    linux_link_paths(old_path.as_str(), new_path.as_str())
+}
+
+fn linux_faccessat(pid: u64, dirfd: u64, path_ptr: u64) -> Result<u64, i64> {
+    let path = resolve_at_path(pid, dirfd, path_ptr)?;
+    vfs::stat(path.as_str()).map(|_| 0).map_err(|_| LINUX_ENOENT)
+}
+
+fn linux_dup3(pid: u64, oldfd: u64, newfd: u64) -> Result<u64, i64> {
+    if oldfd == newfd {
+        return Err(LINUX_EINVAL);
+    }
+    dispatch_custom(SyscallNumber::Dup2, [oldfd, newfd, 0, 0, 0, 0], pid)
+}
+
+fn linux_pipe2(pid: u64, pipefd_ptr: u64, flags: u64) -> Result<u64, i64> {
+    let packed = with_state_mut(|state| {
+        let pipe_id = if let Some((idx, slot)) = state
+            .pipes
+            .iter_mut()
+            .enumerate()
+            .find(|(_, p)| p.is_none())
+        {
+            *slot = Some(PipeBuffer {
+                data: Vec::new(),
+                read_pos: 0,
+            });
+            idx
+        } else {
+            state.pipes.push(Some(PipeBuffer {
+                data: Vec::new(),
+                read_pos: 0,
+            }));
+            state.pipes.len() - 1
+        };
+
+        let mut read_obj = DescriptorObject::new(DescriptorKind::PipeRead(pipe_id));
+        let mut write_obj = DescriptorObject::new(DescriptorKind::PipeWrite(pipe_id));
+        let nonblocking = (flags & O_NONBLOCK) != 0;
+        read_obj.nonblocking = nonblocking;
+        write_obj.nonblocking = nonblocking;
+
+        let read_slot = state.alloc_object(read_obj.kind);
+        let write_slot = state.alloc_object(write_obj.kind);
+        if let Some(obj) = state.objects.get_mut(read_slot).and_then(|o| o.as_mut()) {
+            obj.nonblocking = nonblocking;
+        }
+        if let Some(obj) = state.objects.get_mut(write_slot).and_then(|o| o.as_mut()) {
+            obj.nonblocking = nonblocking;
+        }
+        let rfd = state.alloc_fd(pid, read_slot);
+        let wfd = state.alloc_fd(pid, write_slot);
+        Ok::<u64, SyscallError>((wfd << 32) | (rfd & 0xFFFF_FFFF))
+    })
+    .map_err(linux_errno)?;
+    let pair = [(packed & 0xFFFF_FFFF) as i32, (packed >> 32) as i32];
+    write_user_struct(pipefd_ptr, &pair)?;
+    Ok(0)
+}
+
+fn linux_poll(pid: u64, fds_ptr: u64, nfds: u64, timeout_ms: u64) -> Result<u64, i64> {
+    let mut ready = 0u64;
+    for idx in 0..nfds as usize {
+        let slot_ptr = fds_ptr + (idx * size_of::<LinuxPollFd>()) as u64;
+        let mut pfd = unsafe { *user_ref::<LinuxPollFd>(slot_ptr)? };
+        let revents = dispatch_custom(
+            SyscallNumber::Poll,
+            [pfd.fd as u64, pfd.events as u64, timeout_ms, 0, 0, 0],
+            pid,
+        )?;
+        pfd.revents = revents as i16;
+        if pfd.revents != 0 {
+            ready = ready.saturating_add(1);
+        }
+        write_user_struct(slot_ptr, &pfd)?;
+    }
+    Ok(ready)
+}
+
+fn linux_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<u64, i64> {
+    let req = unsafe { *user_ref::<LinuxTimespec>(req_ptr)? };
+    let ms = (req.tv_sec.max(0) as u64)
+        .saturating_mul(1000)
+        .saturating_add((req.tv_nsec.max(0) as u64) / 1_000_000);
+    timer::sleep(ms);
+    if rem_ptr != 0 {
+        let rem = LinuxTimespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        write_user_struct(rem_ptr, &rem)?;
+    }
+    Ok(0)
+}
+
+fn linux_uname(buf_ptr: u64) -> Result<u64, i64> {
+    fn fill(dst: &mut [u8; 65], src: &[u8]) {
+        let take = src.len().min(64);
+        dst[..take].copy_from_slice(&src[..take]);
+        dst[take] = 0;
+    }
+
+    let mut uts = LinuxUtsname {
+        sysname: [0; 65],
+        nodename: [0; 65],
+        release: [0; 65],
+        version: [0; 65],
+        machine: [0; 65],
+        domainname: [0; 65],
+    };
+    fill(&mut uts.sysname, b"SAIOS");
+    fill(&mut uts.nodename, b"saios");
+    fill(&mut uts.release, b"1.0");
+    fill(&mut uts.version, b"SAIOS 1.0");
+    fill(&mut uts.machine, b"x86_64");
+    fill(&mut uts.domainname, b"localdomain");
+    write_user_struct(buf_ptr, &uts)?;
+    Ok(0)
+}
+
+fn linux_gettimeofday(tv_ptr: u64, tz_ptr: u64) -> Result<u64, i64> {
+    let uptime = timer::uptime();
+    if tv_ptr != 0 {
+        let tv = LinuxTimeval {
+            tv_sec: uptime.as_secs() as i64,
+            tv_usec: uptime.subsec_micros() as i64,
+        };
+        write_user_struct(tv_ptr, &tv)?;
+    }
+    if tz_ptr != 0 {
+        zero_user_bytes(tz_ptr, 8)?;
+    }
+    Ok(0)
+}
+
+fn linux_clock_gettime(ts_ptr: u64) -> Result<u64, i64> {
+    let uptime = timer::uptime();
+    let ts = LinuxTimespec {
+        tv_sec: uptime.as_secs() as i64,
+        tv_nsec: uptime.subsec_nanos() as i64,
+    };
+    write_user_struct(ts_ptr, &ts)?;
+    Ok(0)
+}
+
+fn linux_times(buf_ptr: u64) -> Result<u64, i64> {
+    let ticks = timer::ticks() as i64;
+    if buf_ptr != 0 {
+        let tms = LinuxTms {
+            tms_utime: ticks,
+            tms_stime: 0,
+            tms_cutime: 0,
+            tms_cstime: 0,
+        };
+        write_user_struct(buf_ptr, &tms)?;
+    }
+    Ok(timer::ticks())
+}
+
+fn linux_getcwd(buf_ptr: u64, size: u64) -> Result<u64, i64> {
+    let cwd = vfs::pwd();
+    let bytes = cwd.as_bytes();
+    if size == 0 || bytes.len() + 1 > size as usize {
+        return Err(LINUX_EINVAL);
+    }
+    write_user_bytes(buf_ptr, bytes)?;
+    write_user_bytes(buf_ptr + bytes.len() as u64, &[0])?;
+    Ok(buf_ptr)
+}
+
+fn linux_path_stat(path_ptr: u64, stat_ptr: u64) -> Result<u64, i64> {
+    let path = read_user_cstr(path_ptr, 4096)?;
+    let st = vfs::stat(path.as_str()).map_err(|_| LINUX_ENOENT)?;
+    let linux_st = linux_stat_from_vfs(&st);
+    write_user_struct(stat_ptr, &linux_st)?;
+    Ok(0)
+}
+
+fn linux_fstat(pid: u64, fd: u64, stat_ptr: u64) -> Result<u64, i64> {
+    let st = if fd <= 2 {
+        LinuxStat {
+            st_dev: 1,
+            st_ino: fd,
+            st_nlink: 1,
+            st_mode: 0o020666,
+            st_uid: 0,
+            st_gid: 0,
+            __pad0: 0,
+            st_rdev: 0,
+            st_size: 0,
+            st_blksize: 4096,
+            st_blocks: 0,
+            st_atime: 0,
+            st_atime_nsec: 0,
+            st_mtime: 0,
+            st_mtime_nsec: 0,
+            st_ctime: 0,
+            st_ctime_nsec: 0,
+            __reserved: [0; 3],
+        }
+    } else {
+        let size = dispatch_custom(SyscallNumber::Fstat, [fd, 0, 0, 0, 0, 0], pid)? as usize;
+        linux_stat_from_vfs(&vfs::FileStat {
+            kind: vfs::FileType::File,
+            size,
+        })
+    };
+    write_user_struct(stat_ptr, &st)?;
+    Ok(0)
+}
+
+fn linux_access(path_ptr: u64) -> Result<u64, i64> {
+    let path = read_user_cstr(path_ptr, 4096)?;
+    vfs::stat(path.as_str()).map(|_| 0).map_err(|_| LINUX_ENOENT)
+}
+
+fn linux_chdir(path_ptr: u64) -> Result<u64, i64> {
+    let path = read_user_cstr(path_ptr, 4096)?;
+    vfs::cd(path.as_str()).map(|_| 0).map_err(|_| LINUX_ENOENT)
+}
+
+fn linux_rename(old_ptr: u64, new_ptr: u64) -> Result<u64, i64> {
+    let from = read_user_cstr(old_ptr, 4096)?;
+    let to = read_user_cstr(new_ptr, 4096)?;
+    vfs::rename(from.as_str(), to.as_str())
+        .map(|_| 0)
+        .map_err(|_| LINUX_EINVAL)
+}
+
+fn linux_mkdir(path_ptr: u64) -> Result<u64, i64> {
+    let path = read_user_cstr(path_ptr, 4096)?;
+    vfs::mkdir(path.as_str()).map(|_| 0).map_err(|_| LINUX_EINVAL)
+}
+
+fn linux_unlink(path_ptr: u64) -> Result<u64, i64> {
+    let path = read_user_cstr(path_ptr, 4096)?;
+    vfs::unlink(path.as_str()).map(|_| 0).map_err(|_| LINUX_EINVAL)
+}
+
+fn linux_creat(pid: u64, path_ptr: u64) -> Result<u64, i64> {
+    linux_open(pid, path_ptr, O_WRONLY | O_CREAT | O_TRUNC)
+}
+
+fn linux_setpgid(pid: u64, target: u64, pgid: u64) -> Result<u64, i64> {
+    let target_pid = if target == 0 { pid } else { target };
+    let target_pgid = if pgid == 0 { target_pid } else { pgid };
+    process::set_process_group(target_pid, target_pgid)
+        .map(|_| 0)
+        .map_err(|_| LINUX_EINVAL)
+}
+
+fn linux_getppid(pid: u64) -> u64 {
+    process::record(pid)
+        .and_then(|r| r.parent_pid)
+        .unwrap_or(1)
+}
+
+fn linux_getpgrp(pid: u64) -> Result<u64, i64> {
+    process::process_group(pid).ok_or(LINUX_EINVAL)
+}
+
+fn linux_setsid(pid: u64) -> Result<u64, i64> {
+    process::create_session(pid).map_err(|_| LINUX_EINVAL)
+}
+
+fn linux_getpgid(target: u64, pid: u64) -> Result<u64, i64> {
+    let q = if target == 0 { pid } else { target };
+    process::process_group(q).ok_or(LINUX_EINVAL)
+}
+
+fn linux_getsid(target: u64, pid: u64) -> Result<u64, i64> {
+    let q = if target == 0 { pid } else { target };
+    process::session_id(q).ok_or(LINUX_EINVAL)
+}
+
+fn linux_fcntl(pid: u64, fd: u64, cmd: u64, arg: u64) -> Result<u64, i64> {
+    match cmd {
+        F_GETFD => Ok(0),
+        F_SETFD => Ok(0),
+        F_GETFL => Ok(0),
+        F_SETFL => {
+            with_state_mut(|state| {
+                let obj_idx = state.obj_for_fd(pid, fd).ok_or(SyscallError::InvalidArgument)?;
+                let obj = state
+                    .objects
+                    .get_mut(obj_idx)
+                    .and_then(|o| o.as_mut())
+                    .ok_or(SyscallError::InvalidArgument)?;
+                obj.nonblocking = (arg & O_NONBLOCK) != 0;
+                Ok::<u64, SyscallError>(0)
+            })
+            .map_err(linux_errno)
+        }
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            let min_fd = arg.max(3) as usize;
+            with_state_mut(|state| {
+                let obj_idx = state.obj_for_fd(pid, fd).ok_or(SyscallError::InvalidArgument)?;
+                let proc = state.proc_mut(pid);
+                if proc.slots.len() <= min_fd {
+                    proc.slots.resize(min_fd + 1, None);
+                }
+                let mut slot = min_fd;
+                while slot < proc.slots.len() && proc.slots[slot].is_some() {
+                    slot += 1;
+                }
+                if slot == proc.slots.len() {
+                    proc.slots.push(None);
+                }
+                proc.slots[slot] = Some(obj_idx);
+                let obj = state
+                    .objects
+                    .get_mut(obj_idx)
+                    .and_then(|o| o.as_mut())
+                    .ok_or(SyscallError::InvalidArgument)?;
+                obj.refs = obj.refs.saturating_add(1);
+                Ok::<u64, SyscallError>(slot as u64)
+            })
+            .map_err(linux_errno)
+        }
+        _ => Err(LINUX_ENOSYS),
+    }
+}
+
+fn linux_getrlimit(ptr: u64) -> Result<u64, i64> {
+    let lim = LinuxRlimit {
+        rlim_cur: u64::MAX,
+        rlim_max: u64::MAX,
+    };
+    write_user_struct(ptr, &lim)?;
+    Ok(0)
+}
+
+fn linux_getres_ids(ptr1: u64, ptr2: u64, ptr3: u64) -> Result<u64, i64> {
+    if ptr1 != 0 {
+        write_user_struct(ptr1, &0u32)?;
+    }
+    if ptr2 != 0 {
+        write_user_struct(ptr2, &0u32)?;
+    }
+    if ptr3 != 0 {
+        write_user_struct(ptr3, &0u32)?;
+    }
+    Ok(0)
+}
+
+fn linux_sysinfo(ptr: u64) -> Result<u64, i64> {
+    let info = LinuxSysinfo {
+        uptime: timer::uptime().as_secs() as i64,
+        loads: [0; 3],
+        totalram: 0,
+        freeram: 0,
+        sharedram: 0,
+        bufferram: 0,
+        totalswap: 0,
+        freeswap: 0,
+        procs: process::jobs().len() as u16,
+        pad: 0,
+        totalhigh: 0,
+        freehigh: 0,
+        mem_unit: 1,
+        _f: [],
+    };
+    write_user_struct(ptr, &info)?;
+    Ok(0)
+}
+
+fn linux_sched_getaffinity(mask_ptr: u64, len: u64) -> Result<u64, i64> {
+    if len < 8 {
+        return Err(LINUX_EINVAL);
+    }
+    write_user_struct(mask_ptr, &1u64)?;
+    Ok(8)
+}
+
+fn linux_arch_prctl(code: u64, addr: u64) -> Result<u64, i64> {
+    match code {
+        ARCH_SET_FS => {
+            hal::arch::x86_64::msr::wrmsr(IA32_FS_BASE, addr);
+            Ok(0)
+        }
+        ARCH_GET_FS => {
+            let value = hal::arch::x86_64::msr::rdmsr(IA32_FS_BASE);
+            write_user_struct(addr, &value)?;
+            Ok(0)
+        }
+        _ => Err(LINUX_ENOSYS),
+    }
+}
+
+fn linux_time(ptr: u64) -> Result<u64, i64> {
+    let secs = timer::uptime().as_secs() as u64;
+    if ptr != 0 {
+        write_user_struct(ptr, &(secs as i64))?;
+    }
+    Ok(secs)
+}
+
+fn linux_clock_getres(ptr: u64) -> Result<u64, i64> {
+    let ts = LinuxTimespec {
+        tv_sec: 0,
+        tv_nsec: 10_000_000,
+    };
+    write_user_struct(ptr, &ts)?;
+    Ok(0)
+}
+
+fn linux_clock_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<u64, i64> {
+    linux_nanosleep(req_ptr, rem_ptr)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn saios_linux_syscall(
+    nr: u64,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+) -> i64 {
+    let pid = match active_linux_pid() {
+        Ok(pid) => pid,
+        Err(code) => return code,
+    };
+
+    let out = match nr {
+        0 => linux_read(pid, a0, a1, a2),
+        1 => linux_write(pid, a0, a1, a2),
+        2 => linux_open(pid, a0, a1),
+        3 => linux_close(pid, a0),
+        4 => linux_path_stat(a0, a1),
+        5 => linux_fstat(pid, a0, a1),
+        6 => linux_path_stat(a0, a1),
+        7 => linux_poll(pid, a0, a1, a2),
+        8 => dispatch_custom(SyscallNumber::Lseek, [a0, a1, a2, 0, 0, 0], pid),
+        9 => dispatch_custom(SyscallNumber::Mmap, [a1, 0, 0, 0, 0, 0], pid),
+        10 => Ok(0),
+        11 => dispatch_custom(SyscallNumber::Munmap, [a0, a1, 0, 0, 0, 0], pid),
+        12 => dispatch_custom(SyscallNumber::Brk, [a0, 0, 0, 0, 0, 0], pid),
+        13 => Ok(0),
+        14 => Ok(0),
+        15 => Err(LINUX_ENOSYS),
+        16 => dispatch_custom(SyscallNumber::Ioctl, [a0, a1, a2, 0, 0, 0], pid),
+        17 => linux_pread64(pid, a0, a1, a2, a3),
+        18 => linux_pwrite64(pid, a0, a1, a2, a3),
+        19 => linux_readv(pid, a0, a1, a2),
+        20 => linux_writev(pid, a0, a1, a2),
+        21 => linux_access(a0),
+        22 => linux_pipe(pid, a0),
+        23 => linux_select(pid, a0, a1, a2, a3, a4),
+        24 => {
+            crate::scheduler::yield_now();
+            Ok(0)
+        }
+        25 => Err(LINUX_ENOSYS),
+        26 => Ok(0),
+        27 => Err(LINUX_ENOSYS),
+        28 => Ok(0),
+        29 => Err(LINUX_ENOSYS),
+        30 => Err(LINUX_ENOSYS),
+        31 => Err(LINUX_ENOSYS),
+        32 => dispatch_custom(SyscallNumber::Dup, [a0, 0, 0, 0, 0, 0], pid),
+        33 => dispatch_custom(SyscallNumber::Dup2, [a0, a1, 0, 0, 0, 0], pid),
+        34 => Err(LINUX_ENOSYS),
+        35 => linux_nanosleep(a0, a1),
+        36 => Err(LINUX_ENOSYS),
+        37 => Err(LINUX_ENOSYS),
+        38 => Err(LINUX_ENOSYS),
+        39 => dispatch_custom(SyscallNumber::GetPid, [0, 0, 0, 0, 0, 0], pid),
+        40 => Err(LINUX_ENOSYS),
+        41 => Err(LINUX_ENOSYS),
+        42 => Err(LINUX_ENOSYS),
+        43 => Err(LINUX_ENOSYS),
+        44 => Err(LINUX_ENOSYS),
+        45 => Err(LINUX_ENOSYS),
+        46 => Err(LINUX_ENOSYS),
+        47 => Err(LINUX_ENOSYS),
+        48 => Err(LINUX_ENOSYS),
+        49 => Err(LINUX_ENOSYS),
+        50 => Err(LINUX_ENOSYS),
+        51 => Err(LINUX_ENOSYS),
+        52 => Err(LINUX_ENOSYS),
+        53 => Err(LINUX_ENOSYS),
+        54 => Err(LINUX_ENOSYS),
+        55 => Err(LINUX_ENOSYS),
+        56 => dispatch_custom(SyscallNumber::Clone, [a0, a1, a2, a3, a4, a5], pid),
+        57 => dispatch_custom(SyscallNumber::Fork, [0, 0, 0, 0, 0, 0], pid),
+        58 => dispatch_custom(SyscallNumber::Fork, [0, 0, 0, 0, 0, 0], pid),
+        59 => {
+            let path = match read_user_cstr(a0, 4096) {
+                Ok(path) => path,
+                Err(code) => return code,
+            };
+            let argv = match read_user_argv(a1, 32) {
+                Ok(argv) => argv,
+                Err(code) => return code,
+            };
+            let arg_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+            process::exec_from(Some(pid), path.as_str(), arg_refs.as_slice(), &[])
+                .map(|code| code as u64)
+                .map_err(|_| LINUX_ENOENT)
+        }
+        60 => dispatch_custom(SyscallNumber::Exit, [a0, 0, 0, 0, 0, 0], pid),
+        61 => dispatch_wait4(pid, a0, a2, a1),
+        62 => dispatch_custom(SyscallNumber::Kill, [a0, a1, 0, 0, 0, 0], pid),
+        63 => linux_uname(a0),
+        64 => Err(LINUX_ENOSYS),
+        65 => Err(LINUX_ENOSYS),
+        66 => Err(LINUX_ENOSYS),
+        67 => Err(LINUX_ENOSYS),
+        68 => Err(LINUX_ENOSYS),
+        69 => Err(LINUX_ENOSYS),
+        70 => Err(LINUX_ENOSYS),
+        71 => Err(LINUX_ENOSYS),
+        72 => linux_fcntl(pid, a0, a1, a2),
+        73 => Ok(0),
+        74 => Ok(0),
+        75 => Ok(0),
+        76 => linux_truncate(a0, a1),
+        77 => linux_ftruncate(pid, a0, a1),
+        78 => linux_getdents64(pid, a0, a1, a2),
+        79 => linux_getcwd(a0, a1),
+        80 => linux_chdir(a0),
+        81 => linux_fchdir(pid, a0),
+        82 => linux_rename(a0, a1),
+        83 => linux_mkdir(a0),
+        84 => linux_unlink(a0),
+        85 => linux_creat(pid, a0),
+        86 => linux_link(a0, a1),
+        87 => linux_unlink(a0),
+        88 => Err(LINUX_ENOSYS),
+        89 => Err(LINUX_ENOSYS),
+        90 => Ok(0),
+        91 => Ok(0),
+        92 => Ok(0),
+        93 => Ok(0),
+        94 => Ok(0),
+        95 => Ok(UMASK.swap((a0 as u32) & 0o777, Ordering::SeqCst) as u64),
+        96 => linux_gettimeofday(a0, a1),
+        97 => linux_getrlimit(a1),
+        98 => {
+            if a1 != 0 {
+                match zero_user_bytes(a1, 144) {
+                    Ok(()) => {}
+                    Err(code) => return code,
+                }
+            }
+            Ok(0)
+        }
+        99 => linux_sysinfo(a0),
+        100 => linux_times(a0),
+        101 => Err(LINUX_ENOSYS),
+        102 => Ok(0),
+        103 => Err(LINUX_ENOSYS),
+        104 => Ok(0),
+        105 => Ok(0),
+        106 => Ok(0),
+        107 => Ok(0),
+        108 => Ok(0),
+        109 => linux_setpgid(pid, a0, a1),
+        110 => Ok(linux_getppid(pid)),
+        111 => linux_getpgrp(pid),
+        112 => linux_setsid(pid),
+        113 => Ok(0),
+        114 => Ok(0),
+        115 => Ok(0),
+        116 => Ok(0),
+        117 => Ok(0),
+        118 => linux_getres_ids(a0, a1, a2),
+        119 => Ok(0),
+        120 => linux_getres_ids(a0, a1, a2),
+        121 => linux_getpgid(a0, pid),
+        122 => Ok(0),
+        123 => Ok(0),
+        124 => linux_getsid(a0, pid),
+        125 => Ok(0),
+        126 => Ok(0),
+        127 => {
+            if a0 != 0 {
+                match zero_user_bytes(a0, a1 as usize) {
+                    Ok(()) => {}
+                    Err(code) => return code,
+                }
+            }
+            Ok(0)
+        }
+        128 => Err(LINUX_ENOSYS),
+        129 => Err(LINUX_ENOSYS),
+        130 => Err(LINUX_ENOSYS),
+        131 => Ok(0),
+        132 => Ok(0),
+        133 => Err(LINUX_ENOSYS),
+        134 => Err(LINUX_ENOSYS),
+        135 => Ok(0),
+        136 => Err(LINUX_ENOSYS),
+        137 => {
+            if a1 != 0 {
+                match zero_user_bytes(a1, 128) {
+                    Ok(()) => {}
+                    Err(code) => return code,
+                }
+            }
+            Ok(0)
+        }
+        138 => {
+            if a1 != 0 {
+                match zero_user_bytes(a1, 128) {
+                    Ok(()) => {}
+                    Err(code) => return code,
+                }
+            }
+            Ok(0)
+        }
+        139 => Err(LINUX_ENOSYS),
+        140 => Ok(0),
+        141 => Ok(0),
+        142 => Ok(0),
+        143 => {
+            if a1 != 0 {
+                match write_user_struct(a1, &0i32) {
+                    Ok(()) => {}
+                    Err(code) => return code,
+                }
+            }
+            Ok(0)
+        }
+        144 => Ok(0),
+        145 => Ok(0),
+        146 => Ok(0),
+        147 => Ok(0),
+        148 => linux_clock_getres(a1),
+        149 => Ok(0),
+        150 => Ok(0),
+        151 => Ok(0),
+        152 => Ok(0),
+        153 => Err(LINUX_ENOSYS),
+        154 => Err(LINUX_ENOSYS),
+        155 => Err(LINUX_ENOSYS),
+        156 => Err(LINUX_ENOSYS),
+        157 => Ok(0),
+        158 => linux_arch_prctl(a0, a1),
+        159 => Err(LINUX_ENOSYS),
+        160 => Ok(0),
+        161 => Err(LINUX_ENOSYS),
+        162 => Ok(0),
+        163 => Err(LINUX_ENOSYS),
+        164 => Err(LINUX_ENOSYS),
+        165 => Err(LINUX_ENOSYS),
+        166 => {
+            let path = match read_user_cstr(a0, 4096) {
+                Ok(path) => path,
+                Err(code) => return code,
+            };
+            vfs::umount(path.as_str()).map(|_| 0).map_err(|_| LINUX_EINVAL)
+        }
+        167 => Err(LINUX_ENOSYS),
+        168 => Err(LINUX_ENOSYS),
+        169 => Err(LINUX_ENOSYS),
+        170 => Ok(0),
+        171 => Ok(0),
+        172 => Err(LINUX_ENOSYS),
+        173 => Err(LINUX_ENOSYS),
+        174 => Err(LINUX_ENOSYS),
+        175 => Err(LINUX_ENOSYS),
+        176 => Err(LINUX_ENOSYS),
+        177 => Err(LINUX_ENOSYS),
+        178 => Err(LINUX_ENOSYS),
+        179 => Err(LINUX_ENOSYS),
+        180 => Err(LINUX_ENOSYS),
+        181 => Err(LINUX_ENOSYS),
+        182 => Err(LINUX_ENOSYS),
+        183 => Err(LINUX_ENOSYS),
+        184 => Err(LINUX_ENOSYS),
+        185 => Err(LINUX_ENOSYS),
+        186 => dispatch_custom(SyscallNumber::GetPid, [0, 0, 0, 0, 0, 0], pid),
+        187 => Ok(0),
+        188 => Err(LINUX_ENOSYS),
+        189 => Err(LINUX_ENOSYS),
+        190 => Err(LINUX_ENOSYS),
+        191 => Err(LINUX_ENOSYS),
+        192 => Err(LINUX_ENOSYS),
+        193 => Err(LINUX_ENOSYS),
+        194 => Err(LINUX_ENOSYS),
+        195 => Err(LINUX_ENOSYS),
+        196 => Err(LINUX_ENOSYS),
+        197 => Err(LINUX_ENOSYS),
+        198 => Err(LINUX_ENOSYS),
+        199 => Err(LINUX_ENOSYS),
+        200 => dispatch_custom(SyscallNumber::Kill, [a0, a1, 0, 0, 0, 0], pid),
+        201 => linux_time(a0),
+        202 => Ok(0),
+        203 => Ok(0),
+        204 => linux_sched_getaffinity(a2, a1),
+        205 => Ok(0),
+        206 => Err(LINUX_ENOSYS),
+        207 => Err(LINUX_ENOSYS),
+        208 => Err(LINUX_ENOSYS),
+        209 => Err(LINUX_ENOSYS),
+        210 => Err(LINUX_ENOSYS),
+        211 => Ok(0),
+        212 => Err(LINUX_ENOSYS),
+        213 => Err(LINUX_ENOSYS),
+        214 => Err(LINUX_ENOSYS),
+        215 => Err(LINUX_ENOSYS),
+        216 => Ok(0),
+        217 => linux_getdents64(pid, a0, a1, a2),
+        218 => dispatch_custom(SyscallNumber::GetPid, [0, 0, 0, 0, 0, 0], pid),
+        219 => Ok(0),
+        220 => Err(LINUX_ENOSYS),
+        221 => Ok(0),
+        222 => Err(LINUX_ENOSYS),
+        223 => Err(LINUX_ENOSYS),
+        224 => Err(LINUX_ENOSYS),
+        225 => Err(LINUX_ENOSYS),
+        226 => Err(LINUX_ENOSYS),
+        227 => Err(LINUX_ENOSYS),
+        228 => linux_clock_gettime(a1),
+        229 => linux_clock_getres(a1),
+        230 => linux_clock_nanosleep(a3, a4),
+        231 => dispatch_custom(SyscallNumber::Exit, [a0, 0, 0, 0, 0, 0], pid),
+        232 => Err(LINUX_ENOSYS),
+        233 => Err(LINUX_ENOSYS),
+        234 => dispatch_custom(SyscallNumber::Kill, [a1, a2, 0, 0, 0, 0], pid),
+        235 => Ok(0),
+        236 => Err(LINUX_ENOSYS),
+        237 => Err(LINUX_ENOSYS),
+        238 => Err(LINUX_ENOSYS),
+        239 => Err(LINUX_ENOSYS),
+        240 => Err(LINUX_ENOSYS),
+        241 => Err(LINUX_ENOSYS),
+        242 => Err(LINUX_ENOSYS),
+        243 => Err(LINUX_ENOSYS),
+        244 => Err(LINUX_ENOSYS),
+        245 => Err(LINUX_ENOSYS),
+        246 => Err(LINUX_ENOSYS),
+        247 => Err(LINUX_ENOSYS),
+        248 => Err(LINUX_ENOSYS),
+        249 => Err(LINUX_ENOSYS),
+        257 => linux_openat(pid, a0, a1, a2),
+        258 => linux_mkdirat(pid, a0, a1),
+        259 => linux_mknodat(pid, a0, a1, a2),
+        262 => linux_newfstatat(pid, a0, a1, a2, a3),
+        263 => linux_unlinkat(pid, a0, a1),
+        264 => linux_renameat(pid, a0, a1, a2, a3),
+        265 => linux_linkat(pid, a0, a1, a2, a3),
+        269 => linux_faccessat(pid, a0, a1),
+        270 => linux_select(pid, a0, a1, a2, a3, a5),
+        271 => {
+            let timeout_ms = if a2 == 0 {
+                0
+            } else {
+                let ts = match unsafe { user_ref::<LinuxTimespec>(a2) } {
+                    Ok(ts) => *ts,
+                    Err(code) => return code,
+                };
+                (ts.tv_sec.max(0) as u64)
+                    .saturating_mul(1000)
+                    .saturating_add((ts.tv_nsec.max(0) as u64) / 1_000_000)
+            };
+            linux_poll(pid, a0, a1, timeout_ms)
+        }
+        272 => Ok(0),
+        273 => Ok(0),
+        274 => {
+            if a1 != 0 {
+                match write_user_struct(a1, &0u64) {
+                    Ok(()) => {}
+                    Err(code) => return code,
+                }
+            }
+            if a2 != 0 {
+                match write_user_struct(a2, &0usize) {
+                    Ok(()) => {}
+                    Err(code) => return code,
+                }
+            }
+            Ok(0)
+        }
+        292 => linux_dup3(pid, a0, a1),
+        293 => linux_pipe2(pid, a0, a1),
+        _ => Err(LINUX_ENOSYS),
+    };
+
+    match out {
+        Ok(value) => value as i64,
+        Err(code) => code,
+    }
+}
+
 fn selector_to_program(selector: u64) -> Option<&'static str> {
     match selector {
         1 => Some("hello"),
@@ -313,18 +1899,31 @@ fn open_mode_to_options(mode: u64) -> Option<vfs::OpenOptions> {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 enum DescriptorKind {
-    Vfs(vfs::VfsFd),
+    Vfs { fd: vfs::VfsFd, path: String },
+    Directory(String),
     PipeRead(usize),
     PipeWrite(usize),
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 struct DescriptorObject {
     kind: DescriptorKind,
     refs: u32,
     nonblocking: bool,
+    cursor: usize,
+}
+
+impl DescriptorObject {
+    fn new(kind: DescriptorKind) -> Self {
+        Self {
+            kind,
+            refs: 1,
+            nonblocking: false,
+            cursor: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -377,18 +1976,10 @@ impl SyscallState {
             .enumerate()
             .find(|(_, s)| s.is_none())
         {
-            *slot = Some(DescriptorObject {
-                kind,
-                refs: 1,
-                nonblocking: false,
-            });
+            *slot = Some(DescriptorObject::new(kind));
             return idx;
         }
-        self.objects.push(Some(DescriptorObject {
-            kind,
-            refs: 1,
-            nonblocking: false,
-        }));
+        self.objects.push(Some(DescriptorObject::new(kind)));
         self.objects.len() - 1
     }
 
@@ -427,10 +2018,10 @@ impl SyscallState {
                 obj.refs -= 1;
                 return Ok(());
             }
-            let final_obj = *obj;
+            let final_obj = obj.clone();
             self.objects[obj_idx] = None;
-            if let DescriptorKind::Vfs(vfd) = final_obj.kind {
-                let _ = vfs::close(vfd);
+            if let DescriptorKind::Vfs { fd, .. } = final_obj.kind {
+                let _ = vfs::close(fd);
             }
         }
         Ok(())
@@ -479,10 +2070,10 @@ fn resolve_vfs_fd(state: &SyscallState, pid: u64, fd: u64) -> Result<vfs::VfsFd,
     let obj = state
         .objects
         .get(obj_idx)
-        .and_then(|o| *o)
+        .and_then(|o| o.as_ref())
         .ok_or(SyscallError::InvalidArgument)?;
     match obj.kind {
-        DescriptorKind::Vfs(vfd) => Ok(vfd),
+        DescriptorKind::Vfs { fd, .. } => Ok(fd),
         _ => Err(SyscallError::InvalidArgument),
     }
 }
@@ -575,7 +2166,7 @@ fn poll_fd_mask(
     let obj = state
         .objects
         .get(obj_idx)
-        .and_then(|o| *o)
+        .and_then(|o| o.as_ref())
         .ok_or(SyscallError::InvalidArgument)?;
 
     let requested = if events == 0 {
@@ -585,7 +2176,7 @@ fn poll_fd_mask(
     };
     let mut revents = 0u64;
     match obj.kind {
-        DescriptorKind::Vfs(_) => {
+        DescriptorKind::Vfs { .. } | DescriptorKind::Directory(_) => {
             revents |= requested & (POLLIN | POLLOUT);
         }
         DescriptorKind::PipeRead(pipe_id) => {
@@ -710,7 +2301,10 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             let options = open_mode_to_options(req.args[1]).ok_or(SyscallError::InvalidArgument)?;
             let vfd = vfs::open(path, options).map_err(|_| SyscallError::InvalidArgument)?;
             let fd = with_state_mut(|state| {
-                let obj = state.alloc_object(DescriptorKind::Vfs(vfd));
+                let obj = state.alloc_object(DescriptorKind::Vfs {
+                    fd: vfd,
+                    path: path.to_string(),
+                });
                 state.alloc_fd(ctx.pid, obj)
             });
             Ok(fd)
@@ -730,12 +2324,13 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                 let obj = state
                     .objects
                     .get(obj_idx)
-                    .and_then(|o| *o)
+                    .and_then(|o| o.as_ref())
                     .ok_or(SyscallError::InvalidArgument)?;
                 match obj.kind {
-                    DescriptorKind::Vfs(vfd) => {
+                    DescriptorKind::Vfs { fd: vfd, .. } => {
                         vfs::read(vfd, max_len).map_err(|_| SyscallError::InvalidArgument)
                     }
+                    DescriptorKind::Directory(_) => Err(SyscallError::InvalidArgument),
                     DescriptorKind::PipeRead(pipe_id) => {
                         let pipe = state
                             .pipes
@@ -786,12 +2381,13 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                         let obj = state
                             .objects
                             .get(obj_idx)
-                            .and_then(|o| *o)
+                            .and_then(|o| o.as_ref())
                             .ok_or(SyscallError::InvalidArgument)?;
                         match obj.kind {
-                            DescriptorKind::Vfs(vfd) => {
+                            DescriptorKind::Vfs { fd: vfd, .. } => {
                                 vfs::write(vfd, data).map_err(|_| SyscallError::InvalidArgument)
                             }
+                            DescriptorKind::Directory(_) => Err(SyscallError::InvalidArgument),
                             DescriptorKind::PipeWrite(pipe_id) => {
                                 let pipe = state
                                     .pipes

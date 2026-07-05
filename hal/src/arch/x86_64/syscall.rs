@@ -50,23 +50,32 @@ global_asm!(
     "mov [rip + SAIOS_SYSCALL_USER_RSP], rsp",
     "mov rsp, [rip + SAIOS_SYSCALL_RSP0]",
     "and rsp, -16",
-    // Temporary syscall ABI: report ENOSYS, then return to ring3 with iretq.
-    // This avoids SYSRET selector-layout constraints while GDT still uses the
-    // natural iret layout (user code before user data).
-    "mov rax, -38",
-    "mov rdx, [rip + SAIOS_SYSCALL_USER_RSP]",
+    // Preserve userspace return state across the Rust dispatcher call.
+    "mov r12, rcx",
+    "mov r13, r11",
+    "mov r14, [rip + SAIOS_SYSCALL_USER_RSP]",
+    // Linux x86_64 syscall ABI: rax=nr, rdi/rsi/rdx/r10/r8/r9=args.
+    "mov r15, rax",
+    "mov rcx, r10",
+    "sub rsp, 8",
+    "mov rdi, r15",
+    "call {dispatch}",
+    "add rsp, 8",
     "push {user_data}",
-    "push rdx",
-    "push r11", // saved user RFLAGS from SYSCALL
+    "push r14",
+    "push r13", // saved user RFLAGS from SYSCALL
     "push {user_code}",
-    "push rcx", // saved user RIP from SYSCALL
+    "push r12", // saved user RIP from SYSCALL
     "iretq",
+    dispatch = sym saios_linux_syscall,
     user_data = const USER_DATA_SELECTOR,
     user_code = const USER_CODE_SELECTOR,
 );
 
 unsafe extern "C" {
     fn saios_syscall_entry();
+    fn saios_linux_syscall(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64)
+        -> i64;
 }
 
 pub fn set_kernel_rsp0(rsp0: u64) {
