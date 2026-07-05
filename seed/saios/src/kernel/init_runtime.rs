@@ -189,6 +189,23 @@ fn vfs_touch(path: &str) -> Result<(), &'static str> {
     }
 }
 
+fn ensure_user_home_files(home: &str) {
+    let home_path = if home.trim().is_empty() { "/root" } else { home };
+    let _ = crate::saifs::mkdir(home_path);
+    let bashrc = if home_path == "/" {
+        "/.bashrc".to_string()
+    } else {
+        alloc::format!("{}/.bashrc", home_path.trim_end_matches('/'))
+    };
+    if crate::saifs::read_text(bashrc.as_str()).is_err() {
+        let _ = crate::saifs::touch(bashrc.as_str());
+        let _ = crate::vfs::write_path(
+            bashrc.as_str(),
+            b"# SAIOS shell startup\nalias ll ls\n",
+        );
+    }
+}
+
 fn read_runtime_state() -> RuntimeState {
     ensure_default_init_files();
 
@@ -283,15 +300,25 @@ pub fn boot_to_login_shell() -> ! {
     console::println!("init: ready (hostname={})", state.config.hostname);
 
     let username;
+    let user_home;
     loop {
         let user = prompt_line("login: ");
         let pass = prompt_line("password: ");
         if authenticate(&state, user.as_str(), pass.as_str()) {
+            user_home = state
+                .accounts
+                .iter()
+                .find(|a| a.username == user)
+                .map(|a| a.home.clone())
+                .unwrap_or_else(|| "/root".to_string());
             username = user;
             break;
         }
         console::println!("login: authentication failed");
     }
+
+    ensure_user_home_files(user_home.as_str());
+    let _ = crate::saifs::cd(user_home.as_str());
 
     let shell_pid = process::ensure_shell_process(state.config.login_shell.as_str());
     let _ = process::create_session(shell_pid);

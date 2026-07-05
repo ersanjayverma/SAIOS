@@ -766,7 +766,8 @@ fn compute_pie_layout(pid: u64, preferred_base: u64) -> (u64, u64) {
 }
 
 pub fn exec(name: &str, args: &[&str], env: &[(String, String)]) -> Result<i32, &'static str> {
-    exec_from(None, name, args, env)
+    let parent_pid = with_manager(|m| m.shell_pid.or(m.init_pid));
+    exec_from(parent_pid, name, args, env)
 }
 
 pub fn exec_from(

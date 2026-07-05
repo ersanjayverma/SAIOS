@@ -81,7 +81,10 @@ fn cmd_ls(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     let path = resolve_relative_path(positionals.first().copied().unwrap_or("."));
-    let entries = saifs::list(path.as_str()).map_err(|_| "ls failed")?;
+    let entries = match saifs::list(path.as_str()) {
+        Ok(v) => v,
+        Err(_) => vfs::readdir(path.as_str()).map_err(|_| "ls failed")?,
+    };
 
     if show_all {
         console::println!(

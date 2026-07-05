@@ -2528,7 +2528,12 @@ fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
                 .get(2)
                 .copied()
                 .ok_or("volumes format: missing filesystem type")?;
-            let fs = disk::FilesystemKind::from_str(fs_str)
+            let fs_norm = if fs_str.eq_ignore_ascii_case("extf4") {
+                "ext4"
+            } else {
+                fs_str
+            };
+            let fs = disk::FilesystemKind::from_str(fs_norm)
                 .ok_or("volumes format: unknown filesystem; use fat32 or ext4")?;
             disk::format_volume(name, fs)?;
             console::println!("volumes: '{}' formatted as {}", name, fs.as_str());

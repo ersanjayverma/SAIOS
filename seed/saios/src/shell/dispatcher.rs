@@ -154,10 +154,14 @@ impl CommandDispatcher {
                         }
                         Ok(())
                     }
-                    Err(_) => {
+                    Err(e) => {
                         exit_code = 127;
                         if !suppress_console {
-                            console::println!("Unknown command: {}", cmd.command);
+                            if e == "exec: program not found" {
+                                console::println!("Unknown command: {}", cmd.command);
+                            } else {
+                                console::println!("{}", e);
+                            }
                         }
                         Ok(())
                     }

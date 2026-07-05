@@ -1106,9 +1106,21 @@ pub fn cd(path: &str) -> Result<(), &'static str> {
     with_vfs(|vfs| {
         let abs = vfs.fs.normalized_path(path);
         if is_storage_backed(&abs) {
-            let stat = storage::fs_stat(&abs)?;
-            if stat.kind != storage::FsNodeKind::Directory {
-                return Err("not a directory");
+            match storage::fs_stat(&abs) {
+                Ok(stat) => {
+                    if stat.kind != storage::FsNodeKind::Directory {
+                        return Err("not a directory");
+                    }
+                }
+                Err(_) => {
+                    // Some backends can fail to stat the mount root itself even
+                    // though the mount is valid. In that case, trust the mount
+                    // record for exact mount-point cd.
+                    let is_exact_mount = vfs.mounts.iter().any(|m| m.path == abs);
+                    if !is_exact_mount {
+                        return Err("path not found");
+                    }
+                }
             }
             vfs.fs.cwd_override = Some(abs);
             return Ok(());

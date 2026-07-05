@@ -23,6 +23,9 @@ const HEAP_IDENTITY_MAX_PHYS: u64 = 0x4000_0000;
 const HEAP_GROW_STEP_SMALL_BYTES: usize = 2 * 1024 * 1024;
 /// Large grow step in bytes (4 MiB).
 const HEAP_GROW_STEP_LARGE_BYTES: usize = 4 * 1024 * 1024;
+const HEAP_GROW_STEP_8M_BYTES: usize = 8 * 1024 * 1024;
+const HEAP_GROW_STEP_16M_BYTES: usize = 16 * 1024 * 1024;
+const HEAP_GROW_STEP_32M_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum number of heap chunks.
 const MAX_HEAP_CHUNKS: usize = 512;
 
@@ -213,6 +216,23 @@ fn compute_used_bytes(state: &HeapState) -> usize {
     used
 }
 
+fn growth_request_bytes_for_layout(layout: Layout) -> usize {
+    let needed = core::cmp::max(layout.size(), layout.align());
+    if needed <= HEAP_GROW_STEP_SMALL_BYTES {
+        HEAP_GROW_STEP_SMALL_BYTES
+    } else if needed <= HEAP_GROW_STEP_LARGE_BYTES {
+        HEAP_GROW_STEP_LARGE_BYTES
+    } else if needed <= HEAP_GROW_STEP_8M_BYTES {
+        HEAP_GROW_STEP_8M_BYTES
+    } else if needed <= HEAP_GROW_STEP_16M_BYTES {
+        HEAP_GROW_STEP_16M_BYTES
+    } else if needed <= HEAP_GROW_STEP_32M_BYTES {
+        HEAP_GROW_STEP_32M_BYTES
+    } else {
+        needed.saturating_add(HEAP_GROW_STEP_SMALL_BYTES)
+    }
+}
+
 /// Global allocator used by the kernel.
 pub struct KernelHeapAllocator;
 
@@ -240,17 +260,12 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
 
         // Grow as needed up to target (25% RAM), then retry once.
         if state.committed_bytes < state.target_bytes {
-            let growth_step = if layout.size() > HEAP_GROW_STEP_SMALL_BYTES {
-                HEAP_GROW_STEP_LARGE_BYTES
-            } else {
-                HEAP_GROW_STEP_SMALL_BYTES
-            };
-            let min_extra = core::cmp::max(layout.size(), growth_step);
+            let min_extra = growth_request_bytes_for_layout(layout);
             let desired = core::cmp::min(
                 state.target_bytes,
                 state.committed_bytes.saturating_add(min_extra),
             );
-            grow_heap_locked(state, desired, growth_step);
+            grow_heap_locked(state, desired, min_extra);
         }
 
         let ptr = try_alloc_from_chunks(state, layout)
