@@ -18,6 +18,7 @@ use crate::kernel::device::{self, DeviceStatus};
 use crate::pci;
 
 const FAT_STORE_MAGIC: &[u8; 8] = b"SAFAT32\0";
+const EXT4_STORE_MAGIC: &[u8; 8] = b"SAEXT4\0\0";
 const FAT_STORE_VERSION: u32 = 1;
 const PARTITION_PROBE_WINDOW_BYTES: usize = 4096;
 const MOUNT_TREE_READ_WINDOW_BYTES: usize = 256 * 1024;
@@ -61,12 +62,23 @@ impl FilesystemKind {
 
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
+        let lowered = s.trim().to_ascii_lowercase();
+        let canonical: String = lowered
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+
+        match canonical.as_str() {
             "tmpfs" => Some(Self::TmpFs),
             "ext4" => Some(Self::Ext4),
+            "ext" => Some(Self::Ext4),
+            "ext2" => Some(Self::Ext4),
+            "ext3" => Some(Self::Ext4),
             "ntfs" => Some(Self::Ntfs),
             "fat16" => Some(Self::Fat16),
             "fat32" => Some(Self::Fat32),
+            "fat" => Some(Self::Fat32),
+            "vfat" => Some(Self::Fat32),
             "fat64" => Some(Self::Fat64),
             "fat128" => Some(Self::Fat128),
             _ => None,
@@ -398,8 +410,31 @@ fn probe_fat(image: &[u8]) -> Option<ProbeResult> {
     Some(ProbeResult { fs })
 }
 
+fn probe_managed_store(image: &[u8]) -> Option<ProbeResult> {
+    let magic = image.get(0..8)?;
+    let version = le_u32(image, 8)?;
+    if version != FAT_STORE_VERSION {
+        return None;
+    }
+
+    if magic == FAT_STORE_MAGIC {
+        return Some(ProbeResult {
+            fs: FilesystemKind::Fat32,
+        });
+    }
+
+    if magic == EXT4_STORE_MAGIC {
+        return Some(ProbeResult {
+            fs: FilesystemKind::Ext4,
+        });
+    }
+
+    None
+}
+
 fn probe_filesystem(image: &[u8]) -> Option<ProbeResult> {
-    probe_ext4(image)
+    probe_managed_store(image)
+        .or_else(|| probe_ext4(image))
         .or_else(|| probe_ntfs(image))
         .or_else(|| probe_fat(image))
 }
@@ -458,92 +493,15 @@ fn default_fat_tree() -> Vec<FsNode> {
             kind: FsNodeKind::Directory,
             data: Vec::new(),
         },
-        FsNode {
-            path: "/boot".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/dev".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/home".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/etc".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/tmp".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/proc".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/sys".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
     ]
 }
 
-fn default_ro_tree(fs: FilesystemKind) -> Vec<FsNode> {
-    let mut nodes = vec![
-        FsNode {
-            path: "/".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/boot".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/etc".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/home".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/mnt".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-    ];
-
-    let notice = format!(
-        "SAIOS mounted {} as a read-only preview backend.\nRead/write support for this filesystem is not implemented yet.\n",
-        fs.as_str()
-    );
-    nodes.push(FsNode {
-        path: "/README.TXT".to_string(),
-        kind: FsNodeKind::File,
-        data: notice.into_bytes(),
-    });
-
-    if fs == FilesystemKind::Ext4 {
-        nodes.push(FsNode {
-            path: "/lost+found".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        });
-    }
-
-    nodes
+fn default_ro_tree(_fs: FilesystemKind) -> Vec<FsNode> {
+    vec![FsNode {
+        path: "/".to_string(),
+        kind: FsNodeKind::Directory,
+        data: Vec::new(),
+    }]
 }
 
 fn default_rw_tree(fs: FilesystemKind) -> Vec<FsNode> {
@@ -551,52 +509,49 @@ fn default_rw_tree(fs: FilesystemKind) -> Vec<FsNode> {
         return default_fat_tree();
     }
 
-    let mut nodes = vec![
+    let nodes = vec![
         FsNode {
             path: "/".to_string(),
             kind: FsNodeKind::Directory,
             data: Vec::new(),
         },
-        FsNode {
-            path: "/boot".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/etc".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/home".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/mnt".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
-        FsNode {
-            path: "/tmp".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        },
     ];
-
-    if fs == FilesystemKind::Ext4 {
-        nodes.push(FsNode {
-            path: "/lost+found".to_string(),
-            kind: FsNodeKind::Directory,
-            data: Vec::new(),
-        });
-    }
 
     nodes
 }
 
+fn is_legacy_scaffold_dir(path: &str) -> bool {
+    matches!(path, "/boot" | "/dev" | "/etc" | "/home" | "/mnt" | "/proc" | "/sys" | "/tmp")
+}
+
+fn prune_legacy_scaffold_dirs(nodes: &mut Vec<FsNode>) {
+    let mut i = 0usize;
+    while i < nodes.len() {
+        let path = nodes[i].path.clone();
+        let removable = nodes[i].kind == FsNodeKind::Directory
+            && is_legacy_scaffold_dir(path.as_str())
+            && nodes[i].data.is_empty()
+            && !nodes
+                .iter()
+                .any(|n| n.path != path && is_child_of(path.as_str(), n.path.as_str()));
+
+        if removable {
+            nodes.remove(i);
+            continue;
+        }
+
+        i += 1;
+    }
+}
+
+fn is_legacy_ext4_stub_tree(nodes: &[FsNode]) -> bool {
+    nodes.iter().all(|n| {
+        n.path == "/" || is_legacy_scaffold_dir(n.path.as_str()) || n.path == "/lost+found"
+    })
+}
+
 fn fs_supports_rw_tree(fs: FilesystemKind) -> bool {
-    fs == FilesystemKind::Fat32
+    fs == FilesystemKind::Fat32 || fs == FilesystemKind::Ext4
 }
 
 fn fs_supports_mount_tree(fs: FilesystemKind) -> bool {
@@ -624,9 +579,14 @@ fn ensure_parent_dir(nodes: &[FsNode], path: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn serialize_tree(nodes: &[FsNode]) -> Vec<u8> {
+fn serialize_tree(nodes: &[FsNode], fs: FilesystemKind) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(FAT_STORE_MAGIC);
+    let magic = if fs == FilesystemKind::Ext4 {
+        EXT4_STORE_MAGIC
+    } else {
+        FAT_STORE_MAGIC
+    };
+    out.extend_from_slice(magic);
     out.extend_from_slice(&FAT_STORE_VERSION.to_le_bytes());
     out.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
 
@@ -649,7 +609,8 @@ fn deserialize_tree(bytes: &[u8]) -> Option<Vec<FsNode>> {
     if bytes.len() < 16 {
         return None;
     }
-    if bytes.get(0..8)? != FAT_STORE_MAGIC {
+    let magic = bytes.get(0..8)?;
+    if magic != FAT_STORE_MAGIC && magic != EXT4_STORE_MAGIC {
         return None;
     }
 
@@ -769,7 +730,14 @@ fn save_mounted_volume(state: &mut StorageState, volume: &str) -> Result<(), &'s
         .ok_or("storage: partition missing")?
         .clone();
 
-    let bytes = serialize_tree(mounted.nodes.as_slice());
+    let fs_kind = state
+        .volumes
+        .iter()
+        .find(|v| v.name.eq_ignore_ascii_case(volume))
+        .map(|v| v.filesystem)
+        .unwrap_or(FilesystemKind::Fat32);
+
+    let bytes = serialize_tree(mounted.nodes.as_slice(), fs_kind);
     write_partition_bytes(disk, &part, bytes.as_slice())
 }
 
@@ -792,7 +760,7 @@ fn load_volume_tree(
     volume: &str,
     fs: FilesystemKind,
 ) -> Result<Vec<FsNode>, &'static str> {
-    if fs != FilesystemKind::Fat32 {
+    if fs != FilesystemKind::Fat32 && fs != FilesystemKind::Ext4 {
         return Err("storage: native filesystem reader not implemented for this volume");
     }
 
@@ -809,8 +777,26 @@ fn load_volume_tree(
         .ok_or("storage: partition missing")?;
 
     let bytes = read_partition_bytes(disk, part)?;
-    if let Some(nodes) = deserialize_tree(bytes.as_slice()) {
+    if let Some(mut nodes) = deserialize_tree(bytes.as_slice()) {
+        // Backward compatibility: old builds seeded scaffold directories into
+        // managed volumes. Remove those empty placeholders on load.
+        prune_legacy_scaffold_dirs(&mut nodes);
+
+        // If this looks like an old managed ext4 scaffold and the partition
+        // has a valid native ext4 superblock, prefer native ext4 traversal so
+        // real Linux files are visible.
+        if fs == FilesystemKind::Ext4
+            && is_legacy_ext4_stub_tree(nodes.as_slice())
+            && ext4_load_superblock(disk, part).is_ok()
+        {
+            return Err("storage: ext4 volume has native filesystem; using native reader");
+        }
+
         return Ok(nodes);
+    }
+
+    if fs == FilesystemKind::Ext4 {
+        return Err("storage: ext4 volume is native read-only; format it to enable managed read/write");
     }
 
     Ok(default_rw_tree(fs))
@@ -1115,10 +1101,6 @@ fn ensure_volume_mounted(
     volume: &str,
     fs: FilesystemKind,
 ) -> Result<(), &'static str> {
-    if fs == FilesystemKind::Ext4 {
-        return Ok(());
-    }
-
     if state
         .mounted
         .iter()
@@ -1132,7 +1114,11 @@ fn ensure_volume_mounted(
     }
 
     let nodes = if fs_supports_rw_tree(fs) {
-        load_volume_tree(state, volume, fs)?
+        match load_volume_tree(state, volume, fs) {
+            Ok(nodes) => nodes,
+            Err(_) if fs == FilesystemKind::Ext4 => return Ok(()),
+            Err(e) => return Err(e),
+        }
     } else {
         default_ro_tree(fs)
     };
@@ -1203,7 +1189,9 @@ struct Ext4DirEntry {
 
 const EXT4_S_IFDIR: u16 = 0x4000;
 const EXT4_S_IFREG: u16 = 0x8000;
+const EXT4_S_IFLNK: u16 = 0xA000;
 const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
+const EXT4_MAX_SYMLINK_DEPTH: usize = 16;
 
 fn read_partition_at(
     disk: &DiskDevice,
@@ -1496,28 +1484,82 @@ fn ext4_lookup_path(
     rel: &str,
 ) -> Result<(Ext4Superblock, u32, Ext4Inode), &'static str> {
     let sb = ext4_load_superblock(disk, part)?;
-    let path = normalize_path(rel);
-    let mut inode_no = 2u32;
-    let mut inode = ext4_load_inode(disk, part, &sb, inode_no)?;
+    let mut path = normalize_path(rel);
 
-    for seg in path.split('/').filter(|s| !s.is_empty()) {
-        if (inode.mode & EXT4_S_IFDIR) == 0 {
-            return Err("not a directory");
-        }
-        let entries = ext4_list_dir(disk, part, &sb, &inode)?;
-        let mut found = None;
-        for ent in entries {
-            if ent.name == seg {
-                found = Some(ent.inode);
+    for _ in 0..EXT4_MAX_SYMLINK_DEPTH {
+        let mut inode_no = 2u32;
+        let mut inode = ext4_load_inode(disk, part, &sb, inode_no)?;
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut resolved_parts: Vec<&str> = Vec::new();
+        let mut restarted = false;
+
+        for (idx, seg) in segments.iter().enumerate() {
+            if (inode.mode & EXT4_S_IFDIR) == 0 {
+                return Err("not a directory");
+            }
+            let entries = ext4_list_dir(disk, part, &sb, &inode)?;
+            let mut found = None;
+            for ent in entries {
+                if ent.name == *seg {
+                    found = Some(ent.inode);
+                    break;
+                }
+            }
+            let next = found.ok_or("path not found")?;
+            let next_inode = ext4_load_inode(disk, part, &sb, next)?;
+
+            if (next_inode.mode & EXT4_S_IFLNK) != 0 {
+                let target_bytes = if next_inode.size as usize <= next_inode.block.len() {
+                    next_inode.block[..next_inode.size as usize].to_vec()
+                } else {
+                    ext4_read_inode_data(disk, part, &sb, &next_inode)?
+                };
+                let target = core::str::from_utf8(target_bytes.as_slice())
+                    .map_err(|_| "storage: ext4 symlink target is not utf-8")?;
+                let remaining = if idx + 1 < segments.len() {
+                    segments[idx + 1..].join("/")
+                } else {
+                    String::new()
+                };
+                let parent = if resolved_parts.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("/{}", resolved_parts.join("/"))
+                };
+                let combined = if target.starts_with('/') {
+                    if remaining.is_empty() {
+                        target.to_string()
+                    } else {
+                        format!("{}/{}", target.trim_end_matches('/'), remaining)
+                    }
+                } else {
+                    let base = if parent == "/" {
+                        format!("/{}", target)
+                    } else {
+                        format!("{}/{}", parent, target)
+                    };
+                    if remaining.is_empty() {
+                        base
+                    } else {
+                        format!("{}/{}", base.trim_end_matches('/'), remaining)
+                    }
+                };
+                path = normalize_path(combined.as_str());
+                restarted = true;
                 break;
             }
+
+            inode_no = next;
+            inode = next_inode;
+            resolved_parts.push(seg);
         }
-        let next = found.ok_or("path not found")?;
-        inode_no = next;
-        inode = ext4_load_inode(disk, part, &sb, inode_no)?;
+
+        if !restarted {
+            return Ok((sb, inode_no, inode));
+        }
     }
 
-    Ok((sb, inode_no, inode))
+    Err("storage: ext4 symlink resolution limit exceeded")
 }
 
 fn ext4_with_volume<R>(
@@ -1850,7 +1892,7 @@ pub fn format_volume(name: &str, fs: FilesystemKind) -> Result<(), &'static str>
             .clone();
 
         let tree = default_rw_tree(fs);
-        let bytes = serialize_tree(tree.as_slice());
+        let bytes = serialize_tree(tree.as_slice(), fs);
         write_partition_bytes(disk, &part, bytes.as_slice())?;
         disk.block.flush();
 
@@ -1882,6 +1924,18 @@ pub fn fs_stat(path: &str) -> Result<FsStat, &'static str> {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
         if vol_fs == FilesystemKind::Ext4 {
+            if let Some(mounted) = state
+                .mounted
+                .iter()
+                .find(|m| m.volume.eq_ignore_ascii_case(vol_name.as_str()))
+            {
+                let node = find_node(mounted.nodes.as_slice(), rel.as_str()).ok_or("path not found")?;
+                return Ok(FsStat {
+                    kind: node.kind,
+                    size: node.data.len(),
+                });
+            }
+
             return ext4_with_volume(state, vol_name.as_str(), |disk, part| {
                 let (_sb, _ino, inode) = ext4_lookup_path(disk, part, rel.as_str())?;
                 let kind = if (inode.mode & EXT4_S_IFDIR) != 0 {
@@ -1934,7 +1988,11 @@ pub fn fs_create(path: &str) -> Result<(), &'static str> {
             .mounted
             .iter_mut()
             .find(|m| m.volume.eq_ignore_ascii_case(vol_name.as_str()))
-            .ok_or("storage: mounted fs not found")?;
+            .ok_or(if vol_fs == FilesystemKind::Ext4 {
+                "storage: ext4 volume is native read-only; format volume to enable writes"
+            } else {
+                "storage: mounted fs not found"
+            })?;
 
         if find_node(mounted.nodes.as_slice(), rel.as_str()).is_some() {
             return Err("already exists");
@@ -1972,7 +2030,11 @@ pub fn fs_mkdir(path: &str) -> Result<(), &'static str> {
             .mounted
             .iter_mut()
             .find(|m| m.volume.eq_ignore_ascii_case(vol_name.as_str()))
-            .ok_or("storage: mounted fs not found")?;
+            .ok_or(if vol_fs == FilesystemKind::Ext4 {
+                "storage: ext4 volume is native read-only; format volume to enable writes"
+            } else {
+                "storage: mounted fs not found"
+            })?;
 
         if find_node(mounted.nodes.as_slice(), rel.as_str()).is_some() {
             return Err("already exists");
@@ -2013,7 +2075,11 @@ pub fn fs_delete(path: &str) -> Result<(), &'static str> {
             .mounted
             .iter_mut()
             .find(|m| m.volume.eq_ignore_ascii_case(vol_name.as_str()))
-            .ok_or("storage: mounted fs not found")?;
+            .ok_or(if vol_fs == FilesystemKind::Ext4 {
+                "storage: ext4 volume is native read-only; format volume to enable writes"
+            } else {
+                "storage: mounted fs not found"
+            })?;
 
         let idx = mounted
             .nodes
@@ -2063,7 +2129,11 @@ pub fn fs_rename(from: &str, to: &str) -> Result<(), &'static str> {
             .mounted
             .iter_mut()
             .find(|m| m.volume.eq_ignore_ascii_case(from_name.as_str()))
-            .ok_or("storage: mounted fs not found")?;
+            .ok_or(if from_fs == FilesystemKind::Ext4 {
+                "storage: ext4 volume is native read-only; format volume to enable writes"
+            } else {
+                "storage: mounted fs not found"
+            })?;
 
         ensure_parent_dir(mounted.nodes.as_slice(), to_rel.as_str())?;
         if find_node(mounted.nodes.as_slice(), to_rel.as_str()).is_some() {
@@ -2100,6 +2170,18 @@ pub fn fs_read(path: &str) -> Result<Vec<u8>, &'static str> {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
         if vol_fs == FilesystemKind::Ext4 {
+            if let Some(mounted) = state
+                .mounted
+                .iter()
+                .find(|m| m.volume.eq_ignore_ascii_case(vol_name.as_str()))
+            {
+                let node = find_node(mounted.nodes.as_slice(), rel.as_str()).ok_or("path not found")?;
+                if node.kind != FsNodeKind::File {
+                    return Err("not a file");
+                }
+                return Ok(node.data.clone());
+            }
+
             return ext4_with_volume(state, vol_name.as_str(), |disk, part| {
                 let (sb, _ino, inode) = ext4_lookup_path(disk, part, rel.as_str())?;
                 if (inode.mode & EXT4_S_IFREG) == 0 {
@@ -2144,7 +2226,11 @@ pub fn fs_write(path: &str, data: &[u8]) -> Result<(), &'static str> {
             .mounted
             .iter_mut()
             .find(|m| m.volume.eq_ignore_ascii_case(vol_name.as_str()))
-            .ok_or("storage: mounted fs not found")?;
+            .ok_or(if vol_fs == FilesystemKind::Ext4 {
+                "storage: ext4 volume is native read-only; format volume to enable writes"
+            } else {
+                "storage: mounted fs not found"
+            })?;
 
         if find_node(mounted.nodes.as_slice(), rel.as_str()).is_none() {
             ensure_parent_dir(mounted.nodes.as_slice(), rel.as_str())?;
@@ -2177,6 +2263,34 @@ pub fn fs_readdir(path: &str) -> Result<Vec<String>, &'static str> {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
         if vol_fs == FilesystemKind::Ext4 {
+            if let Some(mounted) = state
+                .mounted
+                .iter()
+                .find(|m| m.volume.eq_ignore_ascii_case(vol_name.as_str()))
+            {
+                let dir = find_node(mounted.nodes.as_slice(), rel.as_str()).ok_or("path not found")?;
+                if dir.kind != FsNodeKind::Directory {
+                    return Err("not a directory");
+                }
+
+                let mut out = Vec::new();
+                for node in &mounted.nodes {
+                    if node.path == rel {
+                        continue;
+                    }
+                    let Some((parent, name)) = split_parent(node.path.as_str()) else {
+                        continue;
+                    };
+                    if parent == rel {
+                        out.push(name);
+                    }
+                }
+
+                out.sort();
+                out.dedup();
+                return Ok(out);
+            }
+
             return ext4_with_volume(state, vol_name.as_str(), |disk, part| {
                 let (sb, _ino, inode) = ext4_lookup_path(disk, part, rel.as_str())?;
                 let entries = ext4_list_dir(disk, part, &sb, &inode)?;

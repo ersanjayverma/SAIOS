@@ -257,7 +257,11 @@ fn cmd_cat(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     }
 
     let path = resolve_relative_path(positionals[0]);
-    let data = vfs::read_path(path.as_str()).map_err(|_| "cat failed")?;
+    let data = vfs::read_path(path.as_str()).map_err(|e| match e {
+        "path not found" => "cat: path not found",
+        "not a file" => "cat: not a file",
+        _ => "cat failed",
+    })?;
     let text = String::from_utf8_lossy(data.as_slice());
     let rendered = sanitize_for_terminal(text.as_ref());
     if !rendered.is_empty() {

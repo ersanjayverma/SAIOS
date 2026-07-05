@@ -919,6 +919,13 @@ pub fn list(path: &str) -> Result<Vec<String>, SaifsError> {
         .into_iter()
         .map(|entry| entry.name)
         .collect();
+
+    // Windows-style empty directory listing: show current and parent entries.
+    if out.is_empty() {
+        out.push(".".to_string());
+        out.push("..".to_string());
+    }
+
     out.sort();
     Ok(out)
 }

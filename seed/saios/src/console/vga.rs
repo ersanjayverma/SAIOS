@@ -3,6 +3,7 @@ use core::ptr;
 use efi_main::graphics::FramebufferInfo;
 
 use super::backend::ConsoleBackend;
+use super::FramebufferBenchResult;
 use super::framebuffer::DisplayProperties;
 use crate::vmm;
 
@@ -55,6 +56,7 @@ impl VgaConsole {
     }
 
     /// Reports the VGA backend as ready once it has been attached or mapped.
+    #[allow(dead_code)]
     pub fn ensure_renderer_ready(&mut self) -> bool {
         self.ensure_mapped().is_some()
     }
@@ -65,8 +67,19 @@ impl VgaConsole {
         self.clear();
     }
 
+    /// Accepts direct-attach requests for API compatibility.
+    pub fn attach_direct(&mut self, _info: FramebufferInfo) {
+        let _ = self.ensure_mapped();
+        self.clear();
+    }
+
     /// Returns the VGA text-mode properties for compatibility with console queries.
     pub fn display_properties(&self) -> Option<DisplayProperties> {
+        None
+    }
+
+    /// VGA text mode does not support framebuffer clear benchmarking.
+    pub fn benchmark_clears(&mut self, _passes: usize) -> Option<FramebufferBenchResult> {
         None
     }
 
@@ -113,12 +126,10 @@ impl VgaConsole {
         }
 
         let pos = (self.cursor_y * VGA_WIDTH + self.cursor_x) as u16;
-        unsafe {
-            hal::arch::x86_64::io::outb(VGA_CRTC_INDEX, VGA_CURSOR_HIGH);
-            hal::arch::x86_64::io::outb(VGA_CRTC_DATA, (pos >> 8) as u8);
-            hal::arch::x86_64::io::outb(VGA_CRTC_INDEX, VGA_CURSOR_LOW);
-            hal::arch::x86_64::io::outb(VGA_CRTC_DATA, pos as u8);
-        }
+        hal::arch::x86_64::io::outb(VGA_CRTC_INDEX, VGA_CURSOR_HIGH);
+        hal::arch::x86_64::io::outb(VGA_CRTC_DATA, (pos >> 8) as u8);
+        hal::arch::x86_64::io::outb(VGA_CRTC_INDEX, VGA_CURSOR_LOW);
+        hal::arch::x86_64::io::outb(VGA_CRTC_DATA, pos as u8);
     }
 
     /// Scrolls the VGA text buffer up by `rows` rows.

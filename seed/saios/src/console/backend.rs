@@ -2,6 +2,7 @@ pub trait ConsoleBackend {
     fn put_char(&mut self, c: char);
 
     /// Writes a whole string to the backend.
+    #[allow(dead_code)]
     fn put_str(&mut self, s: &str) {
         for c in s.chars() {
             self.put_char(c);
@@ -65,7 +66,9 @@ where
     fn scroll_up(&mut self, rows: usize) -> bool {
         let left_ok = self.left.scroll_up(rows);
         let right_ok = self.right.scroll_up(rows);
-        left_ok && right_ok
+        // Fast-path policy: if either backend scrolls successfully, do not
+        // force a full redraw in the caller.
+        left_ok || right_ok
     }
 
     fn blink_cursor(&mut self) {

@@ -6,11 +6,14 @@
 
 mod backend;
 mod cursor;
+#[allow(dead_code)]
 mod framebuffer;
 mod input;
 mod keyboard;
 mod mouse;
 mod serial;
+mod vga;
+mod visual;
 pub mod tests;
 
 use alloc::string::String as AllocString;
@@ -24,7 +27,7 @@ use backend::{ConsoleBackend, MirrorConsole};
 use core::sync::atomic::{AtomicBool, Ordering};
 use cursor::Cursor;
 use efi_main::graphics::FramebufferInfo;
-use framebuffer::FramebufferConsole;
+use visual::VisualConsole;
 use hal::arch::x86_64::sync::StaticCell;
 use heapless::String;
 use input::InputBuffer;
@@ -155,10 +158,9 @@ impl<B: ConsoleBackend> Console<B> {
         }
 
         for c in s.chars() {
-            self.put_char_inner(c, false, false);
+            // Render each character once while deferring cursor sync until the end.
+            self.put_char_inner(c, false, true);
         }
-
-        self.backend.put_str(s);
 
         self.sync_cursor();
     }
@@ -216,12 +218,14 @@ impl<B: ConsoleBackend> Console<B> {
         self.buffer[last][..self.cursor.width].fill(' ');
 
         if self.backend.scroll_up(1) {
-            self.backend.set_cursor(self.cursor.x, self.cursor.y);
+            // Cursor sync happens once in `newline` after scroll completes.
         } else {
-            self.redraw();
+            // Throughput-first mode: skip full redraw fallback. This avoids
+            // O(screen_size) per-scroll work when a backend cannot accelerate.
         }
     }
 
+    #[allow(dead_code)]
     fn redraw(&mut self) {
         self.backend.clear();
         for y in 0..self.cursor.height {
@@ -242,10 +246,10 @@ impl<B: ConsoleBackend> Write for Console<B> {
     }
 }
 
-type DefaultBackend = MirrorConsole<SerialConsole, FramebufferConsole>;
+type DefaultBackend = MirrorConsole<SerialConsole, VisualConsole>;
 
 static CONSOLE: StaticCell<Console<DefaultBackend>> = StaticCell::new(Console::new(
-    MirrorConsole::new(SerialConsole::new(), FramebufferConsole::new()),
+    MirrorConsole::new(SerialConsole::new(), VisualConsole::new()),
     DEFAULT_WIDTH,
     DEFAULT_HEIGHT,
 ));
@@ -468,6 +472,29 @@ fn framebuffer_scrollback_to_bottom() {
     });
 }
 
+fn move_cursor_left_cells(cells: usize) {
+    if cells == 0 || !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let _ = try_with_console(|console| {
+        console.cursor.x = console.cursor.x.saturating_sub(cells);
+        console.sync_cursor();
+    });
+}
+
+fn move_cursor_right_cells(cells: usize) {
+    if cells == 0 || !CONSOLE_INITIALIZED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let _ = try_with_console(|console| {
+        let max_x = console.cursor.width.saturating_sub(1);
+        console.cursor.x = core::cmp::min(console.cursor.x.saturating_add(cells), max_x);
+        console.sync_cursor();
+    });
+}
+
 /// Attaches a framebuffer as an additional console output backend.
 ///
 /// The framebuffer address is used as provided by the bootloader.
@@ -476,7 +503,7 @@ pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
 
     with_console(|console| {
         console.backend.right_mut().attach(mapped_info);
-        if mapped_info.base != 0 {
+        if mapped_info.base != 0 && console.backend.right_mut().framebuffer_attached() {
             let _ = driver::ensure_driver(
                 "framebuffer",
                 "0.1.0",
@@ -503,7 +530,7 @@ pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
 pub(crate) fn attach_framebuffer_direct(info: FramebufferInfo) {
     with_console(|console| {
         console.backend.right_mut().attach_direct(info);
-        if info.base != 0 {
+        if info.base != 0 && console.backend.right_mut().framebuffer_attached() {
             let _ = driver::ensure_driver(
                 "framebuffer",
                 "0.1.0",
@@ -533,7 +560,23 @@ pub fn promote_framebuffer_renderer() -> bool {
         return false;
     }
 
-    try_with_console(|console| console.backend.right_mut().ensure_renderer_ready()).unwrap_or(false)
+    try_with_console(|console| {
+        if !console.backend.right_mut().promote_framebuffer_renderer() {
+            return false;
+        }
+
+        if let (Some(columns), Some(rows)) = (
+            console.backend.right_mut().text_columns(),
+            console.backend.right_mut().text_rows(),
+        ) {
+            console.cursor.width = core::cmp::min(columns, MAX_WIDTH).max(1);
+            console.cursor.height = core::cmp::min(rows, MAX_HEIGHT).max(1);
+            console.redraw();
+        }
+
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Returns the current console text grid size as `(columns, rows)`.
@@ -558,7 +601,7 @@ pub fn scrollback_offset() -> usize {
 
 /// Returns true when the framebuffer backend is attached and ready.
 pub fn framebuffer_attached() -> bool {
-    try_with_console(|console| console.backend.right_mut().ensure_renderer_ready()).unwrap_or(false)
+    try_with_console(|console| console.backend.right_mut().framebuffer_attached()).unwrap_or(false)
 }
 
 /// Returns the attached framebuffer properties, if any.
@@ -811,27 +854,76 @@ pub fn poll_input() -> Option<String<256>> {
         s.chars().take(cursor_chars).map(cell_width).sum()
     }
 
-    fn redraw_line(prev_len_cells: usize, prev_cursor_cells: usize) {
+    fn common_prefix_chars(a: &str, b: &str) -> usize {
+        a.chars()
+            .zip(b.chars())
+            .take_while(|(left, right)| left == right)
+            .count()
+    }
+
+    fn slice_from_char_index(s: &str, index: usize) -> &str {
+        if index == 0 {
+            return s;
+        }
+
+        for (char_index, (byte_index, _)) in s.char_indices().enumerate() {
+            if char_index == index {
+                return &s[byte_index..];
+            }
+        }
+
+        ""
+    }
+
+    fn print_spaces(mut count: usize) {
+        const SPACES_64: &str = "                                                                ";
+
+        while count >= 64 {
+            print(SPACES_64);
+            count -= 64;
+        }
+
+        if count > 0 {
+            print(&SPACES_64[..count]);
+        }
+    }
+
+    fn redraw_line(prev_rendered: &str, prev_cursor_cells: usize) {
         // SAFETY: single-core early kernel context.
         let input = unsafe { &mut *INPUT_BUFFER.get() };
 
-        for _ in prev_cursor_cells..prev_len_cells {
-            move_cursor_right();
-        }
-
-        for _ in 0..prev_len_cells {
-            put_char('\x08');
-        }
-
         let rendered = input.render();
-        for ch in rendered.chars() {
-            put_char(ch);
-        }
-
         let new_len_cells = line_cells(rendered.as_str());
         let new_cursor_cells = cursor_cells(rendered.as_str(), input.cursor());
-        for _ in new_cursor_cells..new_len_cells {
-            move_cursor_left();
+        let prefix_chars = common_prefix_chars(prev_rendered, rendered.as_str());
+        let prefix_cells = cursor_cells(prev_rendered, prefix_chars);
+        let old_suffix_cells = line_cells(slice_from_char_index(prev_rendered, prefix_chars));
+        let new_suffix = slice_from_char_index(rendered.as_str(), prefix_chars);
+        let new_suffix_cells = line_cells(new_suffix);
+
+        // Move to line start once, then redraw only the changed suffix.
+        if prev_cursor_cells > 0 {
+            move_cursor_left_cells(prev_cursor_cells);
+        }
+
+        if prefix_cells > 0 {
+            move_cursor_right_cells(prefix_cells);
+        }
+
+        if !new_suffix.is_empty() {
+            print(new_suffix);
+        }
+
+        if old_suffix_cells > new_suffix_cells {
+            let blank_cells = old_suffix_cells - new_suffix_cells;
+            print_spaces(blank_cells);
+            move_cursor_left_cells(blank_cells);
+        }
+
+        if new_len_cells > new_cursor_cells {
+            move_cursor_left_cells(new_len_cells - new_cursor_cells);
+        } else if new_cursor_cells > new_len_cells {
+            move_cursor_right_cells(new_cursor_cells - new_len_cells);
         }
     }
 
@@ -866,12 +958,14 @@ pub fn poll_input() -> Option<String<256>> {
     framebuffer_scrollback_to_bottom();
 
     // SAFETY: single-core early kernel context.
-    let (prev_len_cells, prev_cursor_cells, prev_cursor_char_width, prev_right_char_width) = unsafe {
+    let (prev_rendered, prev_len_cells, prev_cursor_cells, prev_cursor_char_width, prev_right_char_width) = unsafe {
         let input = &*INPUT_BUFFER.get();
         let rendered = input.render();
+        let cursor_chars = input.cursor();
         let len_cells = line_cells(rendered.as_str());
-        let cursor_cells = cursor_cells(rendered.as_str(), input.cursor());
+        let cursor_cells = cursor_cells(rendered.as_str(), cursor_chars);
         (
+            rendered,
             len_cells,
             cursor_cells,
             input.char_left_of_cursor().map(cell_width).unwrap_or(1),
@@ -886,7 +980,7 @@ pub fn poll_input() -> Option<String<256>> {
                 if prev_cursor_cells == prev_len_cells {
                     put_char(ch);
                 } else {
-                    redraw_line(prev_len_cells, prev_cursor_cells);
+                    redraw_line(prev_rendered.as_str(), prev_cursor_cells);
                 }
             }
             None
@@ -894,31 +988,27 @@ pub fn poll_input() -> Option<String<256>> {
         KeyEvent::Backspace => {
             let erased = unsafe { (*INPUT_BUFFER.get()).backspace() };
             if erased {
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
         KeyEvent::Delete => {
             let erased = unsafe { (*INPUT_BUFFER.get()).delete() };
             if erased {
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
         KeyEvent::Insert => None,
         KeyEvent::Home => {
             if unsafe { (*INPUT_BUFFER.get()).move_home() } {
-                for _ in 0..prev_cursor_cells {
-                    move_cursor_left();
-                }
+                move_cursor_left_cells(prev_cursor_cells);
             }
             None
         }
         KeyEvent::End => {
             if unsafe { (*INPUT_BUFFER.get()).move_end() } {
-                for _ in prev_cursor_cells..prev_len_cells {
-                    move_cursor_right();
-                }
+                move_cursor_right_cells(prev_len_cells.saturating_sub(prev_cursor_cells));
             }
             None
         }
@@ -926,7 +1016,7 @@ pub fn poll_input() -> Option<String<256>> {
             let line = unsafe { (*INPUT_BUFFER.get()).history_prev() };
             if let Some(line) = line {
                 unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
@@ -934,39 +1024,31 @@ pub fn poll_input() -> Option<String<256>> {
             let line = unsafe { (*INPUT_BUFFER.get()).history_next() };
             if let Some(line) = line {
                 unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
         KeyEvent::ArrowLeft => {
             if unsafe { (*INPUT_BUFFER.get()).move_left() } {
-                for _ in 0..prev_cursor_char_width {
-                    move_cursor_left();
-                }
+                move_cursor_left_cells(prev_cursor_char_width);
             }
             None
         }
         KeyEvent::ArrowRight => {
             if unsafe { (*INPUT_BUFFER.get()).move_right() } {
-                for _ in 0..prev_right_char_width {
-                    move_cursor_right();
-                }
+                move_cursor_right_cells(prev_right_char_width);
             }
             None
         }
         KeyEvent::ShiftArrowLeft => {
             if unsafe { (*INPUT_BUFFER.get()).move_left() } {
-                for _ in 0..prev_cursor_char_width {
-                    move_cursor_left();
-                }
+                move_cursor_left_cells(prev_cursor_char_width);
             }
             None
         }
         KeyEvent::ShiftArrowRight => {
             if unsafe { (*INPUT_BUFFER.get()).move_right() } {
-                for _ in 0..prev_right_char_width {
-                    move_cursor_right();
-                }
+                move_cursor_right_cells(prev_right_char_width);
             }
             None
         }
@@ -974,7 +1056,7 @@ pub fn poll_input() -> Option<String<256>> {
             let line = unsafe { (*INPUT_BUFFER.get()).history_prev() };
             if let Some(line) = line {
                 unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
@@ -982,19 +1064,31 @@ pub fn poll_input() -> Option<String<256>> {
             let line = unsafe { (*INPUT_BUFFER.get()).history_next() };
             if let Some(line) = line {
                 unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
         KeyEvent::CtrlArrowLeft | KeyEvent::CtrlShiftArrowLeft => {
             if unsafe { (*INPUT_BUFFER.get()).move_prev_word() } {
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                let new_cursor_chars = unsafe { (*INPUT_BUFFER.get()).cursor() };
+                let new_cursor_cells = cursor_cells(prev_rendered.as_str(), new_cursor_chars);
+                if prev_cursor_cells > new_cursor_cells {
+                    move_cursor_left_cells(prev_cursor_cells - new_cursor_cells);
+                } else if new_cursor_cells > prev_cursor_cells {
+                    move_cursor_right_cells(new_cursor_cells - prev_cursor_cells);
+                }
             }
             None
         }
         KeyEvent::CtrlArrowRight | KeyEvent::CtrlShiftArrowRight => {
             if unsafe { (*INPUT_BUFFER.get()).move_next_word() } {
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                let new_cursor_chars = unsafe { (*INPUT_BUFFER.get()).cursor() };
+                let new_cursor_cells = cursor_cells(prev_rendered.as_str(), new_cursor_chars);
+                if prev_cursor_cells > new_cursor_cells {
+                    move_cursor_left_cells(prev_cursor_cells - new_cursor_cells);
+                } else if new_cursor_cells > prev_cursor_cells {
+                    move_cursor_right_cells(new_cursor_cells - prev_cursor_cells);
+                }
             }
             None
         }
@@ -1002,7 +1096,7 @@ pub fn poll_input() -> Option<String<256>> {
             let line = unsafe { (*INPUT_BUFFER.get()).history_prev() };
             if let Some(line) = line {
                 unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
@@ -1010,7 +1104,7 @@ pub fn poll_input() -> Option<String<256>> {
             let line = unsafe { (*INPUT_BUFFER.get()).history_next() };
             if let Some(line) = line {
                 unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
@@ -1022,7 +1116,7 @@ pub fn poll_input() -> Option<String<256>> {
             let line = unsafe { (*INPUT_BUFFER.get()).history_prev() };
             if let Some(line) = line {
                 unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
@@ -1030,7 +1124,7 @@ pub fn poll_input() -> Option<String<256>> {
             let line = unsafe { (*INPUT_BUFFER.get()).history_next() };
             if let Some(line) = line {
                 unsafe { (*INPUT_BUFFER.get()).set_line(line.as_str()) };
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
@@ -1041,38 +1135,34 @@ pub fn poll_input() -> Option<String<256>> {
         }
         KeyEvent::CtrlA => {
             if unsafe { (*INPUT_BUFFER.get()).move_home() } {
-                for _ in 0..prev_cursor_cells {
-                    move_cursor_left();
-                }
+                move_cursor_left_cells(prev_cursor_cells);
             }
             None
         }
         KeyEvent::CtrlE => {
             if unsafe { (*INPUT_BUFFER.get()).move_end() } {
-                for _ in prev_cursor_cells..prev_len_cells {
-                    move_cursor_right();
-                }
+                move_cursor_right_cells(prev_len_cells.saturating_sub(prev_cursor_cells));
             }
             None
         }
         KeyEvent::CtrlD => {
             let erased = unsafe { (*INPUT_BUFFER.get()).delete() };
             if erased {
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
         KeyEvent::CtrlU => {
             let changed = unsafe { (*INPUT_BUFFER.get()).clear_to_start() };
             if changed {
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
         KeyEvent::CtrlK => {
             let changed = unsafe { (*INPUT_BUFFER.get()).clear_to_end() };
             if changed {
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
@@ -1086,22 +1176,18 @@ pub fn poll_input() -> Option<String<256>> {
             // SAFETY: single-core early kernel context.
             let input = unsafe { &mut *INPUT_BUFFER.get() };
             let rendered = input.render();
-            for ch in rendered.chars() {
-                put_char(ch);
-            }
+            print(rendered.as_str());
 
             let rendered_cells = line_cells(rendered.as_str());
             let cursor_cells = cursor_cells(rendered.as_str(), input.cursor());
-            for _ in cursor_cells..rendered_cells {
-                move_cursor_left();
-            }
+            move_cursor_left_cells(rendered_cells.saturating_sub(cursor_cells));
 
             None
         }
         KeyEvent::CtrlW => {
             let changed = unsafe { (*INPUT_BUFFER.get()).delete_prev_word() };
             if changed {
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }
@@ -1116,7 +1202,7 @@ pub fn poll_input() -> Option<String<256>> {
             let completed = crate::shell::complete_for_console(rendered.as_str(), cursor);
             if let Some(new_line) = completed {
                 unsafe { (*INPUT_BUFFER.get()).set_line(new_line.as_str()) };
-                redraw_line(prev_len_cells, prev_cursor_cells);
+                redraw_line(prev_rendered.as_str(), prev_cursor_cells);
             }
             None
         }

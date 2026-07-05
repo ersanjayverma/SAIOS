@@ -334,29 +334,30 @@ impl CommandDispatcher {
     }
 }
 
-fn normalize_lf_text(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\r' {
-            if chars.peek() == Some(&'\n') {
-                let _ = chars.next();
-            }
-            out.push('\n');
-        } else {
-            out.push(ch);
-        }
-    }
-
-    out
-}
-
 fn sanitize_redirect_text(input: &str) -> String {
-    let normalized = normalize_lf_text(input);
-    let chars: Vec<char> = normalized.chars().collect();
+    let chars: Vec<char> = input.chars().collect();
     let mut out = String::with_capacity(chars.len());
+    let mut line: Vec<char> = Vec::new();
+    let mut cursor = 0usize;
     let mut i = 0usize;
+
+    let push_visible = |ch: char, line: &mut Vec<char>, cursor: &mut usize| {
+        if *cursor >= line.len() {
+            line.push(ch);
+        } else {
+            line[*cursor] = ch;
+        }
+        *cursor = cursor.saturating_add(1);
+    };
+
+    let flush_line = |line: &mut Vec<char>, out: &mut String| {
+        if !line.is_empty() {
+            for ch in line.iter() {
+                out.push(*ch);
+            }
+            line.clear();
+        }
+    };
 
     while i < chars.len() {
         let ch = chars[i];
@@ -383,17 +384,55 @@ fn sanitize_redirect_text(input: &str) -> String {
         }
 
         if ch == '\r' {
-            out.push('\n');
+            if i + 1 < chars.len() && chars[i + 1] == '\n' {
+                flush_line(&mut line, &mut out);
+                out.push('\n');
+                cursor = 0;
+                i += 2;
+                continue;
+            }
+
+            // Carriage return rewinds the cursor for in-place line updates.
+            cursor = 0;
             i += 1;
             continue;
         }
 
-        if ch == '\n' || ch == '\t' || !ch.is_control() {
-            out.push(ch);
+        if ch == '\n' {
+            flush_line(&mut line, &mut out);
+            out.push('\n');
+            cursor = 0;
+            i += 1;
+            continue;
+        }
+
+        if ch == '\t' || !ch.is_control() {
+            push_visible(ch, &mut line, &mut cursor);
         }
 
         i += 1;
     }
 
+    if !line.is_empty() {
+        flush_line(&mut line, &mut out);
+    }
+
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_redirect_text;
+
+    #[test]
+    fn sanitize_redirect_text_handles_cr_overwrite() {
+        let input = "line 1\rLINE 1\nnext\rNEXT\n";
+        assert_eq!(sanitize_redirect_text(input), "LINE 1\nNEXT\n");
+    }
+
+    #[test]
+    fn sanitize_redirect_text_strips_ansi_control_sequences() {
+        let input = "start\u{1b}[2K\rprogress 10%\u{1b}[0m\rprogress 100%\n";
+        assert_eq!(sanitize_redirect_text(input), "progress 100%\n");
+    }
 }

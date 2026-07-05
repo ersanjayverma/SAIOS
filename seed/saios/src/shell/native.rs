@@ -2420,7 +2420,7 @@ fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             console::println!("volumes mounts          Show VFS mounts and volumes");
             console::println!("volumes scan            Request background storage discovery");
             console::println!("volumes info <vol>      Show volume details");
-            console::println!("volumes format <vol> <fs>  Format a volume (currently: fat32)");
+            console::println!("volumes format <vol> <fs>  Format a volume (fat32|ext4|ntfs)");
             console::println!("volumes mount <vol> <path> [ro]  Mount a volume");
             console::println!("volumes umount <path>   Unmount a mounted path");
             console::println!("volumes check           Storage check summary");
@@ -2447,7 +2447,7 @@ fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
                 .copied()
                 .ok_or("volumes format: missing filesystem type")?;
             let fs = disk::FilesystemKind::from_str(fs_str)
-                .ok_or("volumes format: unknown filesystem; use fat32")?;
+                .ok_or("volumes format: unknown filesystem; use fat32 or ext4")?;
             disk::format_volume(name, fs)?;
             console::println!("volumes: '{}' formatted as {}", name, fs.as_str());
             Ok(())
@@ -2928,6 +2928,9 @@ fn cmd_tree(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             return;
         };
         for child in entries {
+            if child == "." || child == ".." {
+                continue;
+            }
             let child_path = if path == "/" {
                 alloc::format!("/{}", child)
             } else {

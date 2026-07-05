@@ -64,6 +64,21 @@ impl Serial {
         super::io::outb(self.base + UART_DATA, byte);
     }
 
+    /// Blocking write of a single Unicode scalar value.
+    fn write_char(&mut self, c: char) {
+        if c == '\n' {
+            self.write_byte(b'\r');
+            self.write_byte(b'\n');
+            return;
+        }
+
+        let mut buf = [0u8; 4];
+        let encoded = c.encode_utf8(&mut buf);
+        for byte in encoded.as_bytes() {
+            self.write_byte(*byte);
+        }
+    }
+
     /// Initialize the UART for 115200 8N1 with FIFO enabled.
     fn init(&mut self) -> SerialResult<()> {
         // Disable interrupts.
@@ -183,6 +198,20 @@ pub fn _print(args: fmt::Arguments) {
     }
 }
 
+/// Write a single character to serial with minimal overhead.
+pub fn _put_char(c: char) {
+    if !output_enabled() {
+        return;
+    }
+
+    // SAFETY: the serial singleton is initialised before first use
+    // and we are in a single-threaded kernel context.
+    unsafe {
+        let serial = &mut *SERIAL.get();
+        serial.write_char(c);
+    }
+}
+
 /// Print to serial regardless of [`output_enabled`].
 ///
 /// Intended for panic/emergency diagnostics.
@@ -192,6 +221,16 @@ pub fn _print_force(args: fmt::Arguments) {
     unsafe {
         let serial = &mut *SERIAL.get();
         let _ = serial.write_fmt(args);
+    }
+}
+
+/// Print a single character to serial regardless of [`output_enabled`].
+pub fn _put_char_force(c: char) {
+    // SAFETY: the serial singleton is initialised before first use
+    // and we are in a single-threaded kernel context.
+    unsafe {
+        let serial = &mut *SERIAL.get();
+        serial.write_char(c);
     }
 }
 

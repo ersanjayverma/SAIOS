@@ -93,10 +93,17 @@ pub fn boot_readiness_gate() -> bool {
     validation::print_report(&report, &options);
 
     for gate in report.readiness_gate_statuses() {
+        let status = if gate.passed {
+            "PASS"
+        } else if gate.skipped {
+            "SKIP"
+        } else {
+            "FAIL"
+        };
         console::println!(
             "[READY] {:<16} {}",
             gate.label,
-            if gate.passed { "PASS" } else { "FAIL" }
+            status
         );
     }
 

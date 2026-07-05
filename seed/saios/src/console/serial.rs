@@ -3,7 +3,6 @@
 //! Reads bytes from COM1, decodes UTF-8 and parses ANSI/VT escape sequences
 //! into [`KeyEvent`] values for the shell and console subsystem.
 
-use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 use smallvec::SmallVec;
 use utf8parse::{Parser, Receiver};
@@ -357,14 +356,7 @@ impl SerialConsole {
     /// Writes a single character during early boot or emergency conditions.
     #[inline(always)]
     pub fn emergency_put_char(c: char) {
-        match c {
-            '\n' => {
-                hal::arch::x86_64::console::_print_force(format_args!("\r\n"));
-            }
-            _ => {
-                hal::arch::x86_64::console::_print_force(format_args!("{}", c));
-            }
-        }
+        hal::arch::x86_64::console::_put_char_force(c);
     }
 
     /// Writes a string during early boot or emergency conditions.
@@ -374,10 +366,6 @@ impl SerialConsole {
         }
     }
 
-    /// Writes an escape sequence to the serial port.
-    fn write_escape(args: fmt::Arguments) {
-        hal::arch::x86_64::console::_print(args);
-    }
 }
 
 impl ConsoleBackend for SerialConsole {
@@ -386,15 +374,8 @@ impl ConsoleBackend for SerialConsole {
             return;
         }
 
-        match c {
-            '\n' => {
-                // Keep serial terminals aligned by using CRLF line endings.
-                hal::arch::x86_64::console::_print(format_args!("\r\n"));
-            }
-            _ => {
-                hal::arch::x86_64::console::_print(format_args!("{}", c));
-            }
-        }
+        // Use direct char emission to avoid per-character fmt machinery.
+        hal::arch::x86_64::console::_put_char(c);
     }
 
     fn clear(&mut self) {
@@ -403,7 +384,7 @@ impl ConsoleBackend for SerialConsole {
         }
 
         // Keep serial logs line-oriented: do not emit terminal control sequences.
-        Self::write_escape(format_args!("\r\n"));
+        hal::arch::x86_64::console::_put_char('\n');
     }
 
     fn set_cursor(&mut self, x: usize, y: usize) {
@@ -412,14 +393,10 @@ impl ConsoleBackend for SerialConsole {
     }
 
     fn scroll_up(&mut self, rows: usize) -> bool {
-        if !Self::output_enabled() {
-            return true;
-        }
-
-        let rows = core::cmp::max(1, rows);
-        for _ in 0..rows {
-            Self::write_escape(format_args!("\r\n"));
-        }
+        let _ = rows;
+        // Newlines are already emitted by `put_char('\n')` in the shared
+        // console path. Writing extra CRLFs here duplicates output and slows
+        // heavy scroll workloads.
         true
     }
 }

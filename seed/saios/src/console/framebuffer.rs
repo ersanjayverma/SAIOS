@@ -14,6 +14,30 @@ const TAB_WIDTH: usize = 4;
 const MAX_TEXT_COLS: usize = 160;
 const MAX_TEXT_ROWS: usize = 100;
 const MAX_SCROLLBACK_LINES: usize = 2048;
+const GLYPH_CACHE_SIZE: usize = 64;
+
+#[derive(Copy, Clone)]
+struct GlyphCacheEntry {
+    valid: bool,
+    ch: char,
+    fg: u32,
+    bg: u32,
+    pixel_format: PixelFormat,
+    pixels: [u32; FONT_WIDTH * FONT_HEIGHT],
+}
+
+impl GlyphCacheEntry {
+    const fn empty() -> Self {
+        Self {
+            valid: false,
+            ch: '\0',
+            fg: 0,
+            bg: 0,
+            pixel_format: PixelFormat::Bgr,
+            pixels: [0; FONT_WIDTH * FONT_HEIGHT],
+        }
+    }
+}
 
 /// A text console rendered onto a linear framebuffer.
 ///
@@ -30,6 +54,14 @@ pub struct FramebufferConsole {
     fg: Color,
     bg: Color,
     screen: [[char; MAX_TEXT_COLS]; MAX_TEXT_ROWS],
+    dirty: [[bool; MAX_TEXT_COLS]; MAX_TEXT_ROWS],
+    dirty_any: bool,
+    dirty_min_x: usize,
+    dirty_min_y: usize,
+    dirty_max_x: usize,
+    dirty_max_y: usize,
+    batch_depth: usize,
+    glyph_cache: [GlyphCacheEntry; GLYPH_CACHE_SIZE],
     view_offset_lines: usize,
     scrollback: VecDeque<String>,
     /// Whether the cursor cell is currently inverted (drawn) or normal.
@@ -47,10 +79,112 @@ impl FramebufferConsole {
             fg: Color::WHITE,
             bg: Color::BLACK,
             screen: [[' '; MAX_TEXT_COLS]; MAX_TEXT_ROWS],
+            dirty: [[false; MAX_TEXT_COLS]; MAX_TEXT_ROWS],
+            dirty_any: false,
+            dirty_min_x: 0,
+            dirty_min_y: 0,
+            dirty_max_x: 0,
+            dirty_max_y: 0,
+            batch_depth: 0,
+            glyph_cache: [GlyphCacheEntry::empty(); GLYPH_CACHE_SIZE],
             view_offset_lines: 0,
             scrollback: VecDeque::new(),
             cursor_inverted: false,
         }
+    }
+
+    fn glyph_cache_slot(c: char, fg: u32, bg: u32, pixel_format: PixelFormat) -> usize {
+        let pf = match pixel_format {
+            PixelFormat::Bgr => 0usize,
+            PixelFormat::Rgb => 1usize,
+            PixelFormat::Bitmask => 2usize,
+            PixelFormat::BltOnly => 3usize,
+        };
+
+        let mut h = c as usize;
+        h ^= fg as usize;
+        h = h.rotate_left(13) ^ (bg as usize).rotate_right(7);
+        h ^= pf.wrapping_mul(0x9E37_79B1usize);
+        h % GLYPH_CACHE_SIZE
+    }
+
+    fn mark_dirty(&mut self, x: usize, y: usize) {
+        if x >= MAX_TEXT_COLS || y >= MAX_TEXT_ROWS {
+            return;
+        }
+
+        if !self.dirty[y][x] {
+            self.dirty[y][x] = true;
+            if !self.dirty_any {
+                self.dirty_any = true;
+                self.dirty_min_x = x;
+                self.dirty_max_x = x;
+                self.dirty_min_y = y;
+                self.dirty_max_y = y;
+            } else {
+                self.dirty_min_x = self.dirty_min_x.min(x);
+                self.dirty_max_x = self.dirty_max_x.max(x);
+                self.dirty_min_y = self.dirty_min_y.min(y);
+                self.dirty_max_y = self.dirty_max_y.max(y);
+            }
+        }
+    }
+
+    fn mark_region_dirty(&mut self, cols: usize, rows: usize) {
+        for y in 0..rows.min(MAX_TEXT_ROWS) {
+            for x in 0..cols.min(MAX_TEXT_COLS) {
+                self.mark_dirty(x, y);
+            }
+        }
+    }
+
+    fn flush_dirty(&mut self) {
+        let Some((cols, rows)) = self.text_bounds() else {
+            self.dirty_any = false;
+            return;
+        };
+
+        if self.batch_depth != 0 || !self.dirty_any {
+            return;
+        }
+
+        if self.view_offset_lines > 0 {
+            self.render_viewport();
+            for y in self.dirty_min_y..=self.dirty_max_y {
+                for x in self.dirty_min_x..=self.dirty_max_x {
+                    self.dirty[y][x] = false;
+                }
+            }
+            self.dirty_any = false;
+            return;
+        }
+
+        let min_y = self.dirty_min_y.min(rows.saturating_sub(1));
+        let max_y = self.dirty_max_y.min(rows.saturating_sub(1));
+        let min_x = self.dirty_min_x.min(cols.saturating_sub(1));
+        let max_x = self.dirty_max_x.min(cols.saturating_sub(1));
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                if self.dirty[y][x] {
+                    self.draw_cell(x, y, self.screen[y][x]);
+                    self.dirty[y][x] = false;
+                }
+            }
+        }
+
+        self.dirty_any = false;
+    }
+
+    fn begin_batch(&mut self) {
+        self.batch_depth = self.batch_depth.saturating_add(1);
+    }
+
+    fn end_batch(&mut self) {
+        if self.batch_depth > 0 {
+            self.batch_depth -= 1;
+        }
+        self.flush_dirty();
     }
 
     /// Returns `true` once a framebuffer display has been attached and drawing
@@ -74,21 +208,25 @@ impl FramebufferConsole {
     /// current foreground/background colors. Chooses a `u32`-slice fast path for
     /// 32-bit RGB/BGR displays and a generic byte writer otherwise.
     fn draw_cell(&mut self, cell_x: usize, cell_y: usize, c: char) {
-        let Some(display) = self.display.as_mut() else {
-            return;
+        let (width, height, stride, pixel_format, pixel_masks, bytes_per_pixel, fb_size, fb) = {
+            let Some(display) = self.display.as_mut() else {
+                return;
+            };
+
+            (
+                display.width(),
+                display.height(),
+                display.stride(),
+                display.pixel_format(),
+                display.pixel_masks(),
+                display.bytes_per_pixel(),
+                display.framebuffer_size(),
+                display.framebuffer(),
+            )
         };
 
         let px = cell_x * FONT_WIDTH;
         let py = cell_y * FONT_HEIGHT;
-
-        let width = display.width();
-        let height = display.height();
-        let stride = display.stride();
-        let pixel_format = display.pixel_format();
-        let pixel_masks = display.pixel_masks();
-        let bytes_per_pixel = display.bytes_per_pixel();
-        let fb_size = display.framebuffer_size();
-        let fb = display.framebuffer();
 
         let fg = self.fg.to_u32();
         let bg = self.bg.to_u32();
@@ -114,6 +252,32 @@ impl FramebufferConsole {
         };
 
         if bytes_per_pixel == 4 && matches!(pixel_format, PixelFormat::Bgr | PixelFormat::Rgb) {
+            let slot = Self::glyph_cache_slot(c, fg_packed, bg_packed, pixel_format);
+            let cached = &mut self.glyph_cache[slot];
+            if !cached.valid
+                || cached.ch != c
+                || cached.fg != fg_packed
+                || cached.bg != bg_packed
+                || cached.pixel_format != pixel_format
+            {
+                for row_idx in 0..FONT_HEIGHT {
+                    let row_bits = glyph[row_idx / 2];
+                    let row_base = row_idx * FONT_WIDTH;
+                    for bit in 0..FONT_WIDTH {
+                        cached.pixels[row_base + bit] = if (row_bits & (1u8 << bit)) != 0 {
+                            fg_packed
+                        } else {
+                            bg_packed
+                        };
+                    }
+                }
+                cached.valid = true;
+                cached.ch = c;
+                cached.fg = fg_packed;
+                cached.bg = bg_packed;
+                cached.pixel_format = pixel_format;
+            }
+
             // Fast path: view the framebuffer as a u32 slice and copy each
             // 8-pixel glyph row as a contiguous slice.  This avoids the
             // per-pixel branch and bounds checks of the generic path.
@@ -125,15 +289,7 @@ impl FramebufferConsole {
 
             for row_idx in 0..draw_height {
                 let y = py + row_idx;
-                let row_bits = glyph[row_idx / 2];
-                let mut row_colors = [bg_packed; FONT_WIDTH];
-                let mut bits = row_bits;
-                for px in row_colors.iter_mut().take(draw_width) {
-                    if (bits & 1) != 0 {
-                        *px = fg_packed;
-                    }
-                    bits >>= 1;
-                }
+                let row_colors = &cached.pixels[row_idx * FONT_WIDTH..(row_idx + 1) * FONT_WIDTH];
 
                 let row_base = y.saturating_mul(stride);
                 let dst_start = row_base + px;
@@ -301,8 +457,10 @@ impl FramebufferConsole {
         for y in 0..rows {
             for x in 0..cols {
                 self.screen[y][x] = ' ';
+                self.dirty[y][x] = false;
             }
         }
+        self.dirty_any = false;
     }
 
     /// Fully repaint the screen from the character model plus scrollback,
@@ -698,21 +856,8 @@ impl FramebufferConsole {
 
     /// Toggle the visible cursor blink state.  Called from the timer tick path.
     pub fn blink_cursor(&mut self) {
-        let Some((cols, rows)) = self.text_bounds() else {
-            return;
-        };
-        if cols == 0 || rows == 0 {
-            return;
-        }
-
-        let x = self.cursor_x.min(cols.saturating_sub(1));
-        let y = self.cursor_y.min(rows.saturating_sub(1));
-        let ch = self.screen[y][x];
-
-        self.cursor_inverted = !self.cursor_inverted;
-        if self.view_offset_lines == 0 {
-            self.draw_cell_cursor(x, y, ch, self.cursor_inverted);
-        }
+        // Prioritize throughput over cursor animation during heavy scrolling.
+        let _ = self;
     }
 
     /// Draw one character cell with optional cursor overlay.
@@ -839,17 +984,15 @@ impl ConsoleBackend for FramebufferConsole {
             _ => {
                 let x = self.cursor_x.min(cols.saturating_sub(1));
                 let y = self.cursor_y.min(rows.saturating_sub(1));
-                self.screen[y][x] = c;
-                if self.view_offset_lines == 0 {
-                    self.draw_cell(x, y, c);
+                if self.screen[y][x] != c {
+                    self.screen[y][x] = c;
+                    self.mark_dirty(x, y);
                 }
                 self.cursor_x = self.cursor_x.saturating_add(1).min(cols.saturating_sub(1));
             }
         }
 
-        if self.view_offset_lines > 0 {
-            self.render_viewport();
-        }
+        self.flush_dirty();
     }
 
     /// Write a whole string with a single cursor sync after all characters are applied.
@@ -858,9 +1001,11 @@ impl ConsoleBackend for FramebufferConsole {
             return;
         };
 
+        self.begin_batch();
         for c in s.chars() {
             self.put_char(c);
         }
+        self.end_batch();
     }
 
     /// Clear the screen and character model and home the cursor.
@@ -874,6 +1019,8 @@ impl ConsoleBackend for FramebufferConsole {
         self.cursor_y = 0;
         self.cursor_inverted = false;
         self.view_offset_lines = 0;
+        self.dirty_any = false;
+        self.batch_depth = 0;
     }
 
     /// Move the text cursor to cell `(x, y)`.
@@ -918,9 +1065,11 @@ impl ConsoleBackend for FramebufferConsole {
         }
 
         if self.view_offset_lines == 0 {
-            if !self.scroll_pixels_up(rows) {
-                self.render_viewport();
-            }
+            // Throughput-first: avoid framebuffer-to-framebuffer memmove here.
+            // On many platforms the framebuffer is uncached, and readback during
+            // memmove is slower than redrawing visible glyphs from the text model.
+            self.mark_region_dirty(cols, row_count);
+            self.flush_dirty();
         } else {
             let max_offset = (self.scrollback.len() + row_count).saturating_sub(row_count);
             self.view_offset_lines = self.view_offset_lines.min(max_offset);

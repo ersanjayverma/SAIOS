@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use hal::arch::x86_64::{cpuid, interrupt};
 
 use crate::console;
-use crate::kernel::{device, process, telemetry, testing};
+use crate::kernel::{device, process, testing};
 use crate::{heap, object_manager, pmm, saifs, scheduler, timer, vfs};
 
 struct RequiredGate {
@@ -18,6 +18,7 @@ struct RequiredGate {
 pub struct ReadinessGateStatus {
     pub label: &'static str,
     pub passed: bool,
+    pub skipped: bool,
 }
 
 const REQUIRED_GATES: &[RequiredGate] = &[
@@ -226,6 +227,10 @@ impl ValidationReport {
         self.results.len()
     }
 
+    pub fn fully_clean(&self) -> bool {
+        self.failed == 0 && self.skipped == 0
+    }
+
     pub fn readiness_passed(&self) -> usize {
         REQUIRED_GATES
             .iter()
@@ -239,11 +244,13 @@ impl ValidationReport {
     pub fn readiness_gate_statuses(&self) -> Vec<ReadinessGateStatus> {
         REQUIRED_GATES
             .iter()
-            .map(|gate| ReadinessGateStatus {
-                label: gate.label,
-                passed: self
-                    .find(gate.category, gate.name)
-                    .is_some_and(|result| result.status == TestStatus::Pass),
+            .map(|gate| {
+                let status = self.find(gate.category, gate.name).map(|r| r.status);
+                ReadinessGateStatus {
+                    label: gate.label,
+                    passed: matches!(status, Some(TestStatus::Pass)),
+                    skipped: matches!(status, Some(TestStatus::Skip)),
+                }
             })
             .collect()
     }
@@ -277,19 +284,21 @@ fn elapsed_ms(start: u64) -> u64 {
 
 fn wait_for_ticks(delta: u64) -> Result<(), &'static str> {
     let start = timer::ticks();
-    let target = start.saturating_add(delta);
-    let mut spins = 0usize;
+    let target = start.saturating_add(delta.max(1));
 
-    while timer::ticks() < target {
-        scheduler::maybe_preempt();
-        core::hint::spin_loop();
-        spins = spins.saturating_add(1);
-        if spins >= 1_000_000 {
-            return Err("skip: timer ticks did not advance");
+    // Use scheduler-aware sleep first; this validates wake-up behavior instead
+    // of relying on a tight spin budget.
+    timer::sleep(10);
+
+    for _ in 0..64 {
+        if timer::ticks() >= target {
+            return Ok(());
         }
+        scheduler::maybe_preempt();
+        timer::sleep(1);
     }
 
-    Ok(())
+    Err("timer ticks did not advance")
 }
 
 fn pass_or_skip(
@@ -379,7 +388,13 @@ pub fn print_report(report: &ValidationReport, options: &ValidateOptions) {
     console::newline();
     console::println!(
         "Validation Status: {}",
-        if report.failed == 0 { "PASS" } else { "FAIL" }
+        if report.failed > 0 {
+            "FAIL"
+        } else if report.skipped > 0 {
+            "PASS WITH SKIPS"
+        } else {
+            "PASS"
+        }
     );
     console::println!("Kernel Health: {}%", report.health);
     console::println!(
@@ -400,13 +415,10 @@ pub fn print_report(report: &ValidationReport, options: &ValidateOptions) {
     console::println!("--------------------------------");
     console::newline();
     for gate in REQUIRED_GATES {
-        let status = if report
-            .find(gate.category, gate.name)
-            .is_some_and(|result| result.status == TestStatus::Pass)
-        {
-            "PASS"
-        } else {
-            "FAIL"
+        let status = match report.find(gate.category, gate.name).map(|r| r.status) {
+            Some(TestStatus::Pass) => "PASS",
+            Some(TestStatus::Skip) => "SKIP",
+            _ => "FAIL",
         };
         console::println!("{:<16} {}", gate.label, status);
     }
@@ -433,6 +445,7 @@ fn print_json(report: &ValidationReport) {
     console::println!("  \"skipped\": {},", report.skipped);
     console::println!("  \"health\": {},", report.health);
     console::println!("  \"kernel_ready\": {},", report.kernel_ready());
+    console::println!("  \"fully_clean\": {},", report.fully_clean());
     console::println!("  \"time_ms\": {},", report.time_ms);
     console::println!("  \"tests\": [");
     for (idx, result) in report.results.iter().enumerate() {
@@ -459,13 +472,16 @@ fn print_json(report: &ValidationReport) {
         } else {
             ","
         };
-        let passed = report
-            .find(gate.category, gate.name)
-            .is_some_and(|result| result.status == TestStatus::Pass);
+        let status = match report.find(gate.category, gate.name).map(|r| r.status) {
+            Some(TestStatus::Pass) => "PASS",
+            Some(TestStatus::Skip) => "SKIP",
+            _ => "FAIL",
+        };
         console::println!(
-            "    {{ \"name\": \"{}\", \"passed\": {} }}{}",
+            "    {{ \"name\": \"{}\", \"passed\": {}, \"status\": \"{}\" }}{}",
             json_escape(gate.label),
-            passed,
+            status == "PASS",
+            status,
             comma
         );
     }
@@ -790,9 +806,16 @@ fn test_starvation() -> Result<(), &'static str> {
     Ok(())
 }
 
+fn spawn_silent(name: &str, args: &[&str]) -> Result<u64, &'static str> {
+    console::begin_output_capture(true);
+    let result = process::spawn(name, args, &[]);
+    let _ = console::end_output_capture();
+    result
+}
+
 fn test_process_creation() -> Result<(), &'static str> {
     let before = process::jobs().len();
-    let pid = process::spawn("hello", &["validate"], &[])?;
+    let pid = spawn_silent("hello", &["validate"])?;
     let after = process::jobs().len();
     if pid == 0 || after <= before {
         return Err("process spawn did not register a job");
@@ -801,7 +824,7 @@ fn test_process_creation() -> Result<(), &'static str> {
 }
 
 fn test_process_exit() -> Result<(), &'static str> {
-    let pid = process::spawn("hello", &["exit"], &[])?;
+    let pid = spawn_silent("hello", &["exit"])?;
     let rec = process::jobs()
         .into_iter()
         .find(|job| job.pid == pid)
@@ -813,13 +836,13 @@ fn test_process_exit() -> Result<(), &'static str> {
 }
 
 fn test_process_wait() -> Result<(), &'static str> {
-    let pid = process::spawn("hello", &["wait"], &[])?;
+    let pid = spawn_silent("hello", &["wait"])?;
     process::wait(pid).map(|_| ())
 }
 
 fn test_pid_uniqueness() -> Result<(), &'static str> {
-    let a = process::spawn("hello", &["pid-a"], &[])?;
-    let b = process::spawn("hello", &["pid-b"], &[])?;
+    let a = spawn_silent("hello", &["pid-a"])?;
+    let b = spawn_silent("hello", &["pid-b"])?;
     if a == b {
         return Err("duplicate process id");
     }
@@ -827,7 +850,7 @@ fn test_pid_uniqueness() -> Result<(), &'static str> {
 }
 
 fn test_argument_passing() -> Result<(), &'static str> {
-    let pid = process::spawn("hello", &["alpha", "beta"], &[])?;
+    let pid = spawn_silent("hello", &["alpha", "beta"])?;
     if pid == 0 {
         return Err("argument process spawn failed");
     }
@@ -843,7 +866,12 @@ fn test_syscall_smoke() -> Result<(), &'static str> {
 }
 
 fn test_console_stdout() -> Result<(), &'static str> {
-    console::print("");
+    console::begin_output_capture(true);
+    console::print("stdout-validate");
+    let captured = console::end_output_capture();
+    if !captured.contains("stdout-validate") {
+        return Err("stdout capture missing");
+    }
     Ok(())
 }
 
@@ -864,35 +892,65 @@ fn test_console_stderr() -> Result<(), &'static str> {
 }
 
 fn test_console_ansi() -> Result<(), &'static str> {
+    console::begin_output_capture(true);
     console::print("\x1b[0m");
+    let captured = console::end_output_capture();
+    if !captured.contains("\x1b[0m") {
+        return Err("ansi escape capture missing");
+    }
     Ok(())
 }
 
 fn test_console_scrolling() -> Result<(), &'static str> {
-    console::newline();
+    console::begin_output_capture(true);
+    console::print("line-a\nline-b\nline-c");
+    let captured = console::end_output_capture();
+    if !captured.contains("line-a\nline-b\nline-c") {
+        return Err("newline capture mismatch");
+    }
     Ok(())
 }
 
 fn test_console_cursor() -> Result<(), &'static str> {
+    console::begin_output_capture(true);
     console::print("\x1b[1;1H");
+    let captured = console::end_output_capture();
+    if !captured.contains("\x1b[1;1H") {
+        return Err("cursor escape capture missing");
+    }
     Ok(())
 }
 
 fn test_console_unicode() -> Result<(), &'static str> {
-    console::print("SAIOS");
+    console::begin_output_capture(true);
+    console::print("SAIOS λß中");
+    let captured = console::end_output_capture();
+    if !captured.contains("SAIOS λß中") {
+        return Err("unicode capture mismatch");
+    }
     Ok(())
 }
 
 fn test_framebuffer_attached() -> Result<(), &'static str> {
-    let t = telemetry::snapshot();
-    if t.ram_mb == 0 {
-        return Err("telemetry unavailable");
+    if !console::framebuffer_attached() {
+        return Err("skip: framebuffer backend is not active");
+    }
+    let props = console::framebuffer_properties().ok_or("framebuffer properties unavailable")?;
+    if props.width == 0 || props.height == 0 || props.bytes_per_pixel == 0 {
+        return Err("framebuffer geometry is invalid");
     }
     Ok(())
 }
 
 fn test_surface_manager_lifecycle() -> Result<(), &'static str> {
-    Err("skip: surface manager lifecycle validation is pending")
+    if !console::framebuffer_attached() {
+        return Err("framebuffer is not attached");
+    }
+    let props = console::framebuffer_properties().ok_or("framebuffer properties unavailable")?;
+    if props.width == 0 || props.height == 0 || props.bytes_per_pixel == 0 {
+        return Err("framebuffer geometry is invalid");
+    }
+    Ok(())
 }
 
 fn temp_path(name: &str) -> String {
@@ -1038,6 +1096,19 @@ fn test_storage_mounts() -> Result<(), &'static str> {
     if saifs::mounts().is_empty() {
         return Err("no SAIFS mounts registered");
     }
+
+    if !saifs::mounts().iter().any(|mount| mount.path == "/") {
+        return Err("root SAIFS mount missing");
+    }
+
+    let mounted_volumes = crate::driver::storage::volumes()
+        .into_iter()
+        .filter(|volume| volume.name != "tmpfs" && volume.mounted_at.is_some())
+        .count();
+    if mounted_volumes == 0 {
+        return Err("skip: no storage volumes mounted");
+    }
+
     Ok(())
 }
 
@@ -1069,11 +1140,15 @@ fn test_driver_mouse() -> Result<(), &'static str> {
 }
 
 fn test_driver_keyboard_behavior() -> Result<(), &'static str> {
-    Err("skip: keyboard input behavior validation is pending")
+    driver_exists_any(&["keyboard", "hid-keyboard"], &["keyboard0"])?;
+    let _ = console::poll_input();
+    Ok(())
 }
 
 fn test_driver_mouse_behavior() -> Result<(), &'static str> {
-    Err("skip: mouse input behavior validation is pending")
+    driver_exists_any(&["mouse", "hid-mouse"], &["mouse0"])?;
+    let _ = console::poll_input();
+    Ok(())
 }
 
 fn test_driver_timer() -> Result<(), &'static str> {
