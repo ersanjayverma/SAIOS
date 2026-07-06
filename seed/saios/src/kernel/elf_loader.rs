@@ -13,7 +13,7 @@ use crate::saifs;
 use crate::saifs::Handle;
 use crate::vmm;
 
-const ET_EXEC_ISOLATED_ADDRESS_SPACE: bool = false;
+const ET_EXEC_ISOLATED_ADDRESS_SPACE: bool = true;
 const ET_DYN_PROCESS_ADDRESS_SPACE: bool = false;
 const ELF_TRACE_LOGS: bool = false;
 
@@ -680,6 +680,12 @@ fn log_mapping(label: &str, virt: u64) {
 
 fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> Result<i32, &'static str> {
     crate::kernel::fault::begin_user_exec(pid);
+    crate::console::println!(
+        "elf: user-enter pid={} rip=0x{:x} rsp=0x{:x}",
+        pid,
+        entry,
+        initial_rsp.unwrap_or_else(current_rsp)
+    );
     elf_trace!(
         "elf: entry=0x{:x} rsp=0x{:x} cr3=0x{:x}",
         entry,
@@ -701,6 +707,13 @@ fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> 
         }
         let fault_returned = jump_to_entry_with_rsp_recoverable(entry, sp);
         let faulted = crate::kernel::fault::take_active_exec_faulted();
+        crate::kernel::fault::end_user_exec();
+        crate::console::println!(
+            "elf: user-return pid={} returned={} faulted={}",
+            pid,
+            fault_returned as u8,
+            faulted as u8
+        );
         if fault_returned && faulted {
             return Err("elf: user process fault");
         }

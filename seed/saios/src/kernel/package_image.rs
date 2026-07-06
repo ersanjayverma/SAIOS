@@ -94,7 +94,8 @@ fn write_binary(path: &str, entry: &str) -> Result<(), &'static str> {
     let _ = entry;
     const ELF_HEADER_SIZE: usize = 64;
     const PROGRAM_HEADER_SIZE: usize = 56;
-    const IMAGE_SIZE: usize = ELF_HEADER_SIZE + PROGRAM_HEADER_SIZE;
+    const CODE_OFFSET: usize = 0x80;
+    const IMAGE_SIZE: usize = 0x1000;
 
     let mut elf = vec![0u8; IMAGE_SIZE];
 
@@ -124,7 +125,7 @@ fn write_binary(path: &str, entry: &str) -> Result<(), &'static str> {
     put16(&mut elf, 16, ET_EXEC);       // e_type
     put16(&mut elf, 18, EM_X86_64);     // e_machine
     put32(&mut elf, 20, EV_CURRENT as u32); // e_version
-    put64(&mut elf, 24, USER_ELF_LOAD_BASE + 0x1000); // e_entry
+    put64(&mut elf, 24, USER_ELF_LOAD_BASE + CODE_OFFSET as u64); // e_entry
     put64(&mut elf, 32, ELF_HEADER_SIZE as u64); // e_phoff
     put64(&mut elf, 40, 0); // e_shoff
     put32(&mut elf, 48, 0); // e_flags
@@ -144,6 +145,19 @@ fn write_binary(path: &str, entry: &str) -> Result<(), &'static str> {
     put64(&mut elf, ph + 32, IMAGE_SIZE as u64); // p_filesz
     put64(&mut elf, ph + 40, IMAGE_SIZE as u64); // p_memsz
     put64(&mut elf, ph + 48, 0x1000); // p_align
+
+    // Minimal x86_64 Linux ABI stub:
+    //   mov eax, 60   ; __NR_exit
+    //   xor edi, edi  ; status = 0
+    //   syscall
+    //   hlt           ; should not execute if exit succeeds
+    let code: [u8; 10] = [
+        0xB8, 0x3C, 0x00, 0x00, 0x00,
+        0x31, 0xFF,
+        0x0F, 0x05,
+        0xF4,
+    ];
+    elf[CODE_OFFSET..CODE_OFFSET + code.len()].copy_from_slice(&code);
 
     vfs::write_path(path, elf.as_slice())
 }

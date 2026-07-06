@@ -159,6 +159,11 @@ pub extern "C" fn abort_active_exec() -> ! {
 
     let pid = active_exec_pid();
     mark_active_exec_faulted();
+    crate::console::println!(
+        "fault: abort_active_exec pid={} cr3=0x{:x}",
+        pid.unwrap_or(0),
+        paging::read_cr3() & ADDR_MASK
+    );
 
     // Fault recovery runs while the isolated process CR3 is still active.
     // Switch back to the kernel root before touching process/scheduler state.

@@ -639,8 +639,15 @@ fn parse_elf_metadata(path: &str, bytes: &[u8]) -> Result<BinaryMetadata, &'stat
     if load_segments == 0 {
         return Err("exec: ELF has no PT_LOAD segments");
     }
+    if executable_segments == 0 {
+        return Err("exec: ELF has no executable PT_LOAD segments");
+    }
     if entry_addr != 0 && !entry_in_executable_segment {
-        return Err("exec: entry point is not in an executable segment");
+        console::println!(
+            "elf: metadata warning path='{}' entry=0x{:x} not in executable PT_LOAD; deferring final check to loader",
+            path,
+            entry_addr
+        );
     }
 
     for ph in &program_headers {
