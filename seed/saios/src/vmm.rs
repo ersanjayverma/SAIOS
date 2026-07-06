@@ -402,9 +402,17 @@ fn map_page_hw(virt: VirtAddr, phys: PhysAddr, flags: u64) -> Result<(), &'stati
             l2, virt, huge_phys_base, new_page
         );
 
-        // Populate all 512 PTEs so the entire 2 MiB identity region stays accessible.
+        // Populate all 512 PTEs so the rest of the 2 MiB region stays accessible.
+        // Skip PTE[l1] — it is the target of the current mapping request and must
+        // remain empty so the caller can install the new physical address there.
+        // The stale boot-identity physical address that the huge PDE had at this
+        // slot is no longer needed: any legitimate kernel user of that physical
+        // page has its own tracked VMM mapping at a distinct virtual address.
         let pt = unsafe { &mut *pt_table_ptr(l4, l3, l2) };
         for i in 0..512usize {
+            if i == l1 {
+                continue;
+            }
             let entry_phys = huge_phys_base.saturating_add((i as u64).saturating_mul(PAGE_SIZE));
             pt.entries[i].0 = entry_phys | pte_flags | paging::FLAG_PRESENT;
         }
