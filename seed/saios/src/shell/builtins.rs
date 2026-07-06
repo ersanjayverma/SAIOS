@@ -79,7 +79,7 @@ pub fn execute(parsed: ParsedCommand<'_>) {
             console::clear();
         }
         commands::VERSION => {
-            console::println!("SAIOS v0.1");
+            console::println!("{}", crate::version::PRODUCT_BANNER);
         }
         commands::ECHO => {
             let mut first = true;

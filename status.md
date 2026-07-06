@@ -9,7 +9,7 @@ Finish v0.4 foundation with stable static ELF execution, realistic Linux ABI beh
 - Critical: Dynamic ELF interpreter path (`PT_INTERP`) is unsupported.
 - Critical: Syscall ABI still uses selector-based pseudo-arguments for core file I/O.
 - High: Ring3 shell fallback to kernel SNSH remains in normal runtime path.
-- High: ET_DYN isolated address-space path is disabled pending VMM safety fixes.
+- High: ET_EXEC and ET_DYN isolated address-space paths are disabled pending VMM safety fixes.
 - Medium: Validation gates still aligned with v0.3 readiness framing.
 
 ## Completion Status
@@ -19,7 +19,7 @@ Current blocking reasons:
 - `/bin/sh` in the v0.4 DoD still depends on `PT_INTERP`/dynamic-loader support that is not implemented.
 - Syscall ABI migration away from selector-based pseudo-arguments is still incomplete.
 - Session/runtime behavior is improved, but kernel SNSH fallback still exists as a fallback path rather than a fully eliminated normal-path dependency.
-- ET_DYN isolated address-space execution remains disabled pending VMM safety fixes.
+- ET_EXEC and ET_DYN isolated address-space execution remain disabled pending VMM safety fixes.
 
 ## Workboard
 - [x] Diagnose current ELF panic with deep instrumentation.
@@ -38,11 +38,13 @@ Replace selector-based syscall arguments with pointer-buffer path for core file 
 - Decide and implement `PT_INTERP` support, or formally narrow the v0.4 DoD to static-only userland.
 - Re-test ring3 shell/session flow until SNSH is only an emergency path and not part of expected operator workflow.
 - Re-enable or formally defer ET_DYN isolated address-space work with documented rationale.
+- Re-enable or formally defer isolated ET_EXEC/ET_DYN address-space work with documented rationale.
 - Run and pass a v0.4 validation sweep aligned with the actual DoD workflows.
 
 ## Notes
 - Keep this file updated after every substantial change.
 - `State.md` currently exists but is empty; `status.md` is the active tracker for v0.4 closure.
+- Completed in this step: added central version source at `seed/saios/src/version.rs` and repointed product banners, shell version output, uname version fields, driver registration, and KSF service version strings to shared constants.
 - Completed in this step: moved `USER_STACK_BASE` to high user VA (`0x0000_0000_7000_0000`) and verified `cargo check` passes.
 - Completed in this step: added validation readiness profiles (`--ready` => v0.3, `--ready-v04` => v0.4) and wired profile-aware readiness reporting.
 - In progress: syscall ABI migration started. `dispatch` now accepts pointer-based path arguments for `open/stat/getdents64` with selector fallback, and supports pointer-buffer mode for `read/write` while retaining legacy selector behavior.
@@ -55,3 +57,6 @@ Replace selector-based syscall arguments with pointer-buffer path for core file 
 - In progress: Linux errno mapping improved for exec failures. PT_INTERP/ELF-format failures now map to `ENOEXEC` rather than generic `EINVAL` for clearer user-space semantics.
 - In progress: session control flow hardened. SNSH fallback is now conditional (only when ring3 shell launch fails); successful ring3 shell runs now return to login prompt instead of always dropping into SNSH.
 - In progress: ring3 launch fallback widened to include built-in `shell`/`/bin/shell` candidates before SNSH, improving non-PT_INTERP session viability.
+- In progress: isolated ET_EXEC execution is now disabled alongside ET_DYN to keep login/session flow on the shared bring-up path until cloned-CR3 low-half faults are fixed.
+- In progress: shared-path low-half ET_EXEC loads are now rejected deterministically instead of being allowed to split/corrupt the low-half identity window during login-shell launch.
+- In progress: v0.4 validation process gates were corrected for current runtime semantics (`wait(pid)` no longer self-mutates the target process, and process-creation validation now checks persistent process records instead of transient job-count growth).

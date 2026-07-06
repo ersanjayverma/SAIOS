@@ -737,7 +737,7 @@ fn print_command_table(ctx: &CommandContext) {
 }
 
 fn cmd_version(_ctx: &mut CommandContext, _args: &[&str]) -> ShellResult {
-    console::println!("SAIOS v1.0 SISH");
+    console::println!("{}", crate::version::SHELL_BANNER);
     Ok(())
 }
 

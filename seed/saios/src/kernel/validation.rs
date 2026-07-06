@@ -437,7 +437,9 @@ pub fn print_report(report: &ValidationReport, options: &ValidateOptions) {
             console::newline();
         }
         console::println!("[{}] {}", result.status.as_str(), result.name);
-        if options.verbose && !result.detail.is_empty() {
+        if result.status == TestStatus::Fail && !result.detail.is_empty() {
+            console::println!("       reason: {}", result.detail);
+        } else if options.verbose && !result.detail.is_empty() {
             console::println!("       {} ({} ms)", result.detail, result.time_ms);
         } else if options.verbose {
             console::println!("       {} ms", result.time_ms);
@@ -922,11 +924,12 @@ fn spawn_silent(name: &str, args: &[&str]) -> Result<u64, &'static str> {
 }
 
 fn test_process_creation() -> Result<(), &'static str> {
-    let before = process::jobs().len();
     let pid = spawn_silent("hello", &["validate"])?;
-    let after = process::jobs().len();
-    if pid == 0 || after <= before {
-        return Err("process spawn did not register a job");
+    if pid == 0 {
+        return Err("process spawn returned invalid pid");
+    }
+    if process::record(pid).is_none() {
+        return Err("process spawn did not leave a process record");
     }
     Ok(())
 }
@@ -945,7 +948,14 @@ fn test_process_exit() -> Result<(), &'static str> {
 
 fn test_process_wait() -> Result<(), &'static str> {
     let pid = spawn_silent("hello", &["wait"])?;
-    process::wait(pid).map(|_| ())
+    for _ in 0..16 {
+        if process::wait(pid).is_ok() {
+            return Ok(());
+        }
+        scheduler::maybe_preempt();
+        timer::sleep(1);
+    }
+    Err("wait did not observe child exit within timeout")
 }
 
 fn test_pid_uniqueness() -> Result<(), &'static str> {

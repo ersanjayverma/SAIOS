@@ -375,31 +375,33 @@ pub fn init() {
             }
         }
     }
+    let driver_version = crate::version::PRODUCT_VERSION;
+    let driver_author = crate::version::PRODUCT_NAME;
     let _ = driver::ensure_driver(
         "serial",
-        "0.1.0",
-        "SAIOS",
+        driver_version,
+        driver_author,
         &[],
         driver::DriverStatus::Running,
     );
     let _ = driver::ensure_driver(
         "input",
-        "0.1.0",
-        "SAIOS",
+        driver_version,
+        driver_author,
         &["serial"],
         driver::DriverStatus::Running,
     );
     let _ = driver::ensure_driver(
         "hid",
-        "0.1.0",
-        "SAIOS",
+        driver_version,
+        driver_author,
         &["input"],
         driver::DriverStatus::Running,
     );
     let _ = driver::ensure_driver(
         "hid-keyboard",
-        "0.1.0",
-        "SAIOS",
+        driver_version,
+        driver_author,
         &["hid"],
         if keyboard_ready || usb_input_ready {
             driver::DriverStatus::Running
@@ -409,16 +411,16 @@ pub fn init() {
     );
     let _ = driver::ensure_driver(
         "hid-mouse",
-        "0.1.0",
-        "SAIOS",
+        driver_version,
+        driver_author,
         &["hid"],
         driver::DriverStatus::Running,
     );
     // Keep legacy logical names for compatibility with existing scripts/tools.
     let _ = driver::ensure_driver(
         "mouse",
-        "0.1.0",
-        "SAIOS",
+        driver_version,
+        driver_author,
         &["hid-mouse"],
         driver::DriverStatus::Running,
     );
@@ -507,8 +509,8 @@ pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
         if mapped_info.base != 0 && console.backend.right_mut().framebuffer_attached() {
             let _ = driver::ensure_driver(
                 "framebuffer",
-                "0.1.0",
-                "SAIOS",
+                crate::version::PRODUCT_VERSION,
+                crate::version::PRODUCT_NAME,
                 &["serial"],
                 driver::DriverStatus::Running,
             );
@@ -534,8 +536,8 @@ pub(crate) fn attach_framebuffer_direct(info: FramebufferInfo) {
         if info.base != 0 && console.backend.right_mut().framebuffer_attached() {
             let _ = driver::ensure_driver(
                 "framebuffer",
-                "0.1.0",
-                "SAIOS",
+                crate::version::PRODUCT_VERSION,
+                crate::version::PRODUCT_NAME,
                 &["serial"],
                 driver::DriverStatus::Running,
             );

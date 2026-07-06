@@ -19,6 +19,7 @@ static INVALID_OPCODE_HANDLER: StaticCell<Option<InvalidOpcodeHandler>> = Static
 static GENERAL_PROTECTION_HANDLER: StaticCell<Option<GeneralProtectionHandler>> = StaticCell::new(None);
 static PAGE_FAULT_HANDLER: StaticCell<Option<PageFaultHandler>> = StaticCell::new(None);
 static USER_FAULT_ABORT_HANDLER: StaticCell<Option<UserFaultAbortHandler>> = StaticCell::new(None);
+const PAGE_FAULT_WALK_TRACE: bool = false;
 
 global_asm!(
     ".global saios_default_interrupt_stub",
@@ -596,8 +597,8 @@ extern "C" fn page_fault(error_code: usize, stack_ptr: usize) -> usize {
         cr3
     ));
 
-    // Walk the page tables from the live CR3 for key fault-related addresses.
-    {
+    // Keep deep page-table walk logging opt-in; default logs stay concise.
+    if PAGE_FAULT_WALK_TRACE {
         const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
         let cr3_phys = cr3 & ADDR_MASK;
 

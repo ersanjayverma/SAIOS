@@ -13,8 +13,17 @@ use crate::saifs;
 use crate::saifs::Handle;
 use crate::vmm;
 
-const ET_EXEC_ISOLATED_ADDRESS_SPACE: bool = true;
+const ET_EXEC_ISOLATED_ADDRESS_SPACE: bool = false;
 const ET_DYN_PROCESS_ADDRESS_SPACE: bool = false;
+const ELF_TRACE_LOGS: bool = false;
+
+macro_rules! elf_trace {
+    ($($arg:tt)*) => {
+        if ELF_TRACE_LOGS {
+            crate::console::println!($($arg)*);
+        }
+    };
+}
 
 #[derive(Copy, Clone)]
 struct ElfHeader {
@@ -318,7 +327,7 @@ fn map_and_load(
         if ph.p_type != PT_LOAD {
             continue;
         }
-        crate::console::println!(
+        elf_trace!(
             "elf: PT_LOAD vaddr=0x{:x} off=0x{:x} filesz=0x{:x} memsz=0x{:x} flags=0x{:x}",
             ph.p_vaddr,
             ph.p_offset,
@@ -349,7 +358,7 @@ fn map_and_load(
         let pages =
             usize::try_from(size / vmm::PAGE_SIZE).map_err(|_| "elf: segment pages overflow")?;
 
-        crate::console::println!(
+        elf_trace!(
             "elf: map 0x{:x}-0x{:x} {}{}{}",
             r.start,
             r.end,
@@ -393,7 +402,7 @@ fn map_and_load(
             continue;
         }
 
-        crate::console::println!(
+        elf_trace!(
             "elf: copy seg vaddr=0x{:x} off=0x{:x} filesz=0x{:x} memsz=0x{:x}",
             ph.p_vaddr,
             ph.p_offset,
@@ -417,7 +426,7 @@ fn map_and_load(
         let src_ptr = bytes[src_off..src_end].as_ptr() as u64;
         let dst_ptr = dst as u64;
         let cr3 = hal::arch::paging::read_cr3();
-        crate::console::println!(
+        elf_trace!(
             "elf: copy detail src=0x{:x}-0x{:x} dst=0x{:x}-0x{:x} len=0x{:x} cr3=0x{:x}",
             src_ptr,
             src_ptr.saturating_add(src_len as u64),
@@ -426,16 +435,18 @@ fn map_and_load(
             src_len,
             cr3,
         );
-        log_mapping("seg-src-begin", src_ptr);
-        log_mapping("seg-src-end", src_ptr.saturating_add(src_len as u64).saturating_sub(1));
-        log_mapping("seg-dst-begin", dst_ptr);
-        log_mapping("seg-dst-end", dst_ptr.saturating_add(src_len as u64).saturating_sub(1));
-        log_mapping("seg-kernel-rsp", current_rsp());
+        if ELF_TRACE_LOGS {
+            log_mapping("seg-src-begin", src_ptr);
+            log_mapping("seg-src-end", src_ptr.saturating_add(src_len as u64).saturating_sub(1));
+            log_mapping("seg-dst-begin", dst_ptr);
+            log_mapping("seg-dst-end", dst_ptr.saturating_add(src_len as u64).saturating_sub(1));
+            log_mapping("seg-kernel-rsp", current_rsp());
+        }
         unsafe {
             core::ptr::copy_nonoverlapping(bytes[src_off..src_end].as_ptr(), dst, src_len);
         }
 
-        crate::console::println!(
+        elf_trace!(
             "elf: copied seg vaddr=0x{:x} len=0x{:x}",
             ph.p_vaddr,
             ph.p_filesz
@@ -448,7 +459,7 @@ fn map_and_load(
             unsafe {
                 core::ptr::write_bytes(dst.add(bss_off), 0, bss_len);
             }
-            crate::console::println!(
+            elf_trace!(
                 "elf: zeroed bss vaddr=0x{:x} len=0x{:x}",
                 ph.p_vaddr.saturating_add(ph.p_filesz),
                 ph.p_memsz.saturating_sub(ph.p_filesz)
@@ -616,7 +627,7 @@ fn map_initial_user_stack(
     // argc
     sp = stack_push_u64(sp, 1)?;
 
-    crate::console::println!(
+    elf_trace!(
         "elf: startup argc=1 argv=0x{:x} argv0=0x{:x}",
         argv_ptr,
         arg0_ptr
@@ -669,7 +680,7 @@ fn log_mapping(label: &str, virt: u64) {
 
 fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> Result<i32, &'static str> {
     crate::kernel::fault::begin_user_exec(pid);
-    crate::console::println!(
+    elf_trace!(
         "elf: entry=0x{:x} rsp=0x{:x} cr3=0x{:x}",
         entry,
         initial_rsp.unwrap_or_else(current_rsp),
@@ -681,11 +692,13 @@ fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> 
         let idt = hal::arch::x86_64::cpu::read_idt_ptr();
         hal::arch::x86_64::tss::set_rsp0(kernel_rsp0);
         hal::arch::x86_64::syscall::set_kernel_rsp0(kernel_rsp0);
-        log_mapping("entry", entry);
-        log_mapping("user-rsp", sp);
-        log_mapping("rsp0", kernel_rsp0);
-        log_mapping("gdt", gdt.base);
-        log_mapping("idt", idt.base);
+        if ELF_TRACE_LOGS {
+            log_mapping("entry", entry);
+            log_mapping("user-rsp", sp);
+            log_mapping("rsp0", kernel_rsp0);
+            log_mapping("gdt", gdt.base);
+            log_mapping("idt", idt.base);
+        }
         let fault_returned = jump_to_entry_with_rsp_recoverable(entry, sp);
         let faulted = crate::kernel::fault::take_active_exec_faulted();
         if fault_returned && faulted {
@@ -711,18 +724,32 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
     let handle = saifs::open(path).map_err(|_| "elf: open failed")?;
     let bytes = handle.read().map_err(|_| "elf: read failed")?;
     let image_ptr = bytes.as_ptr() as u64;
-    crate::console::println!(
+    elf_trace!(
         "elf: image ptr=0x{:x} len=0x{:x} cr3=0x{:x}",
         image_ptr,
         bytes.len(),
         hal::arch::paging::read_cr3()
     );
-    log_mapping("image-begin", image_ptr);
-    if !bytes.is_empty() {
-        log_mapping("image-end", image_ptr.saturating_add(bytes.len() as u64).saturating_sub(1));
+    if ELF_TRACE_LOGS {
+        log_mapping("image-begin", image_ptr);
+        if !bytes.is_empty() {
+            log_mapping("image-end", image_ptr.saturating_add(bytes.len() as u64).saturating_sub(1));
+        }
     }
 
     let header = parse_header(bytes.as_slice())?;
+    crate::console::println!(
+        "elf: load path='{}' type={} mode={}",
+        path,
+        if header.e_type == ET_DYN { "ET_DYN" } else { "ET_EXEC" },
+        if header.e_type == ET_DYN && ET_DYN_PROCESS_ADDRESS_SPACE {
+            "isolated-preferred"
+        } else if header.e_type == ET_EXEC && ET_EXEC_ISOLATED_ADDRESS_SPACE {
+            "isolated-preferred"
+        } else {
+            "shared"
+        }
+    );
     let phs = parse_program_headers(bytes.as_slice(), &header)?;
     if phs.iter().any(|ph| ph.p_type == PT_INTERP && ph.p_filesz != 0) {
         return Err("elf: PT_INTERP executables are not supported yet");
@@ -740,6 +767,16 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
                 }
                 let seg_start = ph.p_vaddr;
                 let seg_end = ph.p_vaddr.saturating_add(ph.p_memsz);
+                if seg_start < vmm::KERNEL_VIRT_BASE {
+                    crate::console::println!(
+                        "elf: ET_EXEC shared-path load 0x{:x}-0x{:x} is unsafe below high-half; refusing non-PIE image",
+                        seg_start,
+                        seg_end
+                    );
+                    return Err(
+                        "elf: ET_EXEC shared-path load below high-half is unsafe; rebuild as PIE (ET_DYN) or use built-in shell",
+                    );
+                }
                 if seg_start < ke && ks < seg_end {
                     crate::console::println!(
                         "elf: ET_EXEC segment 0x{:x}-0x{:x} overlaps live kernel image 0x{:x}-0x{:x}",
@@ -792,7 +829,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
         }
 
         let run_result = vmm::with_address_space(exec_root, || {
-            crate::console::println!(
+            elf_trace!(
                 "elf: phase=map_load et={} isolated",
                 if header.e_type == ET_DYN { "ET_DYN" } else { "ET_EXEC" }
             );
@@ -816,7 +853,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
                 Err(e) => { unmap_loaded(&img); return Err(e); }
             };
             if let Some(dyn_info) = dyn_opt {
-                crate::console::println!(
+                elf_trace!(
                     "elf: phase=reloc rela=0x{:x} sz=0x{:x} ent=0x{:x} count={}",
                     dyn_info.rela_addr,
                     dyn_info.rela_sz,
@@ -827,7 +864,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
                     unmap_loaded(&img);
                     return Err(e);
                 }
-                crate::console::println!("elf: phase=reloc done");
+                elf_trace!("elf: phase=reloc done");
             }
 
             if let Err(e) = finalize_segment_protections(&img) {
@@ -835,7 +872,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
                 return Err(e);
             }
 
-            crate::console::println!("elf: phase=jump");
+            elf_trace!("elf: phase=jump");
             let result = jump_to_entry_recoverable(img.entry, pid, initial_rsp);
             unmap_loaded(&img);
             result
@@ -852,11 +889,11 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
             );
         }
         if header.e_type == ET_DYN && ET_DYN_PROCESS_ADDRESS_SPACE {
-            crate::console::println!(
+            elf_trace!(
                 "elf: ET_DYN using shared bring-up path"
             );
         }
-        crate::console::println!("elf: phase=map_load");
+        elf_trace!("elf: phase=map_load");
         let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base, false)?;
         let mut img = img;
 
@@ -877,7 +914,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
             Err(e) => { unmap_loaded(&img); return Err(e); }
         };
         if let Some(dyn_info) = dyn_opt {
-            crate::console::println!(
+            elf_trace!(
                 "elf: phase=reloc rela=0x{:x} sz=0x{:x} ent=0x{:x} count={}",
                 dyn_info.rela_addr,
                 dyn_info.rela_sz,
@@ -888,7 +925,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
                 unmap_loaded(&img);
                 return Err(e);
             }
-            crate::console::println!("elf: phase=reloc done");
+            elf_trace!("elf: phase=reloc done");
         }
 
         if let Err(e) = finalize_segment_protections(&img) {
@@ -896,7 +933,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
             return Err(e);
         }
 
-        crate::console::println!("elf: phase=jump");
+        elf_trace!("elf: phase=jump");
         let result = jump_to_entry_recoverable(img.entry, pid, initial_rsp);
         unmap_loaded(&img);
         result

@@ -345,7 +345,7 @@ fn uname_program(_args: &[&str], _env: &[(String, String)]) -> i32 {
     let mut vendor = String::from_utf8_lossy(&vendor_bytes).to_string();
     vendor.retain(|c| c != '\0');
     let v = crate::kernel::syscall::abi_version();
-    console::println!("SAIOS v0.10");
+    console::println!("{}", crate::version::PRODUCT_BANNER);
     console::println!("arch=x86_64 cpu_vendor={}", vendor.trim());
     console::println!("syscall_abi={}.{}.{}", v.major, v.minor, v.patch);
     0

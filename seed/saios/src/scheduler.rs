@@ -334,7 +334,7 @@ fn ensure_init_script() {
 /// Prepares the default userland filesystem/session environment.
 pub fn prepare_default_user_session() -> Result<(), &'static str> {
     crate::console::clear();
-    crate::console::println!("SAIOS v1.0");
+    crate::console::println!("{}", crate::version::PRODUCT_BANNER);
     crate::console::println!("UEFI Boot");
     crate::console::println!("Initializing user session...");
     crate::console::println!("UTF framebuffer: Cafe Ω α あ ┌─┐ █");

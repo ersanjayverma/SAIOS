@@ -147,18 +147,6 @@ impl ProcessManager {
         });
     }
 
-    fn set_waiting(&mut self, pid: u64) -> Result<(), &'static str> {
-        let rec = self
-            .records
-            .iter_mut()
-            .find(|r| r.pid == pid)
-            .ok_or("process: pid not found")?;
-        if rec.state != ProcessState::Exited {
-            rec.state = ProcessState::Waiting;
-        }
-        Ok(())
-    }
-
     fn set_running(&mut self, pid: u64) -> Result<(), &'static str> {
         let rec = self
             .records
@@ -377,7 +365,6 @@ pub fn reap_child(parent_pid: u64, pid: u64) -> Result<i32, &'static str> {
 
 pub fn wait(pid: u64) -> Result<i32, &'static str> {
     with_manager_mut(|m| {
-        let _ = m.set_waiting(pid);
         let rec = m
             .records
             .iter()

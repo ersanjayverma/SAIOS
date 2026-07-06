@@ -321,67 +321,70 @@ pub fn init() {
             return;
         }
 
+        let driver_version = crate::version::PRODUCT_VERSION;
+        let driver_author = crate::version::PRODUCT_NAME;
+
         // Drivers that have no early runtime registration site yet.
-        let _ = r.ensure_driver("pci", "0.1.0", "SAIOS", &[], DriverStatus::Loaded);
-        let _ = r.ensure_driver("network", "0.1.0", "SAIOS", &["pci"], DriverStatus::Loaded);
-        let _ = r.ensure_driver("usb", "0.1.0", "SAIOS", &["pci"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("pci", driver_version, driver_author, &[], DriverStatus::Loaded);
+        let _ = r.ensure_driver("network", driver_version, driver_author, &["pci"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("usb", driver_version, driver_author, &["pci"], DriverStatus::Loaded);
         let _ = r.ensure_driver(
             "loopback",
-            "0.1.0",
-            "SAIOS",
+            driver_version,
+            driver_author,
             &["network"],
             DriverStatus::Loaded,
         );
         let _ = r.ensure_driver(
             "ethernet",
-            "0.1.0",
-            "SAIOS",
+            driver_version,
+            driver_author,
             &["network", "pci"],
             DriverStatus::Loaded,
         );
         let _ = r.ensure_driver(
             "wifi",
-            "0.1.0",
-            "SAIOS",
+            driver_version,
+            driver_author,
             &["network", "pci"],
             DriverStatus::Loaded,
         );
-        let _ = r.ensure_driver("dhcp", "0.1.0", "SAIOS", &["network"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("dhcp", driver_version, driver_author, &["network"], DriverStatus::Loaded);
         let _ = r.ensure_driver(
             "dns",
-            "0.1.0",
-            "SAIOS",
+            driver_version,
+            driver_author,
             &["network", "dhcp"],
             DriverStatus::Loaded,
         );
-        let _ = r.ensure_driver("storage", "0.1.0", "SAIOS", &["pci"], DriverStatus::Loaded);
-        let _ = r.ensure_driver("ext4", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
-        let _ = r.ensure_driver("ntfs", "0.1.0", "SAIOS", &["storage"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("storage", driver_version, driver_author, &["pci"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("ext4", driver_version, driver_author, &["storage"], DriverStatus::Loaded);
+        let _ = r.ensure_driver("ntfs", driver_version, driver_author, &["storage"], DriverStatus::Loaded);
         let _ = r.ensure_driver(
             "fat16",
-            "0.1.0",
-            "SAIOS",
+            driver_version,
+            driver_author,
             &["storage"],
             DriverStatus::Loaded,
         );
         let _ = r.ensure_driver(
             "fat32",
-            "0.1.0",
-            "SAIOS",
+            driver_version,
+            driver_author,
             &["storage"],
             DriverStatus::Loaded,
         );
         let _ = r.ensure_driver(
             "fat64",
-            "0.1.0",
-            "SAIOS",
+            driver_version,
+            driver_author,
             &["storage"],
             DriverStatus::Loaded,
         );
         let _ = r.ensure_driver(
             "fat128",
-            "0.1.0",
-            "SAIOS",
+            driver_version,
+            driver_author,
             &["storage"],
             DriverStatus::Loaded,
         );

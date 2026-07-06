@@ -329,7 +329,7 @@ impl KernelService for ConsoleService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -367,7 +367,7 @@ impl KernelService for MemoryService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -403,7 +403,7 @@ impl KernelService for ObjectService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -439,7 +439,7 @@ impl KernelService for ProviderService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -475,7 +475,7 @@ impl KernelService for SifService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -511,7 +511,7 @@ impl KernelService for TimerService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -547,7 +547,7 @@ impl KernelService for SchedulerService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -583,7 +583,7 @@ impl KernelService for EventService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -619,7 +619,7 @@ impl KernelService for HealthService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -654,7 +654,7 @@ impl KernelService for InputService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -689,7 +689,7 @@ impl KernelService for UserSessionService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -725,7 +725,7 @@ impl KernelService for VfsService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -760,7 +760,7 @@ impl KernelService for DriverManagerService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -796,7 +796,7 @@ impl KernelService for DeviceManagerService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -832,7 +832,7 @@ impl KernelService for ProcessManagerService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -868,7 +868,7 @@ impl KernelService for StorageDiscoveryService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -913,7 +913,7 @@ impl KernelService for IpcService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -948,7 +948,7 @@ impl KernelService for NetworkService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {
@@ -983,7 +983,7 @@ impl KernelService for SairuService {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        crate::version::PRODUCT_VERSION
     }
 
     fn dependencies(&self) -> &'static [ServiceId] {

@@ -1172,10 +1172,10 @@ fn linux_uname(buf_ptr: u64) -> Result<u64, i64> {
         machine: [0; 65],
         domainname: [0; 65],
     };
-    fill(&mut uts.sysname, b"SAIOS");
+    fill(&mut uts.sysname, crate::version::PRODUCT_NAME.as_bytes());
     fill(&mut uts.nodename, b"saios");
-    fill(&mut uts.release, b"1.0");
-    fill(&mut uts.version, b"SAIOS 1.0");
+    fill(&mut uts.release, crate::version::UTS_RELEASE.as_bytes());
+    fill(&mut uts.version, crate::version::UTS_VERSION.as_bytes());
     fill(&mut uts.machine, b"x86_64");
     fill(&mut uts.domainname, b"localdomain");
     write_user_struct(buf_ptr, &uts)?;

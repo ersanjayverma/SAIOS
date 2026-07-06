@@ -32,6 +32,7 @@ pub mod snom;
 pub mod som;
 pub mod taskman;
 pub mod timer;
+pub mod version;
 pub mod vfs;
 pub mod vmm;
 use core::mem::size_of;
