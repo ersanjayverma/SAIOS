@@ -28,7 +28,7 @@ pub struct AbiVersion {
 
 const ABI_VERSION: AbiVersion = AbiVersion {
     major: 1,
-    minor: 2,
+    minor: 3,
     patch: 0,
 };
 
@@ -1867,67 +1867,18 @@ pub extern "C" fn saios_linux_syscall(
     }
 }
 
-fn selector_to_program(selector: u64) -> Option<&'static str> {
-    match selector {
-        1 => Some("hello"),
-        2 => Some("calc"),
-        3 => Some("editor"),
-        4 => Some("shell"),
-        5 => Some("ls"),
-        6 => Some("cat"),
-        7 => Some("cp"),
-        8 => Some("mv"),
-        9 => Some("rm"),
-        10 => Some("mkdir"),
-        11 => Some("ps"),
-        12 => Some("kill"),
-        _ => None,
-    }
-}
-
 fn resolve_program_argument(arg: u64) -> Result<String, SyscallError> {
-    if let Some(name) = selector_to_program(arg) {
-        return Ok(name.to_string());
+    if arg == 0 {
+        return Err(SyscallError::InvalidArgument);
     }
     read_user_cstr(arg, 4096).map_err(|_| SyscallError::InvalidArgument)
-}
-
-/// Map an `open` path selector to a well-known filesystem path.
-///
-/// The syscall ABI only carries integer arguments (there is no user-space
-/// memory model to pass a string pointer), so file paths are addressed by a
-/// small fixed selector table, mirroring how [`selector_to_program`] addresses
-/// executables.
-fn selector_to_path(selector: u64) -> Option<&'static str> {
-    match selector {
-        1 => Some("/etc/motd"),
-        2 => Some("/tmp/scratch"),
-        3 => Some("/boot/package.manifest"),
-        4 => Some("/home/user/notes.txt"),
-        5 => Some("/tmp/syscall.out"),
-        _ => None,
-    }
 }
 
 fn resolve_path_argument(arg: u64) -> Result<String, SyscallError> {
-    if let Some(path) = selector_to_path(arg) {
-        return Ok(path.to_string());
+    if arg == 0 {
+        return Err(SyscallError::InvalidArgument);
     }
     read_user_cstr(arg, 4096).map_err(|_| SyscallError::InvalidArgument)
-}
-
-/// Map a `write` data selector to a fixed payload.
-///
-/// As with [`selector_to_path`], arbitrary buffers cannot be passed through the
-/// integer-only ABI, so writable data is chosen from a small predefined table.
-fn selector_to_data(selector: u64) -> Option<&'static [u8]> {
-    match selector {
-        0 => Some(b""),
-        1 => Some(b"hello\n"),
-        2 => Some(b"SAIOS syscall write test\n"),
-        3 => Some(b"The quick brown fox jumps over the lazy dog\n"),
-        _ => None,
-    }
 }
 
 fn user_slice_ro(ptr: u64, len: usize) -> Result<&'static [u8], SyscallError> {
@@ -2330,7 +2281,7 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             Ok((pid << 32) | (status & 0xFFFF_FFFF))
         }
         SyscallNumber::Exec => {
-            // args[0] = program selector or user C-string pointer.
+            // args[0] = user C-string program pointer.
             // args[1] = optional user argv pointer (NULL-terminated char**).
             let name = resolve_program_argument(req.args[0])?;
             let argv_owned = if req.args[1] != 0 {
@@ -2344,7 +2295,7 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             Ok(code as u64)
         }
         SyscallNumber::Spawn => {
-            // args[0] = program selector or user C-string pointer.
+            // args[0] = user C-string program pointer.
             // args[1] = optional user argv pointer (NULL-terminated char**).
             let name = resolve_program_argument(req.args[0])?;
             let argv_owned = if req.args[1] != 0 {
@@ -2358,7 +2309,7 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             Ok(pid)
         }
         SyscallNumber::Open => {
-            // args[0] = path selector or user C-string pointer,
+            // args[0] = user C-string path pointer,
             // args[1] = open mode (0=ro, 1=rw+create, 2=append+create).
             let path = resolve_path_argument(req.args[0])?;
             let options = open_mode_to_options(req.args[1]).ok_or(SyscallError::InvalidArgument)?;
@@ -2373,17 +2324,12 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             Ok(fd)
         }
         SyscallNumber::Read => {
-            // Legacy: args[0] = fd, args[1] = max bytes to read (0 defaults to 4096).
-            // Pointer mode: args[0] = fd, args[1] = user buffer ptr, args[2] = max bytes.
+            // args[0] = fd, args[1] = user buffer ptr, args[2] = max bytes.
             let fd = req.args[0];
-            let pointer_mode = req.args[1] != 0 && req.args[2] != 0;
-            let max_len = if pointer_mode {
-                req.args[2] as usize
-            } else if req.args[1] == 0 {
-                4096
-            } else {
-                req.args[1] as usize
-            };
+            let max_len = req.args[2] as usize;
+            if max_len == 0 {
+                return Ok(0);
+            }
             let data = with_state_mut(|state| {
                 let obj_idx = state
                     .obj_for_fd(ctx.pid, fd)
@@ -2420,31 +2366,20 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                 }
             })?;
 
-            if pointer_mode {
-                let dst = user_slice_rw(req.args[1], data.len())?;
-                dst.copy_from_slice(data.as_slice());
-                return Ok(data.len() as u64);
-            }
-
-            // Legacy selector ABI: echo bytes to console when no user buffer is passed.
-            console::print(core::str::from_utf8(&data).unwrap_or("<binary>"));
+            let dst = user_slice_rw(req.args[1], data.len())?;
+            dst.copy_from_slice(data.as_slice());
             Ok(data.len() as u64)
         }
         SyscallNumber::Write => {
-            // Legacy: args[0] = fd, args[1] = data selector.
-            // Pointer mode: args[0] = fd, args[1] = user buffer ptr, args[2] = len.
+            // args[0] = fd, args[1] = user buffer ptr, args[2] = len.
             let fd = req.args[0];
-            let pointer_mode = selector_to_data(req.args[1]).is_none()
-                && req.args[1] != 0
-                && req.args[2] != 0;
-            let owned_data;
-            let data = if pointer_mode {
-                let src = user_slice_ro(req.args[1], req.args[2] as usize)?;
-                owned_data = src.to_vec();
-                owned_data.as_slice()
-            } else {
-                selector_to_data(req.args[1]).ok_or(SyscallError::InvalidArgument)?
-            };
+            let len = req.args[2] as usize;
+            if len == 0 {
+                return Ok(0);
+            }
+            let src = user_slice_ro(req.args[1], len)?;
+            let owned_data = src.to_vec();
+            let data = owned_data.as_slice();
             match fd {
                 // Conventional stdio descriptors for process/runtime output channels.
                 1 => {
@@ -2506,7 +2441,7 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             Ok(pos as u64)
         }
         SyscallNumber::Stat => {
-            // args[0] = path selector or user C-string pointer.
+            // args[0] = user C-string path pointer.
             // Optional pointer mode: args[1] = user stat buffer.
             let path = resolve_path_argument(req.args[0])?;
             let st = vfs::stat(path.as_str()).map_err(|_| SyscallError::InvalidArgument)?;
@@ -2553,36 +2488,12 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             Ok(size as u64)
         }
         SyscallNumber::Getdents64 => {
-            // Preferred mode: args[0] = directory fd, args[1] = user output buffer,
-            // args[2] = max bytes. Compatibility fallback: args[0] = path selector or
-            // user C-string pointer, with optional text-buffer copy of names.
-            if req.args[1] != 0 && req.args[2] != 0 {
-                let fd_exists = with_state_mut(|state| Ok::<bool, SyscallError>(state.obj_for_fd(ctx.pid, req.args[0]).is_some()))?;
-                if fd_exists {
-                    return linux_getdents64(ctx.pid, req.args[0], req.args[1], req.args[2])
-                        .map_err(|_| SyscallError::InvalidArgument);
-                }
+            // args[0] = directory fd, args[1] = user output buffer, args[2] = max bytes.
+            if req.args[1] == 0 || req.args[2] == 0 {
+                return Err(SyscallError::InvalidArgument);
             }
-
-            let path = resolve_path_argument(req.args[0])?;
-            let entries = vfs::readdir(path.as_str()).map_err(|_| SyscallError::InvalidArgument)?;
-            if req.args[1] != 0 && req.args[2] != 0 {
-                let mut out = Vec::new();
-                for name in &entries {
-                    out.extend_from_slice(name.as_bytes());
-                    out.push(b'\n');
-                }
-                let cap = req.args[2] as usize;
-                let take = core::cmp::min(cap, out.len());
-                let dst = user_slice_rw(req.args[1], take)?;
-                dst.copy_from_slice(&out[..take]);
-                return Ok(take as u64);
-            }
-
-            for name in &entries {
-                console::println!("{}", name);
-            }
-            Ok(entries.len() as u64)
+            linux_getdents64(ctx.pid, req.args[0], req.args[1], req.args[2])
+                .map_err(|_| SyscallError::InvalidArgument)
         }
         SyscallNumber::Mmap => {
             // args[0] = len bytes (0 defaults to one page). Returns synthetic VA.
