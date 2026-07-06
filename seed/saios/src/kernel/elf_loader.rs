@@ -368,11 +368,11 @@ fn map_and_load(
         );
 
         if clear_existing_mappings {
-            // Remove any stale VMM record first (tracked unmap frees owned physical
-            // pages and the mapping record), then clear any residual boot identity
-            // PTE that the VMM did not create.
+            // Remove stale tracked mappings from prior attempts. Do not force an
+            // untracked teardown here: dropping a shared low-half huge mapping can
+            // invalidate unrelated kernel source bytes used by the loader copy path.
+            // `map_owned`/`map_page_hw` handles huge-PDE split at map time.
             let _ = vmm::unmap(r.start);
-            let _ = vmm::unmap_pages_untracked(r.start, pages);
         }
 
         let phys = pmm::alloc_pages(pages).ok_or("elf: no physical memory for segment")?;
@@ -392,8 +392,16 @@ fn map_and_load(
         }
         mapped_starts.push(r.start);
 
+        let size_usize = usize::try_from(size).map_err(|_| "elf: segment size overflow")?;
+        if !range_mapped_current(r.start, size_usize) {
+            for s in &mapped_starts {
+                let _ = vmm::unmap(*s);
+            }
+            return Err("elf: segment mapping incomplete before zero");
+        }
+
         unsafe {
-            core::ptr::write_bytes(r.start as *mut u8, 0, usize::try_from(size).unwrap_or(0));
+            core::ptr::write_bytes(r.start as *mut u8, 0, size_usize);
         }
     }
 
@@ -425,6 +433,18 @@ fn map_and_load(
         let dst = checked_add(base, ph.p_vaddr, "elf: dst overflow")? as *mut u8;
         let src_ptr = bytes[src_off..src_end].as_ptr() as u64;
         let dst_ptr = dst as u64;
+        if !range_mapped_current(dst_ptr, src_len) {
+            for s in &mapped_starts {
+                let _ = vmm::unmap(*s);
+            }
+            return Err("elf: destination segment mapping incomplete before copy");
+        }
+        if !range_mapped_current(src_ptr, src_len) {
+            for s in &mapped_starts {
+                let _ = vmm::unmap(*s);
+            }
+            return Err("elf: source segment mapping missing before copy");
+        }
         let cr3 = hal::arch::paging::read_cr3();
         elf_trace!(
             "elf: copy detail src=0x{:x}-0x{:x} dst=0x{:x}-0x{:x} len=0x{:x} cr3=0x{:x}",
@@ -456,6 +476,12 @@ fn map_and_load(
             let bss_off = usize::try_from(ph.p_filesz).map_err(|_| "elf: bss offset overflow")?;
             let bss_len =
                 usize::try_from(ph.p_memsz - ph.p_filesz).map_err(|_| "elf: bss size overflow")?;
+            if !range_mapped_current(dst_ptr.saturating_add(bss_off as u64), bss_len) {
+                for s in &mapped_starts {
+                    let _ = vmm::unmap(*s);
+                }
+                return Err("elf: destination bss mapping incomplete before zero");
+            }
             unsafe {
                 core::ptr::write_bytes(dst.add(bss_off), 0, bss_len);
             }
@@ -659,6 +685,24 @@ fn range_mapped_in_root(root_phys: u64, start: u64, len: usize) -> bool {
     true
 }
 
+fn range_mapped_current(start: u64, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+
+    let page = vmm::PAGE_SIZE;
+    let mut current = align_down(start, page);
+    let end = start.saturating_add(len as u64);
+    let limit = align_up(end, page);
+    while current < limit {
+        if vmm::inspect_mapping_current(current).is_none() {
+            return false;
+        }
+        current = current.saturating_add(page);
+    }
+    true
+}
+
 fn log_mapping(label: &str, virt: u64) {
     if let Some(info) = vmm::inspect_mapping_current(virt) {
         crate::console::println!(
@@ -717,6 +761,14 @@ fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> 
         if fault_returned && faulted {
             return Err("elf: user process fault");
         }
+        if fault_returned {
+            if let Some(rec) = crate::kernel::process::record(pid)
+                && let Some(code) = rec.exit_code
+            {
+                return Ok(code);
+            }
+            return Err("elf: user process returned without exit status");
+        }
         return Err("elf: user process returned unexpectedly");
     }
 
@@ -764,12 +816,36 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
         }
     );
     let phs = parse_program_headers(bytes.as_slice(), &header)?;
+    let et_exec_load_count = phs
+        .iter()
+        .filter(|ph| ph.p_type == PT_LOAD && ph.p_memsz > 0)
+        .count();
+    let et_exec_total_mem = phs
+        .iter()
+        .filter(|ph| ph.p_type == PT_LOAD)
+        .fold(0u64, |acc, ph| acc.saturating_add(ph.p_memsz));
+    let et_exec_isolated_policy_ok = header.e_type != ET_EXEC
+        || (et_exec_load_count <= 1 && et_exec_total_mem <= 2 * 1024 * 1024);
     if phs.iter().any(|ph| ph.p_type == PT_INTERP && ph.p_filesz != 0) {
         return Err("elf: PT_INTERP executables are not supported yet");
     }
     let base = runtime_base(&header, image_base);
-    let use_isolated_exec =
-        header.e_type == ET_EXEC && ET_EXEC_ISOLATED_ADDRESS_SPACE && can_use_isolated_address_space();
+    let use_isolated_exec = header.e_type == ET_EXEC
+        && ET_EXEC_ISOLATED_ADDRESS_SPACE
+        && can_use_isolated_address_space()
+        && et_exec_isolated_policy_ok;
+
+    if header.e_type == ET_EXEC
+        && ET_EXEC_ISOLATED_ADDRESS_SPACE
+        && can_use_isolated_address_space()
+        && !et_exec_isolated_policy_ok
+    {
+        crate::console::println!(
+            "elf: ET_EXEC isolated policy declined (load_segments={} total_mem=0x{:x}); using shared bring-up path",
+            et_exec_load_count,
+            et_exec_total_mem
+        );
+    }
 
     if header.e_type == ET_EXEC && !use_isolated_exec {
         let (ks, ke) = vmm::kernel_image_range();
@@ -816,7 +892,23 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
         None
     };
 
-    if header.e_type == ET_DYN {
+    if header.e_type == ET_EXEC {
+        if let Some(root_phys) = exec_root {
+            let stack_probe_start = align_down(current_rsp().saturating_sub(vmm::PAGE_SIZE * 16), vmm::PAGE_SIZE);
+            let stack_probe_len = usize::try_from(vmm::PAGE_SIZE * 17).unwrap_or(0);
+            let image_ok = range_mapped_in_root(root_phys, bytes.as_ptr() as u64, bytes.len());
+            let stack_ok = range_mapped_in_root(root_phys, stack_probe_start, stack_probe_len);
+            if !image_ok || !stack_ok {
+                crate::console::println!(
+                    "elf: ET_EXEC isolated root missing kernel source mappings (image={} stack={}); using shared bring-up path",
+                    image_ok as u8,
+                    stack_ok as u8
+                );
+                let _ = vmm::destroy_address_space_root(root_phys);
+                exec_root = None;
+            }
+        }
+    } else if header.e_type == ET_DYN {
         if let Some(root_phys) = exec_root {
             let stack_probe_start = align_down(current_rsp().saturating_sub(vmm::PAGE_SIZE * 16), vmm::PAGE_SIZE);
             let stack_probe_len = usize::try_from(vmm::PAGE_SIZE * 17).unwrap_or(0);

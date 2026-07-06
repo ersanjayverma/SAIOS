@@ -610,6 +610,10 @@ pub fn exit(pid: u64, code: i32) -> Result<(), &'static str> {
     })
 }
 
+pub fn exit_quiet(pid: u64, code: i32) -> Result<(), &'static str> {
+    with_manager_mut(|m| m.exit(pid, code))
+}
+
 pub fn spawn(name: &str, args: &[&str], env: &[(String, String)]) -> Result<u64, &'static str> {
     let parent_pid = with_manager(|m| m.shell_pid.or(m.init_pid));
     spawn_from(parent_pid, name, args, env)

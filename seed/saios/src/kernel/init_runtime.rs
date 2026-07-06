@@ -284,6 +284,13 @@ fn shell_launch_plan(preferred: &str) -> Vec<(String, &'static [&'static str])> 
     plan
 }
 
+fn is_noninteractive_shell_stub(candidate: &str, code: i32) -> bool {
+    if code != 0 {
+        return false;
+    }
+    candidate.eq_ignore_ascii_case("shell") || candidate.eq_ignore_ascii_case("/bin/shell")
+}
+
 fn prompt_line(prompt: &str) -> String {
     console::set_input_prompt(prompt);
     console::print(prompt);
@@ -384,6 +391,21 @@ pub fn boot_to_login_shell() -> ! {
 
             match syscall::linux_execve_for_pid(shell_pid, candidate.as_str(), candidate_args) {
                 Ok(code) => {
+                    if is_noninteractive_shell_stub(candidate.as_str(), code) {
+                        console::println!(
+                            "session: ring3 shell '{}' exited immediately (non-interactive stub); trying next candidate",
+                            candidate
+                        );
+                        continue;
+                    }
+                    if code != 0 {
+                        console::println!(
+                            "session: ring3 shell '{}' exited code={} (trying fallback candidate)",
+                            candidate,
+                            code
+                        );
+                        continue;
+                    }
                     console::println!(
                         "session: ring3 shell '{}' exited code={}",
                         candidate,

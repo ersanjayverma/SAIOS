@@ -50,13 +50,20 @@ global_asm!(
     "mov r12, rcx",
     "mov r13, r11",
     "mov r14, [rip + SAIOS_SYSCALL_USER_RSP]",
-    // Linux x86_64 syscall ABI: rax=nr, rdi/rsi/rdx/r10/r8/r9=args.
+    // Linux x86_64 syscall ABI at entry: rax=nr, rdi/rsi/rdx/r10/r8/r9=args.
+    // Rust SysV call target: saios_linux_syscall(nr,a0,a1,a2,a3,a4,a5)
+    // -> rdi,rsi,rdx,rcx,r8,r9 and 7th arg on stack.
     "mov r15, rax",
-    "mov rcx, r10",
-    "sub rsp, 8",
+    "sub rsp, 16",
+    "mov [rsp], r9",
+    "mov r9, r8",
+    "mov r8, r10",
+    "mov rcx, rdx",
+    "mov rdx, rsi",
+    "mov rsi, rdi",
     "mov rdi, r15",
     "call {dispatch}",
-    "add rsp, 8",
+    "add rsp, 16",
     "push {user_data}",
     "push r14",
     "push r13", // saved user RFLAGS from SYSCALL

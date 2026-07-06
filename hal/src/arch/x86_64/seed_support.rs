@@ -251,6 +251,18 @@ global_asm!(
     ".quad 0",
     "hal_user_fault_return_rip:",
     ".quad 0",
+    "hal_user_fault_saved_rbx:",
+    ".quad 0",
+    "hal_user_fault_saved_rbp:",
+    ".quad 0",
+    "hal_user_fault_saved_r12:",
+    ".quad 0",
+    "hal_user_fault_saved_r13:",
+    ".quad 0",
+    "hal_user_fault_saved_r14:",
+    ".quad 0",
+    "hal_user_fault_saved_r15:",
+    ".quad 0",
     ".balign 1",
     "hal_user_fault_return_active:",
     ".byte 0",
@@ -268,6 +280,13 @@ global_asm!(
     "mov [rip + hal_user_fault_return_rsp], rsp",
     "lea rax, [rip + 2f]",
     "mov [rip + hal_user_fault_return_rip], rax",
+    // Preserve callee-saved registers so recovery return obeys SysV ABI.
+    "mov [rip + hal_user_fault_saved_rbx], rbx",
+    "mov [rip + hal_user_fault_saved_rbp], rbp",
+    "mov [rip + hal_user_fault_saved_r12], r12",
+    "mov [rip + hal_user_fault_saved_r13], r13",
+    "mov [rip + hal_user_fault_saved_r14], r14",
+    "mov [rip + hal_user_fault_saved_r15], r15",
     "mov byte ptr [rip + hal_user_fault_return_active], 1",
 
     // Build IRET frame
@@ -288,6 +307,14 @@ global_asm!(
     // Reached only if recovery path redirects execution here
     "2:",
     "mov byte ptr [rip + hal_user_fault_return_active], 0",
+
+    // Restore callee-saved registers before returning to Rust caller.
+    "mov rbx, [rip + hal_user_fault_saved_rbx]",
+    "mov rbp, [rip + hal_user_fault_saved_rbp]",
+    "mov r12, [rip + hal_user_fault_saved_r12]",
+    "mov r13, [rip + hal_user_fault_saved_r13]",
+    "mov r14, [rip + hal_user_fault_saved_r14]",
+    "mov r15, [rip + hal_user_fault_saved_r15]",
 
     // DEBUG: output 'A' after recovery
     "mov dx, 0x3F8",

@@ -150,12 +150,12 @@ fn write_binary(path: &str, entry: &str) -> Result<(), &'static str> {
     //   mov eax, 60   ; __NR_exit
     //   xor edi, edi  ; status = 0
     //   syscall
-    //   hlt           ; should not execute if exit succeeds
-    let code: [u8; 10] = [
+    //   ud2           ; should not execute if exit succeeds; traps if it does
+    let code: [u8; 11] = [
         0xB8, 0x3C, 0x00, 0x00, 0x00,
         0x31, 0xFF,
         0x0F, 0x05,
-        0xF4,
+        0x0F, 0x0B,
     ];
     elf[CODE_OFFSET..CODE_OFFSET + code.len()].copy_from_slice(&code);
 

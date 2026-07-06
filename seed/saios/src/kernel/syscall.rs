@@ -1472,6 +1472,12 @@ fn linux_clock_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<u64, i64> {
     linux_nanosleep(req_ptr, rem_ptr)
 }
 
+fn linux_exit_now(pid: u64, code: u64) -> ! {
+    crate::console::println!("[syscall] exit_now pid={} code={}", pid, code);
+    let _ = process::exit_quiet(pid, code as i32);
+    hal::arch::x86_64::seed_support::resume_from_user_fault()
+}
+
 static FIRST_SYSCALL_LOGGED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
@@ -1574,7 +1580,7 @@ pub extern "C" fn saios_linux_syscall(
             let arg_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
             linux_execve_for_pid(pid, path.as_str(), arg_refs.as_slice()).map(|code| code as u64)
         }
-        60 => dispatch_custom(SyscallNumber::Exit, [a0, 0, 0, 0, 0, 0], pid),
+        60 => linux_exit_now(pid, a0),
         61 => dispatch_wait4(pid, a0, a2, a1),
         62 => dispatch_custom(SyscallNumber::Kill, [a0, a1, 0, 0, 0, 0], pid),
         63 => linux_uname(a0),
@@ -1791,7 +1797,7 @@ pub extern "C" fn saios_linux_syscall(
         228 => linux_clock_gettime(a1),
         229 => linux_clock_getres(a1),
         230 => linux_clock_nanosleep(a3, a4),
-        231 => dispatch_custom(SyscallNumber::Exit, [a0, 0, 0, 0, 0, 0], pid),
+        231 => linux_exit_now(pid, a0),
         232 => Err(LINUX_ENOSYS),
         233 => Err(LINUX_ENOSYS),
         234 => dispatch_custom(SyscallNumber::Kill, [a1, a2, 0, 0, 0, 0], pid),
@@ -2275,8 +2281,8 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
         }
         SyscallNumber::Exit => {
             let code = req.args[0] as i32;
-            process::exit(ctx.pid, code).map_err(|_| SyscallError::InvalidArgument)?;
-            Ok(code as u64)
+            process::exit_quiet(ctx.pid, code).map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(0)
         }
         SyscallNumber::WaitPid => {
             let target = req.args[0] as i64;
