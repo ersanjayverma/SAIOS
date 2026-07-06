@@ -13,6 +13,7 @@ SISH> validate --perf
 SISH> validate --stress
 SISH> validate --json
 SISH> validate --ready
+SISH> validate --ready-v04
 SISH> validate --help
 ```
 
@@ -24,10 +25,19 @@ running after individual failures.
 `--ready` runs the v0.3 required kernel-readiness gates only and emits a
 `Kernel READY` or `Kernel NOT READY` status based on those required checks.
 
+`--ready-v04` runs the v0.4 required readiness gates and reports profile-aware
+gate status for filesystem, storage mount topology, process, and syscall smoke.
+
 Boot policy during v0.3:
 
 - the kernel executes the required readiness gate set during boot
 - if required gates are not all `PASS`, boot does not transition to ready runtime state
+
+Current v0.4 note:
+
+- The `mounted filesystems` gate validates SAIFS/VFS mount topology (including
+	root mount presence) and no longer skips solely because no non-tmpfs storage
+	volume is mounted.
 
 ## Subsystems
 
@@ -74,6 +84,19 @@ Required gates:
 
 If required gates fail, the kernel must report `Kernel NOT READY` and must not
 claim a healthy runtime state.
+
+## v0.4 Readiness Gate
+
+The v0.4 profile (`validate --ready-v04`) currently tracks these required gates:
+
+- VFS open
+- VFS read
+- VFS write
+- VFS directory enumeration
+- mounted filesystems
+- process creation
+- wait
+- stable ABI smoke
 
 ## Extending
 

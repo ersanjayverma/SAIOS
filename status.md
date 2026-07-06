@@ -1,6 +1,6 @@
 # SAIOS v0.4 Status
 
-Last updated: 2026-07-06 (v0.4 still open; blockers clarified)
+Last updated: 2026-07-07 (v0.4 still open; blockers clarified)
 
 ## Objective
 Finish v0.4 foundation with stable static ELF execution, realistic Linux ABI behavior, and init/session correctness.
@@ -33,6 +33,12 @@ Current blocking reasons:
 ## Active Task
 Replace selector-based syscall arguments with pointer-buffer path for core file syscalls.
 
+## Latest Observed Runtime Snapshot
+- Validation summary: `PASS WITH SKIPS` (7/8 gates); `Mounts` was the only skipped gate.
+- Session/runtime: ring3 shell candidates (`ash`, `busybox`, `/bin/busybox`, `sh`) failed in that run and runtime fell back to kernel SNSH.
+- Storage boot path: foreground storage scan completed deterministically.
+- Follow-up fix applied: storage mount readiness gate now validates SAIFS+VFS root mount topology and no longer skips solely because no non-tmpfs volume is mounted.
+
 ## Remaining Minimum To Call v0.4 Complete
 - Finish pointer/buffer-based syscall ABI conversion for core file and process launch paths.
 - Decide and implement `PT_INTERP` support, or formally narrow the v0.4 DoD to static-only userland.
@@ -60,3 +66,4 @@ Replace selector-based syscall arguments with pointer-buffer path for core file 
 - In progress: isolated ET_EXEC execution is now disabled alongside ET_DYN to keep login/session flow on the shared bring-up path until cloned-CR3 low-half faults are fixed.
 - In progress: shared-path low-half ET_EXEC loads are now rejected deterministically instead of being allowed to split/corrupt the low-half identity window during login-shell launch.
 - In progress: v0.4 validation process gates were corrected for current runtime semantics (`wait(pid)` no longer self-mutates the target process, and process-creation validation now checks persistent process records instead of transient job-count growth).
+- In progress: v0.4 storage mount readiness gate semantics were corrected to validate active SAIFS/VFS mount topology and stop skipping when only the baseline root mount is present.

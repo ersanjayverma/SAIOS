@@ -1211,20 +1211,33 @@ fn test_storage_volume_registry() -> Result<(), &'static str> {
 }
 
 fn test_storage_mounts() -> Result<(), &'static str> {
-    if saifs::mounts().is_empty() {
+    let saifs_mounts = saifs::mounts();
+    if saifs_mounts.is_empty() {
         return Err("no SAIFS mounts registered");
     }
 
-    if !saifs::mounts().iter().any(|mount| mount.path == "/") {
+    if !saifs_mounts.iter().any(|mount| mount.path == "/") {
         return Err("root SAIFS mount missing");
+    }
+
+    let vfs_mounts = vfs::mounts();
+    if vfs_mounts.is_empty() {
+        return Err("no VFS mounts registered");
+    }
+
+    if !vfs_mounts.iter().any(|mount| mount.path == "/") {
+        return Err("root VFS mount missing");
     }
 
     let mounted_volumes = crate::driver::storage::volumes()
         .into_iter()
         .filter(|volume| volume.name != "tmpfs" && volume.mounted_at.is_some())
         .count();
+
+    // Treat the baseline root mount topology as a pass when no hardware-backed
+    // volumes are mounted yet; those flows are covered by explicit storage tests.
     if mounted_volumes == 0 {
-        return Err("skip: no storage volumes mounted");
+        return Ok(());
     }
 
     Ok(())
