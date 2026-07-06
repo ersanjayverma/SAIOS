@@ -3,17 +3,19 @@
 //! Keeps architecture-specific assembly in HAL while exposing small Rust
 //! wrappers consumed by the seed kernel crate.
 
+use crate::arch::x86_64::constants::{
+    USER_ENTRY_ENABLE_INTERRUPTS, USER_TRANSITION_STACK_SIZE, USER_TRANSITION_GUARD_SIZE,
+};
 use core::arch::global_asm;
 
 #[repr(align(16))]
-struct AlignedStack([u8; 32 * 1024]);
+struct AlignedStack([u8; USER_TRANSITION_STACK_SIZE]);
 
 #[repr(align(16))]
-struct StackGuard([u8; 4096]);
+struct StackGuard([u8; USER_TRANSITION_GUARD_SIZE]);
 
-static mut USER_TRANSITION_KERNEL_STACK: AlignedStack = AlignedStack([0; 32 * 1024]);
-static mut USER_TRANSITION_KERNEL_STACK_GUARD: StackGuard = StackGuard([0; 4096]);
-const USER_ENTRY_ENABLE_INTERRUPTS: bool = false;
+static mut USER_TRANSITION_KERNEL_STACK: AlignedStack = AlignedStack([0; USER_TRANSITION_STACK_SIZE]);
+static mut USER_TRANSITION_KERNEL_STACK_GUARD: StackGuard = StackGuard([0; USER_TRANSITION_GUARD_SIZE]);
 
 global_asm!(
     // Boot entry trampoline and static boot page tables.
@@ -233,7 +235,7 @@ pub fn user_transition_kernel_rsp0() -> u64 {
     unsafe {
         let _guard = core::ptr::addr_of!(USER_TRANSITION_KERNEL_STACK_GUARD.0);
         let base = core::ptr::addr_of!(USER_TRANSITION_KERNEL_STACK.0) as u64;
-        base + (32 * 1024) as u64
+        base + USER_TRANSITION_STACK_SIZE as u64
     }
 }
 
@@ -244,9 +246,9 @@ pub fn user_transition_stack_layout() -> (u64, u64, u64, u64) {
         let guard_base = core::ptr::addr_of!(USER_TRANSITION_KERNEL_STACK_GUARD.0) as u64;
         (
             stack_base,
-            stack_base + (32 * 1024) as u64,
+            stack_base + USER_TRANSITION_STACK_SIZE as u64,
             guard_base,
-            guard_base + 4096u64,
+            guard_base + USER_TRANSITION_GUARD_SIZE as u64,
         )
     }
 }

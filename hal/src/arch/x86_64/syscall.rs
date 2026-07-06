@@ -6,15 +6,11 @@
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::arch::x86_64::constants::{
+    MSR_IA32_EFER, MSR_IA32_STAR, MSR_IA32_LSTAR, MSR_IA32_FMASK,
+    EFER_SCE, RFLAGS_IF,
+};
 use crate::arch::x86_64::{gdt, msr};
-
-const IA32_EFER: u32 = 0xC000_0080;
-const IA32_STAR: u32 = 0xC000_0081;
-const IA32_LSTAR: u32 = 0xC000_0082;
-const IA32_FMASK: u32 = 0xC000_0084;
-
-const EFER_SCE: u64 = 1 << 0;
-const RFLAGS_IF: u64 = 1 << 9;
 const USER_CODE_SELECTOR: u64 = gdt::USER_CODE.0 as u64;
 const USER_DATA_SELECTOR: u64 = gdt::USER_DATA.0 as u64;
 
@@ -83,7 +79,7 @@ pub fn set_kernel_rsp0(rsp0: u64) {
 }
 
 pub fn snapshot() -> SyscallMsrSnapshot {
-    let star = msr::rdmsr(IA32_STAR);
+    let star = msr::rdmsr(MSR_IA32_STAR);
     let syscall_kernel_cs = ((star >> 32) & 0xffff) as u16;
     let syscall_kernel_ss = syscall_kernel_cs.wrapping_add(8);
     let sysret_base = ((star >> 48) & 0xffff) as u16;
@@ -91,10 +87,10 @@ pub fn snapshot() -> SyscallMsrSnapshot {
     let sysret_user_ss = sysret_base.wrapping_add(8) | 3;
 
     SyscallMsrSnapshot {
-        efer: msr::rdmsr(IA32_EFER),
+        efer: msr::rdmsr(MSR_IA32_EFER),
         star,
-        lstar: msr::rdmsr(IA32_LSTAR),
-        fmask: msr::rdmsr(IA32_FMASK),
+        lstar: msr::rdmsr(MSR_IA32_LSTAR),
+        fmask: msr::rdmsr(MSR_IA32_FMASK),
         syscall_kernel_cs,
         syscall_kernel_ss,
         sysret_user_cs,
@@ -119,13 +115,13 @@ pub fn init() -> Result<(), &'static str> {
     let star = (sysret_cs_base << 48) | (kernel_cs << 32);
     let lstar = saios_syscall_entry as *const () as u64;
 
-    let mut efer = msr::rdmsr(IA32_EFER);
+    let mut efer = msr::rdmsr(MSR_IA32_EFER);
     efer |= EFER_SCE;
 
-    msr::wrmsr(IA32_STAR, star);
-    msr::wrmsr(IA32_LSTAR, lstar);
-    msr::wrmsr(IA32_FMASK, RFLAGS_IF);
-    msr::wrmsr(IA32_EFER, efer);
+    msr::wrmsr(MSR_IA32_STAR, star);
+    msr::wrmsr(MSR_IA32_LSTAR, lstar);
+    msr::wrmsr(MSR_IA32_FMASK, RFLAGS_IF);
+    msr::wrmsr(MSR_IA32_EFER, efer);
 
     Ok(())
 }

@@ -3,12 +3,11 @@
 //! This module provides a non-destructive fault policy contract that validation
 //! can assert before full user-mode fault containment is implemented.
 
+use crate::kernel::constants::PF_ERR_USER;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::paging;
 use hal::arch::x86_64::sync::StaticCell;
-
-const PAGE_FAULT_USER_BIT: usize = 1 << 2;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum FaultDomain {
@@ -56,7 +55,7 @@ pub fn init() {
 }
 
 pub fn domain_from_page_fault_error(error_code: usize) -> FaultDomain {
-    if (error_code & PAGE_FAULT_USER_BIT) != 0 {
+    if (error_code & PF_ERR_USER) != 0 {
         FaultDomain::User
     } else {
         FaultDomain::Kernel
@@ -156,7 +155,7 @@ fn handle_general_protection(_error_code: usize, stack_ptr: usize) -> bool {
 }
 
 pub extern "C" fn abort_active_exec() -> ! {
-    const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+    const ADDR_MASK: u64 = crate::vmm::ADDR_MASK;
 
     let pid = active_exec_pid();
     mark_active_exec_faulted();

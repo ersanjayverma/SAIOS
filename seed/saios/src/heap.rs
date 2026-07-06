@@ -4,21 +4,20 @@
 //! them into kernel virtual address space. It serves as the global allocator
 //! for the `alloc` crate.
 
+use crate::kernel::constants::{
+    HEAP_FALLBACK_INITIAL_BYTES as FALLBACK_INITIAL_HEAP_BYTES,
+    HEAP_FALLBACK_MAX_BYTES as FALLBACK_MAX_HEAP_BYTES,
+    HEAP_IDENTITY_MAX_PHYS,
+    HEAP_INITIAL_BYTES as INITIAL_HEAP_BYTES,
+    HEAP_MAX_BYTES as RESERVED_VIRTUAL_HEAP_BYTES,
+};
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use hal::arch::x86_64::sync::StaticCell;
 
 use crate::pmm::{self, HeapStats, PAGE_SIZE};
-
-/// Initial heap size in bytes (32 MiB).
-const INITIAL_HEAP_BYTES: usize = 32 * 1024 * 1024;
-const FALLBACK_INITIAL_HEAP_BYTES: usize = 2 * 1024 * 1024;
-/// Maximum virtual heap budget in bytes (1 GiB).
-const RESERVED_VIRTUAL_HEAP_BYTES: usize = 1024 * 1024 * 1024;
-const FALLBACK_MAX_HEAP_BYTES: usize = 32 * 1024 * 1024;
-/// Keep heap pages in the low 1 GiB identity-mapped window.
-const HEAP_IDENTITY_MAX_PHYS: u64 = 0x4000_0000;
 /// Small grow step in bytes (2 MiB).
 const HEAP_GROW_STEP_SMALL_BYTES: usize = 2 * 1024 * 1024;
 /// Large grow step in bytes (4 MiB).
@@ -84,16 +83,11 @@ static ALLOC_REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
 static DEALLOC_REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 fn lock() {
-    while LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
+    hal::arch::x86_64::sync::spinlock_acquire(&LOCK);
 }
 
 fn unlock() {
-    LOCK.store(false, Ordering::Release);
+    hal::arch::x86_64::sync::spinlock_release(&LOCK);
 }
 
 fn align_up(value: usize, align: usize) -> usize {
@@ -120,6 +114,10 @@ pub fn configure_identity_mode(max_phys: Option<u64>) {
 
 pub fn identity_mode_enabled() -> bool {
     IDENTITY_HEAP_MAX_PHYS.load(Ordering::Relaxed) != 0
+}
+
+pub fn dynamic_mappings_available() -> bool {
+    !identity_mode_enabled()
 }
 
 fn alloc_best_effort_pages(max_pages: usize) -> Option<(usize, usize)> {

@@ -1,3 +1,7 @@
+use crate::kernel::constants::{
+    ET_EXEC, EM_X86_64, EV_CURRENT, PT_LOAD, PT_DYNAMIC, PT_INTERP,
+    USER_ELF_LOAD_BASE,
+};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::vec;
@@ -22,17 +26,16 @@ const SHARED_LIB_ENTRIES: &[&str] = &[
 
 const BIN_ENTRIES: &[&str] = &[
     "hello", "calc", "editor", "shell", "ls", "cat", "cp", "mv", "rm", "mkdir", "ps", "kill",
-    "top", "uname", "stress", "cc", "taskman", "diskpart", "busybox", "r3probe",
+    "top", "uname", "stress", "cc", "taskman", "diskpart", "busybox",
 ];
 
 const EMBEDDED_BUSYBOX: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../busybox"));
-const USER_MODE_PROBE_PATH: &str = "/bin/r3probe";
 
 static MOUNTED: AtomicBool = AtomicBool::new(false);
 
-const ELF_PT_LOAD: u32 = 1;
-const ELF_PT_DYNAMIC: u32 = 2;
-const ELF_PT_INTERP: u32 = 3;
+const ELF_PT_LOAD: u32 = PT_LOAD;
+const ELF_PT_DYNAMIC: u32 = PT_DYNAMIC;
+const ELF_PT_INTERP: u32 = PT_INTERP;
 
 #[derive(Copy, Clone, Debug)]
 pub struct PackageImageStatus {
@@ -118,10 +121,10 @@ fn write_binary(path: &str, entry: &str) -> Result<(), &'static str> {
     }
 
     // ELF header fields.
-    put16(&mut elf, 16, 2); // ET_EXEC
-    put16(&mut elf, 18, 62); // EM_X86_64
-    put32(&mut elf, 20, 1); // EV_CURRENT
-    put64(&mut elf, 24, 0x0040_1000); // e_entry
+    put16(&mut elf, 16, ET_EXEC);       // e_type
+    put16(&mut elf, 18, EM_X86_64);     // e_machine
+    put32(&mut elf, 20, EV_CURRENT as u32); // e_version
+    put64(&mut elf, 24, USER_ELF_LOAD_BASE + 0x1000); // e_entry
     put64(&mut elf, 32, ELF_HEADER_SIZE as u64); // e_phoff
     put64(&mut elf, 40, 0); // e_shoff
     put32(&mut elf, 48, 0); // e_flags
@@ -133,81 +136,15 @@ fn write_binary(path: &str, entry: &str) -> Result<(), &'static str> {
     put16(&mut elf, 62, 0); // e_shstrndx
 
     let ph = ELF_HEADER_SIZE;
-    put32(&mut elf, ph, 1); // PT_LOAD
-    put32(&mut elf, ph + 4, 0x5); // PF_R | PF_X
-    put64(&mut elf, ph + 8, 0); // p_offset
-    put64(&mut elf, ph + 16, 0x0040_0000); // p_vaddr
-    put64(&mut elf, ph + 24, 0x0040_0000); // p_paddr
+    put32(&mut elf, ph, PT_LOAD);       // p_type
+    put32(&mut elf, ph + 4, 0x5);       // PF_R | PF_X
+    put64(&mut elf, ph + 8, 0);         // p_offset
+    put64(&mut elf, ph + 16, USER_ELF_LOAD_BASE);  // p_vaddr
+    put64(&mut elf, ph + 24, USER_ELF_LOAD_BASE);  // p_paddr
     put64(&mut elf, ph + 32, IMAGE_SIZE as u64); // p_filesz
     put64(&mut elf, ph + 40, IMAGE_SIZE as u64); // p_memsz
     put64(&mut elf, ph + 48, 0x1000); // p_align
 
-    vfs::write_path(path, elf.as_slice())
-}
-
-fn write_user_mode_probe_binary(path: &str) -> Result<(), &'static str> {
-    const ELF_HEADER_SIZE: usize = 64;
-    const PROGRAM_HEADER_SIZE: usize = 56;
-    const CODE_OFFSET: usize = 0x80;
-    const IMAGE_SIZE: usize = CODE_OFFSET + 9;
-    const ENTRY_VADDR: u64 = 0x0040_0000 + CODE_OFFSET as u64;
-    const LINUX_EXIT_SYSCALL: u32 = 60;
-    const CODE: [u8; 9] = [
-        0xB8,
-        LINUX_EXIT_SYSCALL as u8,
-        0x00,
-        0x00,
-        0x00,
-        0x31,
-        0xFF,
-        0x0F,
-        0x05,
-    ];
-
-    let mut elf = vec![0u8; IMAGE_SIZE];
-
-    elf[0] = 0x7F;
-    elf[1] = b'E';
-    elf[2] = b'L';
-    elf[3] = b'F';
-    elf[4] = 2;
-    elf[5] = 1;
-    elf[6] = 1;
-
-    fn put16(buf: &mut [u8], off: usize, value: u16) {
-        let b = value.to_le_bytes();
-        buf[off..off + 2].copy_from_slice(&b);
-    }
-    fn put32(buf: &mut [u8], off: usize, value: u32) {
-        let b = value.to_le_bytes();
-        buf[off..off + 4].copy_from_slice(&b);
-    }
-    fn put64(buf: &mut [u8], off: usize, value: u64) {
-        let b = value.to_le_bytes();
-        buf[off..off + 8].copy_from_slice(&b);
-    }
-
-    put16(&mut elf, 16, 2);
-    put16(&mut elf, 18, 62);
-    put32(&mut elf, 20, 1);
-    put64(&mut elf, 24, ENTRY_VADDR);
-    put64(&mut elf, 32, ELF_HEADER_SIZE as u64);
-    put32(&mut elf, 48, 0);
-    put16(&mut elf, 52, ELF_HEADER_SIZE as u16);
-    put16(&mut elf, 54, PROGRAM_HEADER_SIZE as u16);
-    put16(&mut elf, 56, 1);
-
-    let ph = ELF_HEADER_SIZE;
-    put32(&mut elf, ph, 1);
-    put32(&mut elf, ph + 4, 0x5);
-    put64(&mut elf, ph + 8, 0);
-    put64(&mut elf, ph + 16, 0x0040_0000);
-    put64(&mut elf, ph + 24, 0x0040_0000);
-    put64(&mut elf, ph + 32, IMAGE_SIZE as u64);
-    put64(&mut elf, ph + 40, IMAGE_SIZE as u64);
-    put64(&mut elf, ph + 48, 0x1000);
-
-    elf[CODE_OFFSET..CODE_OFFSET + CODE.len()].copy_from_slice(&CODE);
     vfs::write_path(path, elf.as_slice())
 }
 
@@ -227,11 +164,7 @@ fn seed_binaries() -> Result<(), &'static str> {
     for b in BIN_ENTRIES {
         let path = alloc::format!("/bin/{}", b);
         ensure_file(path.as_str())?;
-        if *b == "r3probe" {
-            write_user_mode_probe_binary(path.as_str())?;
-        } else {
-            write_binary(path.as_str(), b)?;
-        }
+        write_binary(path.as_str(), b)?;
     }
 
     Ok(())
@@ -378,8 +311,6 @@ fn mount_default_inner() -> Result<(), &'static str> {
     seed_shared_libraries()?;
     seed_binaries()?;
     seed_busybox_from_kernel_image()?;
-    ensure_file(USER_MODE_PROBE_PATH)?;
-    write_user_mode_probe_binary(USER_MODE_PROBE_PATH)?;
 
     ensure_file("/etc/profile")?;
     ensure_file("/etc/hostname")?;

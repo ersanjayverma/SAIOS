@@ -11,10 +11,12 @@ use core::ptr;
 
 use hal::arch::x86_64::{idt, interrupt, io};
 
+use crate::kernel::constants::PAGE_SIZE as ACPI_PAGE_SIZE;
+
 use crate::heap;
 use crate::vmm;
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = ACPI_PAGE_SIZE;
 const ACPI_MAP_FLAGS: u64 = vmm::FLAG_READ | vmm::FLAG_GLOBAL;
 
 fn align_down(value: u64, align: u64) -> u64 {
@@ -34,9 +36,8 @@ fn map_pages_for_range(
     let span = page_offset.saturating_add(len as u64);
     let pages = span.div_ceil(PAGE_SIZE) as usize;
 
-    if heap::identity_mode_enabled() {
-        // Fallback mode: rely on identity/direct visibility of physical memory.
-        return Ok((aligned_phys, page_offset, pages, false));
+    if !heap::dynamic_mappings_available() {
+        return Err("ACPI: dynamic mappings unavailable in fallback mode");
     }
 
     let mapped_base = vmm::map_physical_anywhere(aligned_phys, pages, ACPI_MAP_FLAGS, "acpi")?;

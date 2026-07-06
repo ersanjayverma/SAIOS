@@ -1,3 +1,10 @@
+use crate::kernel::constants::{
+    AT_ENTRY, AT_EXECFN, AT_NULL, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ,
+    ELFCLASS64, ELFDATA2LSB, EM_X86_64, ET_DYN, ET_EXEC, EV_CURRENT, ELF_MAGIC,
+    DT_NULL, DT_RELA, DT_RELASZ, DT_RELAENT, DT_RELACOUNT, R_X86_64_RELATIVE,
+    PF_R, PF_W, PF_X, PT_DYNAMIC, PT_LOAD,
+    USER_STACK_BASE, USER_STACK_PAGES,
+};
 use alloc::format;
 use alloc::vec::Vec;
 
@@ -6,35 +13,8 @@ use crate::saifs;
 use crate::saifs::Handle;
 use crate::vmm;
 
-const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
-const ELFCLASS64: u8 = 2;
-const ELFDATA2LSB: u8 = 1;
-const EV_CURRENT: u8 = 1;
-const ET_EXEC: u16 = 2;
-const ET_DYN: u16 = 3;
-const EM_X86_64: u16 = 62;
-const PT_LOAD: u32 = 1;
-const PT_DYNAMIC: u32 = 2;
-const PF_X: u32 = 0x1;
-const PF_W: u32 = 0x2;
-const PF_R: u32 = 0x4;
-const DT_NULL: i64 = 0;
-const DT_RELA: i64 = 7;
-const DT_RELASZ: i64 = 8;
-const DT_RELAENT: i64 = 9;
-const DT_RELACOUNT: i64 = 0x6ffffff9;
-const R_X86_64_RELATIVE: u32 = 8;
 const ET_EXEC_ISOLATED_ADDRESS_SPACE: bool = true;
 const ET_DYN_PROCESS_ADDRESS_SPACE: bool = true;
-const USER_STACK_BASE: u64 = 0x0070_0000;
-const USER_STACK_PAGES: usize = 64;
-const AT_NULL: u64 = 0;
-const AT_PHDR: u64 = 3;
-const AT_PHENT: u64 = 4;
-const AT_PHNUM: u64 = 5;
-const AT_PAGESZ: u64 = 6;
-const AT_ENTRY: u64 = 9;
-const AT_EXECFN: u64 = 31;
 
 #[derive(Copy, Clone)]
 struct ElfHeader {
@@ -378,6 +358,10 @@ fn map_and_load(
         );
 
         if h.e_type == ET_EXEC {
+            // Remove any stale VMM record first (tracked unmap frees owned physical
+            // pages and the mapping record), then clear any residual boot identity
+            // PTE that the VMM did not create.
+            let _ = vmm::unmap(r.start);
             let _ = vmm::unmap_pages_untracked(r.start, pages);
         }
 
@@ -678,7 +662,7 @@ fn can_use_fresh_user_root() -> bool {
 }
 
 fn can_use_isolated_address_space() -> bool {
-    !crate::heap::identity_mode_enabled()
+    crate::heap::dynamic_mappings_available()
 }
 
 pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'static str> {
@@ -738,19 +722,26 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
             let mut img = img;
 
             let initial_rsp = if header.e_type == ET_EXEC {
-                Some(map_initial_user_stack(
+                match map_initial_user_stack(
                     path,
                     &header,
                     phs.as_slice(),
                     img.entry,
                     base,
                     &mut img.mapped_starts,
-                )?)
+                ) {
+                    Ok(rsp) => Some(rsp),
+                    Err(e) => { unmap_loaded(&img); return Err(e); }
+                }
             } else {
                 None
             };
 
-            if let Some(dyn_info) = parse_dynamic(bytes.as_slice(), phs.as_slice(), base)? {
+            let dyn_opt = match parse_dynamic(bytes.as_slice(), phs.as_slice(), base) {
+                Ok(d) => d,
+                Err(e) => { unmap_loaded(&img); return Err(e); }
+            };
+            if let Some(dyn_info) = dyn_opt {
                 crate::console::println!(
                     "elf: phase=reloc rela=0x{:x} sz=0x{:x} ent=0x{:x} count={}",
                     dyn_info.rela_addr,
@@ -765,19 +756,22 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
                 crate::console::println!("elf: phase=reloc done");
             }
 
-            finalize_segment_protections(&img)?;
+            if let Err(e) = finalize_segment_protections(&img) {
+                unmap_loaded(&img);
+                return Err(e);
+            }
 
             crate::console::println!("elf: phase=jump");
-            let code = jump_to_entry_recoverable(img.entry, pid, initial_rsp)?;
+            let result = jump_to_entry_recoverable(img.entry, pid, initial_rsp);
             unmap_loaded(&img);
-            Ok(code)
+            result
         })?;
         let _ = vmm::destroy_address_space_root(exec_root);
         run_result
     } else {
         if (header.e_type == ET_EXEC && ET_EXEC_ISOLATED_ADDRESS_SPACE
             || header.e_type == ET_DYN && ET_DYN_PROCESS_ADDRESS_SPACE)
-            && crate::heap::identity_mode_enabled()
+            && !crate::heap::dynamic_mappings_available()
         {
             crate::console::println!(
                 "elf: isolated address space deferred (kernel heap identity fallback active); using shared bring-up path"
@@ -793,19 +787,26 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
         let mut img = img;
 
         let initial_rsp = if header.e_type == ET_EXEC {
-            Some(map_initial_user_stack(
+            match map_initial_user_stack(
                 path,
                 &header,
                 phs.as_slice(),
                 img.entry,
                 base,
                 &mut img.mapped_starts,
-            )?)
+            ) {
+                Ok(rsp) => Some(rsp),
+                Err(e) => { unmap_loaded(&img); return Err(e); }
+            }
         } else {
             None
         };
 
-        if let Some(dyn_info) = parse_dynamic(bytes.as_slice(), phs.as_slice(), base)? {
+        let dyn_opt = match parse_dynamic(bytes.as_slice(), phs.as_slice(), base) {
+            Ok(d) => d,
+            Err(e) => { unmap_loaded(&img); return Err(e); }
+        };
+        if let Some(dyn_info) = dyn_opt {
             crate::console::println!(
                 "elf: phase=reloc rela=0x{:x} sz=0x{:x} ent=0x{:x} count={}",
                 dyn_info.rela_addr,
@@ -820,11 +821,14 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
             crate::console::println!("elf: phase=reloc done");
         }
 
-        finalize_segment_protections(&img)?;
+        if let Err(e) = finalize_segment_protections(&img) {
+            unmap_loaded(&img);
+            return Err(e);
+        }
 
         crate::console::println!("elf: phase=jump");
-        let code = jump_to_entry_recoverable(img.entry, pid, initial_rsp)?;
+        let result = jump_to_entry_recoverable(img.entry, pid, initial_rsp);
         unmap_loaded(&img);
-        Ok(code)
+        result
     }
 }

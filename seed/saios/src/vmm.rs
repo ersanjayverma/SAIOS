@@ -15,24 +15,22 @@ use hal::arch::x86_64::sync::StaticCell;
 use crate::kernel::testing::report::{VerifyCheck, VerifyReport};
 use crate::pmm;
 
+use crate::kernel::constants::{
+    EARLY_TABLE_MIN_PHYS, EARLY_TABLE_MAX_PHYS, EARLY_TABLE_FALLBACK_MIN_PHYS,
+    HUGE_PAGE_SIZE_2M,
+};
+
+pub use crate::kernel::constants::{
+    KERNEL_VIRT_BASE, KERNEL_IMAGE_MIRROR_BASE, PAGE_SIZE, PTE_ADDR_MASK as ADDR_MASK,
+};
+
 /// Virtual address type.
 pub type VirtAddr = u64;
 /// Physical address type.
 pub type PhysAddr = u64;
 
-/// Size of a page in bytes.
-pub const PAGE_SIZE: u64 = 4096;
-const HUGE_PAGE_SIZE_2M: u64 = 2 * 1024 * 1024;
-/// Base of the kernel's higher-half virtual address space.
-pub const KERNEL_VIRT_BASE: VirtAddr = 0xFFFF_FFFF_8000_0000;
-/// Dedicated higher-half mirror window used for early kernel image mappings.
-pub const KERNEL_IMAGE_MIRROR_BASE: VirtAddr = 0xFFFF_FFFF_8000_0000;
 /// Page-table slot used for recursive mapping.
 const RECURSIVE_SLOT: u64 = 510;
-const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-const EARLY_TABLE_MIN_PHYS: u64 = 0x0010_0000; // 1 MiB
-const EARLY_TABLE_MAX_PHYS: u64 = 0x4000_0000; // 1 GiB
-const EARLY_TABLE_FALLBACK_MIN_PHYS: u64 = 0x0000_1000; // avoid page 0
 
 /// Page-table flag: readable.
 pub const FLAG_READ: u64 = 1 << 0;
@@ -157,16 +155,11 @@ pub fn nx_page_protection_enabled() -> bool {
 }
 
 fn lock() {
-    while LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
+    hal::arch::x86_64::sync::spinlock_acquire(&LOCK);
 }
 
 fn unlock() {
-    LOCK.store(false, Ordering::Release);
+    hal::arch::x86_64::sync::spinlock_release(&LOCK);
 }
 
 fn with_state_mut<R>(f: impl FnOnce(&mut VmmState) -> R) -> R {
@@ -281,6 +274,29 @@ fn pt_table_ptr(l4: usize, l3: usize, l2: usize) -> *mut paging::Table {
 
 fn has_any_present_entries(table: &paging::Table) -> bool {
     table.entries.iter().any(|e| e.is_present())
+}
+
+/// Returns `true` when `phys` was allocated from the PMM rather than being
+/// part of the static kernel image. Boot page-table pages live inside the
+/// `.boot.data` section of the kernel image at their LMA (physical address)
+/// and must never be returned to the PMM allocator.
+fn is_pmm_allocated_table(phys: PhysAddr) -> bool {
+    // Pages below 1 MiB are in the conventional firmware-reserved zone and
+    // are never handed out by the PMM.
+    if phys < EARLY_TABLE_MIN_PHYS {
+        return false;
+    }
+    // The kernel image spans physical [phys_start, phys_end) where the VMA
+    // range is [ks, ke) and phys = VMA - KERNEL_IMAGE_MIRROR_BASE.
+    let (ks, ke) = kernel_image_range();
+    if ks > 0 && ke > ks {
+        let phys_start = ks.wrapping_sub(KERNEL_IMAGE_MIRROR_BASE);
+        let phys_end = ke.wrapping_sub(KERNEL_IMAGE_MIRROR_BASE);
+        if phys >= phys_start && phys < phys_end {
+            return false; // static kernel image page
+        }
+    }
+    true
 }
 
 fn nonleaf_flags(vmm_flags: u64) -> u64 {
@@ -478,13 +494,27 @@ fn unmap_page_hw(virt: VirtAddr) -> Result<(), &'static str> {
     pt.entries[l1] = paging::Entry::new();
     invlpg(virt);
 
-    // Trim now-empty intermediate tables to prevent unbounded growth.
+    // Trim now-empty intermediate tables and return their physical pages to
+    // the PMM. Only free pages that were dynamically allocated — boot page
+    // tables live inside the kernel image and must not be freed.
     if !has_any_present_entries(pt) {
+        let pt_phys = pd.entries[l2].address();
         pd.entries[l2] = paging::Entry::new();
+        if is_pmm_allocated_table(pt_phys) {
+            let _ = pmm::free_page(pt_phys);
+        }
         if !has_any_present_entries(pd) {
+            let pd_phys = pdpt.entries[l3].address();
             pdpt.entries[l3] = paging::Entry::new();
+            if is_pmm_allocated_table(pd_phys) {
+                let _ = pmm::free_page(pd_phys);
+            }
             if !has_any_present_entries(pdpt) {
+                let pdpt_phys = pml4.entries[l4].address();
                 pml4.entries[l4] = paging::Entry::new();
+                if is_pmm_allocated_table(pdpt_phys) {
+                    let _ = pmm::free_page(pdpt_phys);
+                }
             }
         }
     }
@@ -595,7 +625,15 @@ fn clone_table_recursive(src_phys: PhysAddr, level: u8) -> Result<PhysAddr, &'st
         let is_huge = (entry.0 & paging::FLAG_HUGE) != 0;
         if level > 1 && !is_huge {
             let child_src = entry.address();
-            let child_dst = clone_table_recursive(child_src, level - 1)?;
+            let child_dst = match clone_table_recursive(child_src, level - 1) {
+                Ok(p) => p,
+                Err(e) => {
+                    // Free all already-cloned children and this table page
+                    // before propagating the error.
+                    destroy_table_recursive(dst_phys, level);
+                    return Err(e);
+                }
+            };
             dst.entries[i] = paging::Entry((entry.0 & !ADDR_MASK) | child_dst);
         } else {
             dst.entries[i] = entry;

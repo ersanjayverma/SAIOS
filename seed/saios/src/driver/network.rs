@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::AtomicBool;
 
 use hal::arch::x86_64::sync::StaticCell;
 
@@ -88,16 +88,11 @@ static STATE: StaticCell<Option<NetworkState>> = StaticCell::new(None);
 static LOCK: AtomicBool = AtomicBool::new(false);
 
 fn lock() {
-    while LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
+    hal::arch::x86_64::sync::spinlock_acquire(&LOCK);
 }
 
 fn unlock() {
-    LOCK.store(false, Ordering::Release);
+    hal::arch::x86_64::sync::spinlock_release(&LOCK);
 }
 
 fn with_state_mut<R>(f: impl FnOnce(&mut NetworkState) -> R) -> R {

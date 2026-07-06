@@ -1,6 +1,10 @@
 //! Global Descriptor Table setup for x86_64 long mode.
 
 use crate::arch::x86_64::sync::StaticCell;
+use crate::arch::x86_64::constants::{
+    GDT_NULL_DESCRIPTOR, GDT_KERNEL_CODE_DESCRIPTOR, GDT_KERNEL_DATA_DESCRIPTOR,
+    GDT_USER_CODE_DESCRIPTOR, GDT_USER_DATA_DESCRIPTOR, GDT_TSS_AVAILABLE_TYPE,
+};
 use crate::arch::x86_64::tss::{self, TaskStateSegment};
 use core::{arch::asm, mem::size_of};
 
@@ -12,13 +16,6 @@ pub const USER_DATA: SegmentSelector = SegmentSelector::new(3, 3);
 pub const USER_CODE: SegmentSelector = SegmentSelector::new(4, 3);
 
 pub const TSS_SELECTOR: SegmentSelector = SegmentSelector::new(5, 0);
-
-const GDT_NULL_DESCRIPTOR: u64 = 0;
-const GDT_KERNEL_CODE_DESCRIPTOR: u64 = 0x00AF9A000000FFFF;
-const GDT_KERNEL_DATA_DESCRIPTOR: u64 = 0x00AF92000000FFFF;
-const GDT_USER_CODE_DESCRIPTOR: u64 = 0x00AFFA000000FFFF;
-const GDT_USER_DATA_DESCRIPTOR: u64 = 0x00AFF2000000FFFF;
-const GDT_TSS_AVAILABLE_DESCRIPTOR_TYPE: u64 = 0x89;
 
 /// Global GDT storage.
 static GDT: StaticCell<GlobalDescriptorTable> = StaticCell::new(GlobalDescriptorTable::new());
@@ -103,7 +100,7 @@ impl SystemDescriptor {
         let low = ((limit as u64) & 0xFFFF)
             | ((base & 0xFFFF) << 16)
             | (((base >> 16) & 0xFF) << 32)
-            | (GDT_TSS_AVAILABLE_DESCRIPTOR_TYPE << 40)
+            | (GDT_TSS_AVAILABLE_TYPE << 40)
             | ((((limit as u64) >> 16) & 0xF) << 48)
             | (((base >> 24) & 0xFF) << 56);
 

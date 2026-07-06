@@ -155,7 +155,7 @@ static MOUSE_QUEUE_LOCK: AtomicBool = AtomicBool::new(false);
 static HID_KEYBOARD_STATE: StaticCell<HidKeyboardState> = StaticCell::new(HidKeyboardState::new());
 
 fn probing_allowed() -> bool {
-    !crate::heap::identity_mode_enabled()
+    crate::heap::dynamic_mappings_available()
 }
 
 fn log_fallback_probe_skip_once() {
@@ -170,16 +170,11 @@ fn log_fallback_probe_skip_once() {
 }
 
 fn lock() {
-    while LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
+    hal::arch::x86_64::sync::spinlock_acquire(&LOCK);
 }
 
 fn unlock() {
-    LOCK.store(false, Ordering::Release);
+    hal::arch::x86_64::sync::spinlock_release(&LOCK);
 }
 
 fn queue_lock(lock: &AtomicBool) {

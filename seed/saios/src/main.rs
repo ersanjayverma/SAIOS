@@ -44,9 +44,12 @@ unsafe extern "C" {
     static _kernel_end: u8;
 }
 
-const FALLBACK_IDENTITY_HEAP_MAX_PHYS: u64 = 0x0400_0000;
-const LATE_CR3_MIN_SWITCH_PHYS: u64 = 0x0010_0000;
-const EARLY_CR3_SWITCH_ENABLED: bool = false;
+use crate::kernel::constants::{
+    EARLY_CR3_SWITCH_ENABLED, CR3_MIN_SWITCH_PHYS, FALLBACK_IDENTITY_HEAP_MAX_PHYS,
+    KERNEL_PHYS_BASE, PTE_ADDR_MASK,
+};
+
+/// Kernel heap module.
 
 fn detect_nx_page_protection_policy() -> bool {
     let features = hal::arch::x86_64::cpuid::features();
@@ -129,7 +132,6 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
     let kernel_vma_end = unsafe { &_kernel_end as *const u8 as u64 };
     // Physical kernel image starts at the boot trampoline (KERNEL_PHYS_BASE)
     // and ends where the higher-half sections end (kernel_vma_end - offset).
-    const KERNEL_PHYS_BASE: u64 = 0x100000;
     let kernel_start = KERNEL_PHYS_BASE;
     let kernel_end = kernel_vma_end.saturating_sub(vmm::KERNEL_IMAGE_MIRROR_BASE);
     let boot_info_ptr = boot_info as *const SaiosBootInfo as u64;
@@ -151,12 +153,12 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
             kernel_end,
         ) {
             Ok(pml4) => {
-                let current_cr3 = paging::read_cr3() & 0x000F_FFFF_FFFF_F000;
+                let current_cr3 = paging::read_cr3() & PTE_ADDR_MASK;
                 (Some(pml4), current_cr3, false)
             }
             Err(e) => {
                 // Fallback path for firmware that cannot tolerate early CR3/bootstrap assumptions.
-                let current_cr3 = paging::read_cr3() & 0x000F_FFFF_FFFF_F000;
+                let current_cr3 = paging::read_cr3() & PTE_ADDR_MASK;
                 hal::arch::x86_64::console::_print(format_args!(
                     "kernel: VMM bootstrap failed: {} (fallback cr3={:#x})\n",
                     e, current_cr3
@@ -167,7 +169,7 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
 
     if EARLY_CR3_SWITCH_ENABLED && !vmm_bootstrap_ok {
         if let Some(kernel_pml4) = prepared_kernel_pml4 {
-            let switch_target = kernel_pml4 & 0x000F_FFFF_FFFF_F000;
+            let switch_target = kernel_pml4 & PTE_ADDR_MASK;
             let rip = read_rip();
             let rsp = read_rsp();
             let idtr = read_idt_ptr();
@@ -272,10 +274,10 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
                 }
             }
 
-            if switch_target < LATE_CR3_MIN_SWITCH_PHYS {
+            if switch_target < CR3_MIN_SWITCH_PHYS {
                 hal::arch::x86_64::console::_print(format_args!(
                     "kernel: early CR3 switch skipped (target below safety floor: {:#x} < {:#x})\n",
-                    switch_target, LATE_CR3_MIN_SWITCH_PHYS
+                    switch_target, CR3_MIN_SWITCH_PHYS
                 ));
             } else if !preflight_ok {
                 hal::arch::x86_64::console::_print(format_args!(
@@ -294,7 +296,7 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
                         ));
                     }
                     Err(e) => {
-                        let current_cr3 = paging::read_cr3() & 0x000F_FFFF_FFFF_F000;
+                        let current_cr3 = paging::read_cr3() & PTE_ADDR_MASK;
                         hal::arch::x86_64::console::_print(format_args!(
                             "kernel: early CR3 switch failed: {} (fallback cr3={:#x})\n",
                             e, current_cr3
@@ -353,13 +355,15 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
     kernel::timeline::mark("Services");
 
     // Initialize ACPI subsystem
-    if boot_info.acpi.rsdp != 0 {
+    if boot_info.acpi.rsdp != 0 && heap::dynamic_mappings_available() {
         match kernel::acpi::init(boot_info.acpi.rsdp) {
             Ok(()) => {
                 kernel::timeline::mark("ACPI");
             }
             Err(_e) => {}
         }
+    } else if boot_info.acpi.rsdp != 0 {
+        console::println!("kernel: ACPI deferred in fallback identity mode");
     }
 
     interrupt::enable();

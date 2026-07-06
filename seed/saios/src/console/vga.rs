@@ -1,22 +1,19 @@
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use efi_main::graphics::FramebufferInfo;
 
 use super::FramebufferBenchResult;
 use super::backend::ConsoleBackend;
 use super::framebuffer::DisplayProperties;
+use crate::kernel::constants::{
+    VGA_PHYS_BASE, VGA_WIDTH, VGA_HEIGHT, VGA_TAB_WIDTH, VGA_ATTR,
+    VGA_CRTC_INDEX, VGA_CRTC_DATA, VGA_CURSOR_HIGH, VGA_CURSOR_LOW,
+};
 use crate::vmm;
 
-const VGA_WIDTH: usize = 80;
-const VGA_HEIGHT: usize = 25;
-const VGA_TAB_WIDTH: usize = 4;
-const VGA_ATTR: u8 = 0x0F;
-const VGA_PHYS_BASE: u64 = 0xB8000;
 const VGA_SCROLLBACK_LINES: usize = 0;
-const VGA_CRTC_INDEX: u16 = 0x3D4;
-const VGA_CRTC_DATA: u16 = 0x3D5;
-const VGA_CURSOR_HIGH: u8 = 0x0E;
-const VGA_CURSOR_LOW: u8 = 0x0F;
+static FALLBACK_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Text-mode VGA console backend.
 pub struct VgaConsole {
@@ -155,6 +152,18 @@ impl VgaConsole {
     fn ensure_mapped(&mut self) -> Option<*mut u16> {
         if let Some(base) = self.base {
             return Some(base);
+        }
+
+        if !crate::heap::dynamic_mappings_available() {
+            if FALLBACK_SKIP_LOGGED
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                hal::arch::x86_64::console::_print(format_args!(
+                    "vga: mapping skipped in fallback identity mode\n"
+                ));
+            }
+            return None;
         }
 
         let virt = vmm::map_physical_anywhere(

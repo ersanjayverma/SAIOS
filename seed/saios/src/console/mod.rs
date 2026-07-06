@@ -357,7 +357,7 @@ pub fn init() {
         (*MOUSE.get()).init();
     }
     if !keyboard_ready {
-        if crate::heap::identity_mode_enabled() {
+        if !crate::heap::dynamic_mappings_available() {
             hal::arch::x86_64::console::_print(format_args!(
                 "console: PS/2 keyboard unavailable; USB HID probe skipped in fallback mode\n"
             ));

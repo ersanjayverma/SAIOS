@@ -6,6 +6,12 @@
 //! subset currently targets simple print-only programs with a single embedded
 //! string literal.
 
+use crate::kernel::constants::{
+    ELFCLASS64, ELFDATA2LSB, ELF_MAGIC, EM_X86_64, ET_DYN, ET_EXEC, EV_CURRENT,
+    PT_DYNAMIC, PT_INTERP, PT_LOAD, PF_R, PF_W, PF_X,
+    DT_NULL, DT_NEEDED, DT_STRTAB, DT_STRSZ,
+    USER_ELF_LOAD_BASE,
+};
 use crate::console;
 use crate::kernel::process;
 use crate::kernel::telemetry;
@@ -21,24 +27,7 @@ use alloc::vec::Vec;
 /// Result type returned by built-in programs.
 type ProgramResult = Result<i32, &'static str>;
 
-const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
-const ELFCLASS64: u8 = 2;
-const ELFDATA2LSB: u8 = 1;
-const EV_CURRENT: u8 = 1;
-const EM_X86_64: u16 = 62;
-const ET_EXEC: u16 = 2;
-const ET_DYN: u16 = 3;
-const PT_LOAD: u32 = 1;
-const PT_DYNAMIC: u32 = 2;
-const PT_INTERP: u32 = 3;
-const PF_X: u32 = 0x1;
-const PF_W: u32 = 0x2;
-const PF_R: u32 = 0x4;
-const DT_NULL: i64 = 0;
-const DT_NEEDED: i64 = 1;
-const DT_STRTAB: i64 = 5;
-const DT_STRSZ: i64 = 10;
-const DEFAULT_USER_PROGRAM_BASE: u64 = 0x0040_0000;
+const DEFAULT_USER_PROGRAM_BASE: u64 = USER_ELF_LOAD_BASE;
 
 #[derive(Clone, Debug)]
 pub struct BinaryMetadata {

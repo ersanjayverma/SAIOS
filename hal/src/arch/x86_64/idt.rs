@@ -1,5 +1,6 @@
 //! Interrupt Descriptor Table setup for x86_64.
 
+use crate::arch::x86_64::constants::{IDT_ENTRY_COUNT, IDT_INTERRUPT_GATE_ATTRS};
 use core::{
     arch::{asm, global_asm},
     mem::size_of,
@@ -7,8 +8,6 @@ use core::{
 
 use crate::arch::x86_64::sync::StaticCell;
 
-const IDT_ENTRY_COUNT: usize = 256;
-const IDT_INTERRUPT_GATE_ATTRIBUTES: u8 = 0x8E;
 const ERROR_CODE_VECTORS: &[u8] = &[8, 10, 11, 12, 13, 14, 17, 21, 29, 30];
 
 static IDT: StaticCell<InterruptDescriptorTable> = StaticCell::new(InterruptDescriptorTable::new());
@@ -308,7 +307,7 @@ impl IdtEntry {
         self.offset_low = addr as u16;
         self.selector = crate::arch::x86_64::gdt::KERNEL_CODE.0;
         self.ist = 0;
-        self.attributes = IDT_INTERRUPT_GATE_ATTRIBUTES;
+        self.attributes = IDT_INTERRUPT_GATE_ATTRS;
         self.offset_mid = (addr >> 16) as u16;
         self.offset_high = (addr >> 32) as u32;
         self.reserved = 0;

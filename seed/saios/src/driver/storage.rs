@@ -249,16 +249,11 @@ pub struct StorageScanStatus {
 }
 
 fn lock() {
-    while LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
+    hal::arch::x86_64::sync::spinlock_acquire(&LOCK);
 }
 
 fn unlock() {
-    LOCK.store(false, Ordering::Release);
+    hal::arch::x86_64::sync::spinlock_release(&LOCK);
 }
 
 fn scan_phase_name(phase: u8) -> &'static str {

@@ -4,6 +4,7 @@
 //! policy driven by timer ticks. Context switch is performed in assembly by
 //! [`switch_context`].
 
+use crate::kernel::constants::KERNEL_THREAD_STACK_SIZE;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::format;
@@ -14,6 +15,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use hal::arch::x86_64::interrupt;
 use hal::arch::x86_64::sync::StaticCell;
 
+const STACK_SIZE: usize = KERNEL_THREAD_STACK_SIZE;
+const DEFAULT_QUANTUM_TICKS: u64 = 10;
+
 #[path = "scheduler/tests.rs"]
 pub mod tests;
 
@@ -23,9 +27,6 @@ pub type ThreadId = u64;
 pub type VirtAddr = u64;
 
 type ThreadEntry = fn();
-
-const STACK_SIZE: usize = 64 * 1024;
-const DEFAULT_QUANTUM_TICKS: u64 = 10;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 /// Execution state of a scheduler thread.

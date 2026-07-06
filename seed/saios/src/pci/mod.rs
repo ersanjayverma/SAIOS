@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::AtomicBool;
 
 use hal::arch::x86_64::io::{inl, outl};
 use hal::arch::x86_64::sync::StaticCell;
@@ -50,16 +50,11 @@ static DB: StaticCell<PciDatabase> = StaticCell::new(PciDatabase::new());
 static DB_LOCK: AtomicBool = AtomicBool::new(false);
 
 fn lock() {
-    while DB_LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
+    hal::arch::x86_64::sync::spinlock_acquire(&DB_LOCK);
 }
 
 fn unlock() {
-    DB_LOCK.store(false, Ordering::Release);
+    hal::arch::x86_64::sync::spinlock_release(&DB_LOCK);
 }
 
 fn config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {

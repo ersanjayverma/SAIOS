@@ -169,16 +169,11 @@ static STATE: StaticCell<Option<AhciState>> = StaticCell::new(None);
 static LOCK: AtomicBool = AtomicBool::new(false);
 
 fn lock() {
-    while LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
+    hal::arch::x86_64::sync::spinlock_acquire(&LOCK);
 }
 
 fn unlock() {
-    LOCK.store(false, Ordering::Release);
+    hal::arch::x86_64::sync::spinlock_release(&LOCK);
 }
 
 fn with_state_mut<R>(f: impl FnOnce(&mut AhciState) -> R) -> R {
@@ -606,7 +601,7 @@ fn rescan_locked(state: &mut AhciState) {
     state.diagnostics.clear();
     state.next_disk_id = 1;
 
-    if heap::identity_mode_enabled() {
+    if !heap::dynamic_mappings_available() {
         state.diagnostics.push(
             "stage=controller_init detail=AHCI MMIO scan skipped in VMM fallback mode".to_string(),
         );

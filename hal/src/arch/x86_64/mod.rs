@@ -4,6 +4,7 @@
 //! GDT, IDT, APIC, PCI, serial, console and platform helpers.
 
 pub mod apic;
+pub mod constants;
 pub mod console;
 pub mod cpu;
 pub mod cpuid;
