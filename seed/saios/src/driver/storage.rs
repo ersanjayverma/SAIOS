@@ -14,6 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use hal::arch::x86_64::sync::StaticCell;
 
 use crate::driver::ahci;
+use crate::driver::ext4_jbd2;
 use crate::driver::fat32 as fat32_driver;
 use crate::kernel::device::{self, DeviceStatus};
 use crate::pci;
@@ -224,6 +225,15 @@ impl Fat32VolumeCache {
     }
 }
 
+/// Per-volume ext4 journal state (sequence number + first-block LBA).
+#[derive(Clone, Debug)]
+struct Ext4JournalCache {
+    volume: String,
+    /// Absolute LBA of journal block 0.
+    first_block: u64,
+    jsb: ext4_jbd2::Jbd2Sb,
+}
+
 #[derive(Clone)]
 struct StorageState {
     initialized: bool,
@@ -231,6 +241,7 @@ struct StorageState {
     disks: Vec<DiskDevice>,
     mounted: Vec<MountedFs>,
     ext4_caches: Vec<Ext4VolumeCache>,
+    ext4_journals: Vec<Ext4JournalCache>,
     fat32_caches: Vec<Fat32VolumeCache>,
     diagnostics: Vec<String>,
 }
@@ -243,6 +254,7 @@ impl StorageState {
             disks: Vec::new(),
             mounted: Vec::new(),
             ext4_caches: Vec::new(),
+            ext4_journals: Vec::new(),
             fat32_caches: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -1232,7 +1244,7 @@ fn mounted_volume_for_path_internal<'a>(
     Some((vol, normalize_path(rel.as_str())))
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct Ext4Superblock {
     magic: u16,
     block_size: u64,
@@ -1245,6 +1257,8 @@ struct Ext4Superblock {
     feature_compat: u32,
     feature_incompat: u32,
     feature_ro_compat: u32,
+    /// Inode number of the journal (default 8 on standard ext4).
+    journal_inum: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -1281,7 +1295,7 @@ const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
 const EXT4_INLINE_DATA_FL: u32 = 0x1000_0000;
 const EXT4_INDEX_FL: u32 = 0x0000_1000;
 const EXT4_MAX_SYMLINK_DEPTH: usize = 16;
-const EXT4_NATIVE_STAGE8_EXPERIMENTAL: bool = false;
+const EXT4_NATIVE_STAGE8_EXPERIMENTAL: bool = true; // JBD2 journaling now active
 
 // Incompat feature flags that SAIOS cannot handle in read-only mode.
 // COMPRESSION(0x1): blocks are compressed – can't read file data.
@@ -1565,6 +1579,8 @@ fn ext4_load_superblock(
     let feature_compat = le_u32(sb.as_slice(), 92).unwrap_or(0);
     let feature_incompat = le_u32(sb.as_slice(), 96).unwrap_or(0);
     let feature_ro_compat = le_u32(sb.as_slice(), 100).unwrap_or(0);
+    // Journal inode number (superblock offset 0xF8 = 248).
+    let journal_inum = le_u32(sb.as_slice(), 248).unwrap_or(8);
 
     Ok(Ext4Superblock {
         magic,
@@ -1578,6 +1594,7 @@ fn ext4_load_superblock(
         feature_compat,
         feature_incompat,
         feature_ro_compat,
+        journal_inum,
     })
 }
 
@@ -2412,6 +2429,97 @@ fn ext4_write_inode_data_inplace(
     Ok(())
 }
 
+/// JBD2-journaled version of `ext4_write_inode_data_inplace`.
+/// Collects all dirty blocks in memory, then commits them atomically via the
+/// journal before writing to real filesystem locations.
+fn ext4_write_inode_data_journaled(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    inode_no: u32,
+    inode: &Ext4Inode,
+    data: &[u8],
+    volume: &str,
+    journals: &mut Vec<Ext4JournalCache>,
+) -> Result<(), &'static str> {
+    if (inode.mode & EXT4_S_IFREG) == 0 {
+        return Err("not a file");
+    }
+    if (inode.flags & EXT4_INLINE_DATA_FL) != 0 {
+        return Err("storage: ext4 inline-data writes are not supported yet");
+    }
+
+    let block_size = sb.block_size as usize;
+    let sector_size = disk.block.sector_size() as u64;
+
+    if block_size == 0 {
+        return Err("storage: invalid ext4 block size");
+    }
+
+    let mut inode_shadow = *inode;
+    let blocks = data.len().div_ceil(block_size);
+    let mut dirty: Vec<ext4_jbd2::DirtyBlock> = Vec::with_capacity(blocks + 2);
+
+    // Collect block allocations and data.
+    for lb in 0..blocks as u32 {
+        let pb = match ext4_resolve_file_block(disk, part, sb, &inode_shadow, lb)? {
+            Some(pb) => pb,
+            None => ext4_append_file_block(disk, part, sb, inode_no, &mut inode_shadow, lb)?,
+        };
+
+        let start = (lb as usize).saturating_mul(block_size);
+        let end = min(start.saturating_add(block_size), data.len());
+        let mut blk = ext4_read_block(disk, part, sb, pb)?;
+        let copy_len = end.saturating_sub(start);
+        if copy_len > 0 {
+            blk[..copy_len].copy_from_slice(&data[start..end]);
+        }
+        if copy_len < block_size {
+            blk[copy_len..block_size].fill(0);
+        }
+
+        let lba = part.start_lba + pb * sb.block_size / sector_size;
+        dirty.push(ext4_jbd2::DirtyBlock { lba, data: blk });
+    }
+
+    // Also collect the inode's new size into the inode table block.
+    // Read the inode table sector containing this inode.
+    let ino_index = inode_no.saturating_sub(1);
+    let group = ino_index / sb.inodes_per_group;
+    let index = ino_index % sb.inodes_per_group;
+    let gd_result = ext4_read_group_desc(disk, part, sb, group);
+    if let Ok(gd) = gd_result {
+        let inode_table_lo = le_u32(gd.as_slice(), 8).unwrap_or(0) as u64;
+        let inode_table_hi = if sb.desc_size >= 64 { le_u32(gd.as_slice(), 40).unwrap_or(0) as u64 } else { 0 };
+        let inode_table_block = (inode_table_hi << 32) | inode_table_lo;
+        let inode_byte_offset = (index as u64).saturating_mul(sb.inode_size as u64);
+        let inode_block_no = inode_table_block + inode_byte_offset / sb.block_size;
+        if let Ok(mut ino_blk) = ext4_read_block(disk, part, sb, inode_block_no) {
+            let in_block = (inode_byte_offset % sb.block_size) as usize;
+            // Patch i_size_lo (offset 4 within inode) and i_size_high (offset 108).
+            let size = data.len() as u64;
+            if in_block + 4 + 4 <= ino_blk.len() {
+                let size_lo_bytes = (size as u32).to_le_bytes();
+                ino_blk[in_block + 4..in_block + 8].copy_from_slice(&size_lo_bytes);
+            }
+            if in_block + 108 + 4 <= ino_blk.len() {
+                let size_hi_bytes = ((size >> 32) as u32).to_le_bytes();
+                ino_blk[in_block + 108..in_block + 112].copy_from_slice(&size_hi_bytes);
+            }
+            // Also update inode block map if it changed (new extents).
+            if in_block + 40 + 60 <= ino_blk.len() {
+                ino_blk[in_block + 40..in_block + 100].copy_from_slice(&inode_shadow.block);
+            }
+            let lba = part.start_lba + inode_block_no * sb.block_size / sector_size;
+            dirty.push(ext4_jbd2::DirtyBlock { lba, data: ino_blk });
+        }
+    }
+
+    // Commit via JBD2.
+    ext4_jbd2_write_blocks(disk, part, sb, volume, journals, dirty)?;
+    Ok(())
+}
+
 fn ext4_append_file_block(
     disk: &mut DiskDevice,
     part: &Partition,
@@ -3006,6 +3114,67 @@ fn ext4_invalidate_volume_cache(state: &mut StorageState, volume: &str) {
         let name = cache.volume.clone();
         *cache = Ext4VolumeCache::new(name, sb);
     }
+}
+
+/// Acquire (or lazily initialise) the JBD2 journal for a native ext4 volume.
+/// Returns the journal's first-block absolute LBA and its current `Jbd2Sb`.
+fn ext4_acquire_journal(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    volume: &str,
+    journals: &mut Vec<Ext4JournalCache>,
+) -> Result<u64, &'static str> {
+    // Already cached?
+    if let Some(j) = journals.iter().find(|j| j.volume.eq_ignore_ascii_case(volume)) {
+        return Ok(j.first_block);
+    }
+
+    // Load journal inode to find the journal's first block.
+    let jino = ext4_load_inode(disk, part, sb, sb.journal_inum)?;
+    let first_block = ext4_jbd2::journal_first_block_from_extent(
+        &jino.block,
+        part.start_lba,
+        sb.block_size,
+        disk.block.sector_size() as u64,
+    ).ok_or("ext4: cannot locate journal first block")?;
+
+    // Read journal superblock.
+    let mut io = DiskIo(disk);
+    let jsb = ext4_jbd2::read_journal_sb(first_block, sb.block_size as usize, &mut io)?;
+
+    journals.push(Ext4JournalCache {
+        volume: volume.to_string(),
+        first_block,
+        jsb,
+    });
+    Ok(first_block)
+}
+
+/// Write a list of ext4 filesystem blocks via JBD2 (write-ahead log, then
+/// checkpoint to real locations).  Automatically evicts the journal cache
+/// on success so the next call re-reads the updated `s_sequence`.
+fn ext4_jbd2_write_blocks(
+    disk: &mut DiskDevice,
+    part: &Partition,
+    sb: &Ext4Superblock,
+    volume: &str,
+    journals: &mut Vec<Ext4JournalCache>,
+    dirty: Vec<ext4_jbd2::DirtyBlock>,
+) -> Result<(), &'static str> {
+    if dirty.is_empty() {
+        return Ok(());
+    }
+    let fb = ext4_acquire_journal(disk, part, sb, volume, journals)?;
+    let jsb_idx = journals.iter().position(|j| j.volume.eq_ignore_ascii_case(volume))
+        .ok_or("ext4: journal cache missing")?;
+    let jsb = journals[jsb_idx].jsb;
+    let mut journal = ext4_jbd2::Jbd2Journal::new(fb, jsb);
+    let mut io = DiskIo(disk);
+    ext4_jbd2::jbd2_commit(&mut journal, &dirty, &mut io)?;
+    // Update cached jsb.
+    journals[jsb_idx].jsb = journal.jsb;
+    Ok(())
 }
 
 // ── FAT32 native volume helpers ───────────────────────────────────────────
@@ -3842,9 +4011,26 @@ pub fn format_volume(name: &str, fs: FilesystemKind) -> Result<(), &'static str>
             };
             disk.block.flush();
             state.volumes[idx].filesystem = FilesystemKind::Fat32;
-            // Evict any stale FAT32 cache so next mount re-probes.
             state.fat32_caches.retain(|c| !c.volume.eq_ignore_ascii_case(name));
             state.fat32_caches.push(Fat32VolumeCache::new(name.to_string(), new_sb));
+            return Ok(());
+        }
+
+        // ── Real ext4 mkfs ────────────────────────────────────────────────
+        if fs == FilesystemKind::Ext4 {
+            let total_sectors = part.sector_count;
+            let part_start = part.start_lba;
+            let disk = &mut state.disks[disk_idx];
+            let sector_size = disk.block.sector_size() as usize;
+            {
+                let mut io = DiskIo(disk);
+                ext4_jbd2::mkfs_ext4(part_start, total_sectors, sector_size, &mut io)?;
+            }
+            disk.block.flush();
+            state.volumes[idx].filesystem = FilesystemKind::Ext4;
+            // Evict stale caches so next mount re-probes.
+            state.ext4_caches.retain(|c| !c.volume.eq_ignore_ascii_case(name));
+            state.ext4_journals.retain(|j| !j.volume.eq_ignore_ascii_case(name));
             return Ok(());
         }
 
@@ -4333,10 +4519,32 @@ pub fn fs_write(path: &str, data: &[u8]) -> Result<(), &'static str> {
         if vol_fs == FilesystemKind::Ext4
             && is_native_ext4_read_only_volume(state, vol_name.as_str())
         {
-            let write_result = ext4_with_volume_mut(state, vol_name.as_str(), |disk, part| {
-                let (sb, ino, inode) = ext4_lookup_path(disk, part, rel.as_str())?;
-                ext4_write_inode_data_inplace(disk, part, &sb, ino, &inode, data)
-            });
+            let vol_name_c = vol_name.clone();
+            let disk_name = {
+                let (d, _) = resolve_volume_owner(state, vol_name.as_str())?;
+                d
+            };
+            let part_name = {
+                let (_, p) = resolve_volume_owner(state, vol_name.as_str())?;
+                p
+            };
+            let disk_idx = state.disks.iter().position(|d| d.name.eq_ignore_ascii_case(&disk_name))
+                .ok_or("storage: disk missing")?;
+            let part_idx = state.disks[disk_idx].partitions.iter()
+                .position(|p| p.name.eq_ignore_ascii_case(&part_name))
+                .ok_or("storage: partition missing")?;
+            let part = state.disks[disk_idx].partitions[part_idx].clone();
+
+            let write_result = {
+                // Load superblock for this volume.
+                let sb = ext4_load_superblock(&state.disks[disk_idx], &part)?;
+                let (_, ino, inode) = ext4_lookup_path(&mut state.disks[disk_idx], &part, rel.as_str())?;
+                let disk = &mut state.disks[disk_idx];
+                ext4_write_inode_data_journaled(
+                    disk, &part, &sb, ino, &inode, data,
+                    vol_name_c.as_str(), &mut state.ext4_journals,
+                )
+            };
             if write_result.is_ok() {
                 ext4_invalidate_volume_cache(state, vol_name.as_str());
             }

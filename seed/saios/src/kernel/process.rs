@@ -762,8 +762,34 @@ fn candidate_program_paths(name: &str) -> Vec<String> {
         return out;
     }
 
+    // 1. Try name literally (absolute path or in cwd).
     out.push(name.to_string());
-    out.push(alloc::format!("/bin/{}", name));
+
+    // 2. Search system PATH directories.
+    let sys_paths = [
+        "/bin", "/sbin", "/usr/bin", "/usr/sbin",
+        "/usr/local/bin", "/usr/local/sbin",
+    ];
+    for dir in &sys_paths {
+        out.push(alloc::format!("{}/{}", dir, name));
+    }
+
+    // 3. Search the same directories under every non-tmpfs mounted volume.
+    //    This lets `exec bash` find `/dsk/bin/bash` without needing an
+    //    explicit `/dsk/bin/bash` path.
+    let mounts = crate::driver::storage::volumes_cached();
+    for vol in &mounts {
+        if let Some(ref mp) = vol.mounted_at {
+            let mp = mp.trim_end_matches('/');
+            if mp.is_empty() || mp == "/" {
+                continue; // tmpfs root – sys_paths already cover this
+            }
+            for dir in &sys_paths {
+                out.push(alloc::format!("{}{}/{}", mp, dir, name));
+            }
+        }
+    }
+
     out
 }
 

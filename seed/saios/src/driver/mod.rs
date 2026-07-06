@@ -3,6 +3,7 @@ pub mod console;
 pub mod dhcp;
 pub mod dns;
 pub mod ethernet;
+pub mod ext4_jbd2;
 pub mod fat32;
 pub mod loopback;
 pub mod memory;
