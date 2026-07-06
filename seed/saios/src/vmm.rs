@@ -386,37 +386,37 @@ fn map_page_hw(virt: VirtAddr, phys: PhysAddr, flags: u64) -> Result<(), &'stati
         pd.entries[l2].set_page(new_page, nonleaf);
         unsafe { (&mut *pt_table_ptr(l4, l3, l2)).clear() };
     } else if (pd.entries[l2].0 & paging::FLAG_HUGE) != 0 {
-        // The existing PDE is a 2 MiB huge page. Demote it to a 4 KiB PT,
-        // preserving all 512 PTEs from the original identity mapping so that
-        // any code relying on the identity window is not broken.
+        // Demote a 2 MiB huge PDE to a 4 KiB PT.
+        //
+        // The new PT is left completely empty. The boot trampoline's blanket
+        // higher-half huge PDEs are stale convenience mappings; kernel data
+        // and page-table pages are accessed through the low-half identity
+        // window (PML4[0], virtual == physical) so no tracked mapping is lost.
+        // Repopulating the other 511 PTEs with the old identity physicals would
+        // cause the subsequent map_page_hw calls for pages [l1+1..] of a
+        // multi-page mapping to hit occupied PTEs and return "page already mapped".
+        //
+        // TLB note: the boot trampoline marks its higher-half huge PDEs as
+        // GLOBAL, which means a CR3 reload alone will NOT evict the stale
+        // 2 MiB TLB entry.  We must use invlpg on the 2 MiB-aligned base
+        // address so the CPU drops the huge-page entry before any access
+        // through the new 4 KiB PT can occur.
         let huge_pde = pd.entries[l2].0;
-        let huge_phys_base = huge_pde & 0x000F_FFFF_FFE0_0000; // 2 MiB aligned
-        // Carry semantic flags from the huge PDE to the new PTEs (strip PS/Huge bit).
-        let pte_flags = huge_pde & !(paging::FLAG_HUGE) & !(ADDR_MASK);
+        let huge_phys_base = huge_pde & 0x000F_FFFF_FFE0_0000; // for the log only
 
         let new_page = pmm::alloc_page().ok_or("vmm: out of memory for pt (huge split)")?;
         pd.entries[l2].set_page(new_page, nonleaf);
+
+        // Zero all 512 entries in the new PT before use.
+        unsafe { (&mut *pt_table_ptr(l4, l3, l2)).clear() };
 
         crate::console::println!(
             "vmm: split huge PDE l2={} virt={:#x} huge_base={:#x} new_pt={:#x}",
             l2, virt, huge_phys_base, new_page
         );
 
-        // Populate all 512 PTEs so the rest of the 2 MiB region stays accessible.
-        // Skip PTE[l1] — it is the target of the current mapping request and must
-        // remain empty so the caller can install the new physical address there.
-        // The stale boot-identity physical address that the huge PDE had at this
-        // slot is no longer needed: any legitimate kernel user of that physical
-        // page has its own tracked VMM mapping at a distinct virtual address.
-        let pt = unsafe { &mut *pt_table_ptr(l4, l3, l2) };
-        for i in 0..512usize {
-            if i == l1 {
-                continue;
-            }
-            let entry_phys = huge_phys_base.saturating_add((i as u64).saturating_mul(PAGE_SIZE));
-            pt.entries[i].0 = entry_phys | pte_flags | paging::FLAG_PRESENT;
-        }
-        flush_current_address_space();
+        // Flush the stale global 2 MiB TLB entry for the entire split window.
+        invlpg(align_down(virt, HUGE_PAGE_SIZE_2M));
     } else {
         pd.entries[l2].set_flags(nonleaf & paging::FLAG_USER);
     }
