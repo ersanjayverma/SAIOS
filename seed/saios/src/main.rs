@@ -45,7 +45,6 @@ unsafe extern "C" {
 }
 
 use crate::kernel::constants::{
-    EARLY_CR3_SWITCH_ENABLED, CR3_MIN_SWITCH_PHYS, FALLBACK_IDENTITY_HEAP_MAX_PHYS,
     KERNEL_PHYS_BASE, PTE_ADDR_MASK,
 };
 
@@ -133,7 +132,7 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
     // Physical kernel image starts at the boot trampoline (KERNEL_PHYS_BASE)
     // and ends where the higher-half sections end (kernel_vma_end - offset).
     let kernel_start = KERNEL_PHYS_BASE;
-    let kernel_end = kernel_vma_end.saturating_sub(vmm::KERNEL_IMAGE_MIRROR_BASE);
+    let kernel_end = kernel_vma_end.saturating_sub(vmm::KERNEL_IMAGE_MIRROR_BASE - KERNEL_PHYS_BASE);
     let boot_info_ptr = boot_info as *const SaiosBootInfo as u64;
     let boot_info_size = size_of::<SaiosBootInfo>();
 
@@ -143,7 +142,7 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
     // ELF overlap checks compare against where the kernel actually executes.
     vmm::set_kernel_image_range(kernel_vma_start, kernel_vma_end);
 
-    let (prepared_kernel_pml4, mut active_cr3, mut vmm_bootstrap_ok) =
+    let (_prepared_kernel_pml4, active_cr3, vmm_bootstrap_ok) =
         match vmm::bootstrap_kernel_page_tables(
             framebuffer_info.base,
             framebuffer_info.size,
@@ -154,6 +153,10 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
         ) {
             Ok(pml4) => {
                 let current_cr3 = paging::read_cr3() & PTE_ADDR_MASK;
+                hal::arch::x86_64::console::_print(format_args!(
+                    "kernel: VMM bootstrap succeeded (cr3={:#x})\n",
+                    current_cr3
+                ));
                 (Some(pml4), current_cr3, false)
             }
             Err(e) => {
@@ -167,168 +170,18 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
             }
         };
 
-    if EARLY_CR3_SWITCH_ENABLED && !vmm_bootstrap_ok {
-        if let Some(kernel_pml4) = prepared_kernel_pml4 {
-            let switch_target = kernel_pml4 & PTE_ADDR_MASK;
-            let rip = read_rip();
-            let rsp = read_rsp();
-            let idtr = read_idt_ptr();
-            let gdtr = read_gdt_ptr();
-            let idt_base = idtr.base;
-            let gdt_base = gdtr.base;
-            let idt_limit = idtr.limit as u64;
-            let gdt_limit = gdtr.limit as u64;
-            let idt_tail = idt_base.saturating_add(idt_limit);
-            let gdt_tail = gdt_base.saturating_add(gdt_limit);
-            let mut preflight_ok = true;
-            let mut first_missing: Option<&'static str> = None;
-            match vmm::validate_prepared_kernel_pml4(switch_target) {
-                Ok(()) => {}
-                Err(_e) => {
-                    preflight_ok = false;
-                    first_missing = Some("pml4_root");
-                }
-            }
-            let rip_next = rip.saturating_add(0x1000);
-            let rsp_write_8 = rsp.saturating_sub(8);
-            let rsp_guard_4k = rsp.saturating_sub(0x1000);
-            let rsp_guard_16k = rsp.saturating_sub(0x4000);
-            let rsp_guard_64k = rsp.saturating_sub(0x10000);
-            let alloc_marker = &GLOBAL_ALLOCATOR as *const _ as u64;
-            let kernel_hh_start = vmm::KERNEL_IMAGE_MIRROR_BASE.saturating_add(kernel_start);
-            let kernel_hh_tail =
-                vmm::KERNEL_IMAGE_MIRROR_BASE.saturating_add(kernel_end.saturating_sub(1));
-            let required_points = [
-                ("rip", rip),
-                ("rip+0x1000", rip_next),
-                ("rsp", rsp),
-                ("rsp-8", rsp_write_8),
-                ("rsp-0x1000", rsp_guard_4k),
-                ("rsp-0x4000", rsp_guard_16k),
-                ("rsp-0x10000", rsp_guard_64k),
-                ("idt", idt_base),
-                ("idt_end", idt_tail),
-                ("gdt", gdt_base),
-                ("gdt_end", gdt_tail),
-                ("boot_info", boot_info_ptr),
-                ("fb", framebuffer_info.base),
-                ("kernel_start", kernel_start),
-                ("kernel_hh_start", kernel_hh_start),
-                ("kernel_hh_end", kernel_hh_tail),
-                ("alloc_marker", alloc_marker),
-            ];
-
-            for (label, addr) in required_points {
-                match vmm::is_mapped_in_page_tables(switch_target, addr) {
-                    Ok(true) => {}
-                    Ok(false) | Err(_) => {
-                        preflight_ok = false;
-                        if first_missing.is_none() {
-                            first_missing = Some(label);
-                        }
-                    }
-                }
-            }
-
-            if kernel_end > kernel_start {
-                let kernel_tail = kernel_end.saturating_sub(1);
-                match vmm::is_mapped_in_page_tables(switch_target, kernel_tail) {
-                    Ok(true) => {}
-                    Ok(false) | Err(_) => {
-                        preflight_ok = false;
-                        if first_missing.is_none() {
-                            first_missing = Some("kernel_end-1");
-                        }
-                    }
-                }
-            }
-
-            if boot_info_size > 0 {
-                let boot_info_tail = boot_info_ptr
-                    .saturating_add(boot_info_size as u64)
-                    .saturating_sub(1);
-                match vmm::is_mapped_in_page_tables(switch_target, boot_info_tail) {
-                    Ok(true) => {}
-                    Ok(false) | Err(_) => {
-                        preflight_ok = false;
-                        if first_missing.is_none() {
-                            first_missing = Some("boot_info_end-1");
-                        }
-                    }
-                }
-            }
-
-            if framebuffer_info.size > 0 {
-                let fb_tail = framebuffer_info
-                    .base
-                    .saturating_add(framebuffer_info.size as u64)
-                    .saturating_sub(1);
-                match vmm::is_mapped_in_page_tables(switch_target, fb_tail) {
-                    Ok(true) => {}
-                    Ok(false) | Err(_) => {
-                        preflight_ok = false;
-                        if first_missing.is_none() {
-                            first_missing = Some("fb_end-1");
-                        }
-                    }
-                }
-            }
-
-            if switch_target < CR3_MIN_SWITCH_PHYS {
-                hal::arch::x86_64::console::_print(format_args!(
-                    "kernel: early CR3 switch skipped (target below safety floor: {:#x} < {:#x})\n",
-                    switch_target, CR3_MIN_SWITCH_PHYS
-                ));
-            } else if !preflight_ok {
-                hal::arch::x86_64::console::_print(format_args!(
-                    "kernel: early CR3 preflight failed ({})\n",
-                    first_missing.unwrap_or("unknown")
-                ));
-            } else {
-                match vmm::activate_kernel_page_tables(switch_target) {
-                    Ok(()) => {
-                        late_cr3_smoke_test();
-                        active_cr3 = switch_target;
-                        vmm_bootstrap_ok = true;
-                        hal::arch::x86_64::console::_print(format_args!(
-                            "kernel: early CR3 switch succeeded (cr3={:#x})\n",
-                            switch_target
-                        ));
-                    }
-                    Err(e) => {
-                        let current_cr3 = paging::read_cr3() & PTE_ADDR_MASK;
-                        hal::arch::x86_64::console::_print(format_args!(
-                            "kernel: early CR3 switch failed: {} (fallback cr3={:#x})\n",
-                            e, current_cr3
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
     if let Err(e) = vmm::init(active_cr3) {
         hal::arch::x86_64::console::_print(format_args!("kernel: VMM init failed: {}\n", e));
         panic!("VMM: failed to initialize kernel virtual memory manager");
     }
 
-    if !vmm_bootstrap_ok {
-        heap::configure_identity_mode(Some(FALLBACK_IDENTITY_HEAP_MAX_PHYS));
-    } else {
-        heap::configure_identity_mode(None);
-    }
+
 
     heap::init();
 
     kernel::timeline::init();
     kernel::timeline::mark("Boot");
     kernel::timeline::mark("Memory");
-
-    if vmm_bootstrap_ok {
-        console::attach_framebuffer(framebuffer_info);
-    } else {
-        console::attach_framebuffer_direct(framebuffer_info);
-    }
 
     // Higher-half bring-up can still have edge cases in the dynamic mapping
     // path. If mapped attach did not become visible, retry with direct GOP

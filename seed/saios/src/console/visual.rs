@@ -82,6 +82,7 @@ impl VisualConsole {
         self.framebuffer.display_properties().is_some()
     }
 
+    #[allow(dead_code)]
     pub fn attach(&mut self, info: FramebufferInfo) {
         self.framebuffer.attach(info);
         if self.framebuffer.ensure_renderer_ready() {

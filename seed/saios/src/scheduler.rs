@@ -7,7 +7,6 @@
 use crate::kernel::constants::KERNEL_THREAD_STACK_SIZE;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
-use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -327,29 +326,9 @@ fn ensure_init_script() {
     let script = b"# SAIOS init script\nsetenv HOSTNAME saios\nalias ll ls\n";
     let _ = crate::vfs::write_path("/system/init", script);
     let _ = crate::vfs::write_path("/sbin/init", script);
-}
-
-fn auto_mount_cached_fat_volume() {
-    let Some(volume) = crate::driver::storage::volumes_cached()
-        .into_iter()
-        .find(|volume| {
-            volume.filesystem == crate::driver::storage::FilesystemKind::Fat32
-                && volume.name != "tmpfs"
-                && volume.mounted_at.is_none()
-        })
-    else {
-        return;
-    };
-
-    let mountpoint = format!("/mnt/{}", volume.name);
-    let _ = crate::vfs::mkdir(mountpoint.as_str());
-
-    if crate::vfs::mount(mountpoint.as_str(), volume.filesystem.as_str(), false).is_ok()
-        && crate::driver::storage::mount_volume(volume.name.as_str(), mountpoint.as_str(), false)
-            .is_ok()
-    {
-        crate::console::println!("Mounted {} at {}", volume.name, mountpoint);
-    }
+    hal::arch::x86_64::console::_print(format_args!(
+        "kernel: init script written to /system/init and /sbin/init\n"
+    ));
 }
 
 /// Prepares the default userland filesystem/session environment.
@@ -363,10 +342,19 @@ pub fn prepare_default_user_session() -> Result<(), &'static str> {
 
     crate::object_manager::init();
     crate::saifs::init();
+    hal::arch::x86_64::console::_print(format_args!(
+        "kernel: saifs initialized\n"
+    ));
     crate::kernel::package_image::mount_default()?;
-    auto_mount_cached_fat_volume();
+    hal::arch::x86_64::console::_print(format_args!(
+        "kernel: default package image mounted\n"
+    ));
+
     ensure_init_script();
     crate::kernel::object::init();
+    hal::arch::x86_64::console::_print(format_args!(
+        "kernel: object registry initialized\n"
+    ));
     Ok(())
 }
 

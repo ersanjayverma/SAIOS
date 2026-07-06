@@ -498,6 +498,7 @@ fn move_cursor_right_cells(cells: usize) {
 /// Attaches a framebuffer as an additional console output backend.
 ///
 /// The framebuffer address is used as provided by the bootloader.
+#[allow(dead_code)]
 pub(crate) fn attach_framebuffer(info: FramebufferInfo) {
     let mapped_info = info;
 

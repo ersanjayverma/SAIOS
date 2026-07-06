@@ -59,6 +59,7 @@ impl VgaConsole {
     }
 
     /// Accepts framebuffer metadata and clears the VGA screen for a fresh boot console.
+    #[allow(dead_code)]
     pub fn attach(&mut self, _info: FramebufferInfo) {
         let _ = self.ensure_mapped();
         self.clear();

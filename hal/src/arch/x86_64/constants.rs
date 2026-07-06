@@ -104,7 +104,7 @@ pub const USER_TRANSITION_GUARD_SIZE: usize = 4096;
 
 /// Whether interrupts are re-enabled on entry to ring-3. `false` during
 /// debugging so no timer preemption occurs before the first instruction.
-pub const USER_ENTRY_ENABLE_INTERRUPTS: bool = false;
+pub const USER_ENTRY_ENABLE_INTERRUPTS: bool = true;
 
 // ─── RFLAGS ──────────────────────────────────────────────────────────────────
 
