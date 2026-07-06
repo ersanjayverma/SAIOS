@@ -110,6 +110,12 @@ pub struct DetectedVolume {
     pub sector_size: u16,
     pub mounted_at: Option<String>,
     pub writable: bool,
+    /// `"native"` when the volume is handled by the native FAT32 or ext4 driver;
+    /// `"managed-store"` when using the SAIOS managed-store format;
+    /// `"tmpfs"` for the in-memory root.
+    pub driver_mode: &'static str,
+    /// `"journaled"` (ext4 + JBD2), `"direct"` (FAT32 native), `"managed"`, or `"none"`.
+    pub write_mode: &'static str,
 }
 
 #[derive(Clone, Debug)]
@@ -1050,38 +1056,59 @@ fn rebuild_volume_registry(state: &mut StorageState) {
         sector_size: 4096,
         mounted_at: Some("/".to_string()),
         writable: true,
+        driver_mode: "tmpfs",
+        write_mode: "none",
     });
 
     for disk in &state.disks {
-        let kind_str = if disk.block.is_real_hardware() {
-            "ahci"
-        } else {
-            "ram"
-        };
+        let kind_str = if disk.block.is_real_hardware() { "ahci" } else { "ram" };
         state.volumes.push(DetectedVolume {
             name: disk.name.clone(),
             filesystem: FilesystemKind::TmpFs,
             backing: format!("{}:{}", kind_str, disk.backing),
-            total_bytes: disk
-                .block
-                .sectors()
-                .saturating_mul(disk.block.sector_size() as u64),
+            total_bytes: disk.block.sectors().saturating_mul(disk.block.sector_size() as u64),
             sector_size: disk.block.sector_size(),
             mounted_at: None,
             writable: true,
+            driver_mode: "block",
+            write_mode: "direct",
         });
 
         for part in &disk.partitions {
+            // Determine driver mode: native if fat32_caches or ext4_caches contain this volume.
+            let is_native_fat = state.fat32_caches.iter().any(|c| c.volume.eq_ignore_ascii_case(&part.name));
+            let is_native_ext4 = state.ext4_caches.iter().any(|c| c.volume.eq_ignore_ascii_case(&part.name))
+                && !state.mounted.iter().any(|m| m.volume.eq_ignore_ascii_case(&part.name));
+            let has_journal = state.ext4_journals.iter().any(|j| j.volume.eq_ignore_ascii_case(&part.name));
+
+            let driver_mode: &'static str = if is_native_fat || is_native_ext4 {
+                "native"
+            } else if part.fs_hint == FilesystemKind::TmpFs {
+                "block"
+            } else {
+                "managed-store"
+            };
+
+            let write_mode: &'static str = if is_native_ext4 && has_journal {
+                "journaled"
+            } else if is_native_fat {
+                "direct"
+            } else if matches!(part.fs_hint, FilesystemKind::Fat32 | FilesystemKind::Ext4) {
+                "managed"
+            } else {
+                "none"
+            };
+
             state.volumes.push(DetectedVolume {
                 name: part.name.clone(),
                 filesystem: part.fs_hint,
                 backing: format!("{}:{}", disk.name, part.name),
-                total_bytes: part
-                    .sector_count
-                    .saturating_mul(disk.block.sector_size() as u64),
+                total_bytes: part.sector_count.saturating_mul(disk.block.sector_size() as u64),
                 sector_size: disk.block.sector_size(),
                 mounted_at: None,
                 writable: true,
+                driver_mode,
+                write_mode,
             });
         }
     }
@@ -2385,6 +2412,7 @@ fn ext4_read_inode_data(
     Ok(out)
 }
 
+#[allow(dead_code)]
 fn ext4_write_inode_data_inplace(
     disk: &mut DiskDevice,
     part: &Partition,
@@ -3179,25 +3207,6 @@ fn ext4_jbd2_write_blocks(
 
 // ── FAT32 native volume helpers ───────────────────────────────────────────
 
-/// Build a closure-based sector reader for a given disk + partition start LBA.
-/// Passes `(absolute_lba, &mut buf)` to the provided AHCI read function.
-macro_rules! fat32_reader {
-    ($disk:expr, $part:expr) => {{
-        |lba: u64, buf: &mut [u8]| -> Result<(), &'static str> {
-            // lba is already absolute (driver::fat32 adds part_start_lba internally)
-            $disk.block.read_sector(lba, buf)
-        }
-    }};
-}
-
-macro_rules! fat32_writer {
-    ($disk:expr, $part:expr) => {{
-        |lba: u64, buf: &[u8]| -> Result<(), &'static str> {
-            $disk.block.write_sector(lba, buf)
-        }
-    }};
-}
-
 /// Access (or lazily initialise) the FAT32 per-volume cache plus disk/partition.
 fn fat32_with_cache_mut<R>(
     state: &mut StorageState,
@@ -3253,6 +3262,7 @@ fn fat32_with_cache_mut<R>(
     f(disk, part, cache)
 }
 
+#[allow(dead_code)]
 fn fat32_invalidate_volume_cache(state: &mut StorageState, volume: &str) {
     if let Some(cache) = state.fat32_caches.iter_mut().find(|c| c.volume.eq_ignore_ascii_case(volume)) {
         let sb = cache.sb;

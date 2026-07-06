@@ -77,6 +77,7 @@ const ATTR_ARCHIVE: u8 = 0x20;
 const ATTR_LFN: u8 = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID;
 
 const CLUSTER_FREE: u32 = 0x00000000;
+#[allow(dead_code)]
 const CLUSTER_BAD: u32 = 0x0FFFFFF7;
 const CLUSTER_EOC: u32 = 0x0FFFFFF8;
 const FAT32_MASK: u32 = 0x0FFFFFFF;
@@ -885,7 +886,7 @@ pub fn write_file(
     let cluster_bytes = sb.cluster_bytes() as usize;
 
     // Find the existing entry (if any).
-    let existing = lookup_path(sb, fat, entry_name, part_start_lba, io)?;;
+    let existing = lookup_path(sb, fat, entry_name, part_start_lba, io)?;
 
     // Free old chain.
     if let Some(ref e) = existing {
@@ -921,7 +922,7 @@ pub fn write_file(
     }
 
     // Write FAT.
-    fat.flush(sb, part_start_lba, io)?;;
+    fat.flush(sb, part_start_lba, io)?;
 
     // Update directory entry.
     match existing {
@@ -1027,7 +1028,7 @@ pub fn create_dir_entry(
     if let Some(&last) = chain.last() {
         fat.set_entry(sb, last, new_cluster)?;
     }
-    fat.flush(sb, part_start_lba, io)?;;
+    fat.flush(sb, part_start_lba, io)?;
 
     // Write the new cluster: entry + sentinel.
     let cluster_bytes = sb.cluster_bytes() as usize;
@@ -1102,7 +1103,7 @@ pub fn create_directory(
 
     // Allocate cluster for new directory.
     let new_cluster = alloc_clusters(fat, sb, 1).ok_or("fat32: no free cluster for new directory")?;
-    fat.flush(sb, part_start_lba, io)?;;
+    fat.flush(sb, part_start_lba, io)?;
 
     // Write '.' and '..' entries.
     let mut buf = vec![0u8; cluster_bytes];
@@ -1261,7 +1262,7 @@ pub fn format(
     // ── Write root directory cluster (zeroed) ─────────────────────────────
     let cluster_bytes = sb.cluster_bytes() as usize;
     let zero_cluster = vec![0u8; cluster_bytes];
-    write_sectors(sb.cluster_to_sector(root_cluster) + part_start_lba, &zero_cluster, 512, io)?;;
+    write_sectors(sb.cluster_to_sector(root_cluster) + part_start_lba, &zero_cluster, 512, io)?;
 
     Ok(sb)
 }

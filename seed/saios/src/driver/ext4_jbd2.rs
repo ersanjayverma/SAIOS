@@ -54,7 +54,6 @@ const TAG_FLAG_LAST: u32 = 0x0000_0008;
 
 const JSB_MAGIC: usize = 0;
 const JSB_BLOCKTYPE: usize = 4;
-const JSB_SEQUENCE: usize = 8;
 const JSB_BLOCKSIZE: usize = 12;
 const JSB_MAXLEN: usize = 16;
 const JSB_FIRST: usize = 20;
@@ -393,25 +392,19 @@ pub fn mkfs_ext4(
     // Journal size: 128 blocks, capped at 1/8 of first group's free blocks.
     let journal_blocks: u32 = 128.min((blocks_per_group / 8).max(16));
 
-    // ── Helper: write a zeroed block ──────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────
     let zero_block = vec![0u8; block_size as usize];
-    let write_zero_block = |lba: u64, io: &mut dyn BlockIo| -> Result<(), &'static str> {
-        let secs = block_size / sector_size_u64;
-        let zeroes = vec![0u8; sector_size];
-        for i in 0..secs {
-            io.write_sector(lba + i, &zeroes)?;
-        }
-        Ok(())
-    };
+
+    // Write `data` to filesystem block `block_no` (splits into sectors).
     let write_block = |block_no: u64, data: &[u8], io: &mut dyn BlockIo| -> Result<(), &'static str> {
         let lba = part_start_lba + block_no * secs_per_block;
-        let secs = secs_per_block as usize;
-        for i in 0..secs {
+        for i in 0..secs_per_block as usize {
             let s = i * sector_size;
             let e = s + sector_size;
-            let chunk = data.get(s..e).unwrap_or(&[]);
-            if chunk.len() == sector_size {
-                io.write_sector(lba + i as u64, chunk)?;
+            if let Some(chunk) = data.get(s..e) {
+                if chunk.len() == sector_size {
+                    io.write_sector(lba + i as u64, chunk)?;
+                }
             }
         }
         Ok(())
@@ -470,7 +463,7 @@ pub fn mkfs_ext4(
     // ── Write group descriptors (GDT) ─────────────────────────────────────
     // GDT starts at block `gdt_block` (1 for 1 KiB, same as superblock block for 4 KiB).
     let gdt_block = first_data_block as u64 + 1;
-    let gd_per_block = block_size as usize / desc_size as usize;
+    let _gd_per_block = block_size as usize / desc_size as usize;
 
     for g in 0..groups {
         let group_start_block = first_data_block as u64 + g as u64 * blocks_per_group as u64;
@@ -488,7 +481,7 @@ pub fn mkfs_ext4(
             .min(blocks_per_group as u64) as u16;
 
         let gd_block = gdt_block + (g as u64 * desc_size as u64) / block_size;
-        let gd_offset_in_block = ((g as usize * desc_size as usize) % block_size as usize);
+        let gd_offset_in_block = (g as usize * desc_size as usize) % block_size as usize;
         // Read-modify-write the GDT block.
         let gdt_lba = part_start_lba + gd_block * secs_per_block;
         let mut gd_blk = vec![0u8; block_size as usize];
@@ -542,13 +535,12 @@ pub fn mkfs_ext4(
         let _ = data_start;
     }
 
-    // ── Write journal inode (inode 8) and journal data ───────────────────
+    // Write journal inode (inode 8) and journal data
     // The journal inode is stored in the inode table of group 0.
     // Inode 8 is at index 7 within the group.
     let group0_start = first_data_block as u64;
     let it0_block = group0_start + 4;
     let it0_offset = 7u64 * inode_size as u64; // inode 8, index = 8-1 = 7
-    let it0_abs_lba = part_start_lba + (it0_block * block_size + it0_offset) / sector_size_u64;
 
     // Journal data starts after inode table in group 0.
     let overhead0 = 2 + 1 + 1 + inode_table_blocks; // SB+GDT+BB+IB+IT
@@ -575,9 +567,8 @@ pub fn mkfs_ext4(
     put_le_u32_le(&mut jino, le_off + 8, journal_start_block as u32)?;// ee_start_lo
 
     // Write inode 8.
-    let sec_in_block = (it0_offset % block_size) / sector_size_u64;
-    let _ = sec_in_block;
-    let mut it0_raw = vec![0u8; sector_size];
+    let _sec_in_block = (it0_offset % block_size) / sector_size_u64;
+    let _it0_raw = vec![0u8; sector_size];
     // The inode might span sector boundaries; use a full-block write for simplicity.
     let inode8_block = it0_block + it0_offset / block_size;
     let inode8_in_block = (it0_offset % block_size) as usize;
