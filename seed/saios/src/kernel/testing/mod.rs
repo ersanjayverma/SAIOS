@@ -81,7 +81,7 @@ pub fn boot_readiness_gate() -> bool {
         perf: false,
         stress: false,
         json: false,
-        ready: true,
+        readiness: Some(validation::ReadinessProfile::V03),
     };
 
     let report = validation::run(&options);

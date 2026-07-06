@@ -1,0 +1,57 @@
+# SAIOS v0.4 Status
+
+Last updated: 2026-07-06 (v0.4 still open; blockers clarified)
+
+## Objective
+Finish v0.4 foundation with stable static ELF execution, realistic Linux ABI behavior, and init/session correctness.
+
+## Current Release Risk Summary
+- Critical: Dynamic ELF interpreter path (`PT_INTERP`) is unsupported.
+- Critical: Syscall ABI still uses selector-based pseudo-arguments for core file I/O.
+- High: Ring3 shell fallback to kernel SNSH remains in normal runtime path.
+- High: ET_DYN isolated address-space path is disabled pending VMM safety fixes.
+- Medium: Validation gates still aligned with v0.3 readiness framing.
+
+## Completion Status
+v0.4 is not complete.
+
+Current blocking reasons:
+- `/bin/sh` in the v0.4 DoD still depends on `PT_INTERP`/dynamic-loader support that is not implemented.
+- Syscall ABI migration away from selector-based pseudo-arguments is still incomplete.
+- Session/runtime behavior is improved, but kernel SNSH fallback still exists as a fallback path rather than a fully eliminated normal-path dependency.
+- ET_DYN isolated address-space execution remains disabled pending VMM safety fixes.
+
+## Workboard
+- [x] Diagnose current ELF panic with deep instrumentation.
+- [x] Stop low-half collateral unmap in user stack setup.
+- [x] Stabilize static ELF user stack mapping for normal execution.
+- [x] Define/implement v0.4 validation gate profile.
+- [ ] Replace selector-based syscall arguments with pointer-buffer path for core file syscalls.
+- [ ] Tighten process/session behavior for ring3 shell without SNSH fallback as normal path.
+- [ ] Implement PT_INTERP handoff strategy (or explicitly defer v0.4 DoD scope).
+
+## Active Task
+Replace selector-based syscall arguments with pointer-buffer path for core file syscalls.
+
+## Remaining Minimum To Call v0.4 Complete
+- Finish pointer/buffer-based syscall ABI conversion for core file and process launch paths.
+- Decide and implement `PT_INTERP` support, or formally narrow the v0.4 DoD to static-only userland.
+- Re-test ring3 shell/session flow until SNSH is only an emergency path and not part of expected operator workflow.
+- Re-enable or formally defer ET_DYN isolated address-space work with documented rationale.
+- Run and pass a v0.4 validation sweep aligned with the actual DoD workflows.
+
+## Notes
+- Keep this file updated after every substantial change.
+- `State.md` currently exists but is empty; `status.md` is the active tracker for v0.4 closure.
+- Completed in this step: moved `USER_STACK_BASE` to high user VA (`0x0000_0000_7000_0000`) and verified `cargo check` passes.
+- Completed in this step: added validation readiness profiles (`--ready` => v0.3, `--ready-v04` => v0.4) and wired profile-aware readiness reporting.
+- In progress: syscall ABI migration started. `dispatch` now accepts pointer-based path arguments for `open/stat/getdents64` with selector fallback, and supports pointer-buffer mode for `read/write` while retaining legacy selector behavior.
+- In progress: syscall ABI migration expanded. `exec`/`spawn` now accept user C-string program names (legacy selector IDs still supported for compatibility).
+- In progress: syscall ABI migration expanded again. Custom `exec`/`spawn` now also accept optional user `argv` pointers (NULL-terminated `char**`) with bounded parsing.
+- In progress: syscall ABI migration expanded again. Custom `fstat` now supports optional user stat-buffer output (LinuxStat layout) while preserving legacy size return.
+- In progress: syscall ABI migration expanded again. Custom `getdents64` now prefers real fd + user-buffer semantics when a live descriptor is supplied, with legacy path-based fallback retained for compatibility.
+- In progress: ring3 shell launch hardening added. Init now tries multiple ring3 shell candidates (`configured`, `busybox ash`, `/bin/sh`, `/bin/ash`) before SNSH fallback.
+- In progress: PT_INTERP strategy refined. Ring3 shell launch now preflights absolute-path candidates and explicitly defers interpreter-backed binaries with clear logging instead of opaque exec failure loops.
+- In progress: Linux errno mapping improved for exec failures. PT_INTERP/ELF-format failures now map to `ENOEXEC` rather than generic `EINVAL` for clearer user-space semantics.
+- In progress: session control flow hardened. SNSH fallback is now conditional (only when ring3 shell launch fails); successful ring3 shell runs now return to login prompt instead of always dropping into SNSH.
+- In progress: ring3 launch fallback widened to include built-in `shell`/`/bin/shell` candidates before SNSH, improving non-PT_INTERP session viability.

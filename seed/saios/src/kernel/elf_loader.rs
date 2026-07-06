@@ -2,7 +2,7 @@ use crate::kernel::constants::{
     AT_ENTRY, AT_EXECFN, AT_NULL, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ,
     ELFCLASS64, ELFDATA2LSB, EM_X86_64, ET_DYN, ET_EXEC, EV_CURRENT, ELF_MAGIC,
     DT_NULL, DT_RELA, DT_RELASZ, DT_RELAENT, DT_RELACOUNT, R_X86_64_RELATIVE,
-    PF_R, PF_W, PF_X, PT_DYNAMIC, PT_LOAD,
+    PF_R, PF_W, PF_X, PT_DYNAMIC, PT_INTERP, PT_LOAD,
     USER_STACK_BASE, USER_STACK_PAGES,
 };
 use alloc::format;
@@ -14,7 +14,7 @@ use crate::saifs::Handle;
 use crate::vmm;
 
 const ET_EXEC_ISOLATED_ADDRESS_SPACE: bool = true;
-const ET_DYN_PROCESS_ADDRESS_SPACE: bool = true;
+const ET_DYN_PROCESS_ADDRESS_SPACE: bool = false;
 
 #[derive(Copy, Clone)]
 struct ElfHeader {
@@ -309,6 +309,7 @@ fn map_and_load(
     h: &ElfHeader,
     phs: &[ProgramHeader],
     base: u64,
+    clear_existing_mappings: bool,
 ) -> Result<LoadedImage, &'static str> {
     let mut ranges: Vec<MapRange> = Vec::new();
     let mut mapped_starts = Vec::new();
@@ -357,7 +358,7 @@ fn map_and_load(
             if (r.flags & vmm::FLAG_EXEC) != 0 { "X" } else { "-" },
         );
 
-        if h.e_type == ET_EXEC {
+        if clear_existing_mappings {
             // Remove any stale VMM record first (tracked unmap frees owned physical
             // pages and the mapping record), then clear any residual boot identity
             // PTE that the VMM did not create.
@@ -413,6 +414,23 @@ fn map_and_load(
         }
 
         let dst = checked_add(base, ph.p_vaddr, "elf: dst overflow")? as *mut u8;
+        let src_ptr = bytes[src_off..src_end].as_ptr() as u64;
+        let dst_ptr = dst as u64;
+        let cr3 = hal::arch::paging::read_cr3();
+        crate::console::println!(
+            "elf: copy detail src=0x{:x}-0x{:x} dst=0x{:x}-0x{:x} len=0x{:x} cr3=0x{:x}",
+            src_ptr,
+            src_ptr.saturating_add(src_len as u64),
+            dst_ptr,
+            dst_ptr.saturating_add(src_len as u64),
+            src_len,
+            cr3,
+        );
+        log_mapping("seg-src-begin", src_ptr);
+        log_mapping("seg-src-end", src_ptr.saturating_add(src_len as u64).saturating_sub(1));
+        log_mapping("seg-dst-begin", dst_ptr);
+        log_mapping("seg-dst-end", dst_ptr.saturating_add(src_len as u64).saturating_sub(1));
+        log_mapping("seg-kernel-rsp", current_rsp());
         unsafe {
             core::ptr::copy_nonoverlapping(bytes[src_off..src_end].as_ptr(), dst, src_len);
         }
@@ -531,7 +549,13 @@ fn map_initial_user_stack(
     let stack_size = (USER_STACK_PAGES as u64).saturating_mul(vmm::PAGE_SIZE);
     let stack_top = stack_start.saturating_add(stack_size);
 
-    let _ = vmm::unmap_pages_untracked(stack_start, USER_STACK_PAGES);
+    // Avoid untracked teardown of the low-half stack window here.
+    // Demoting a shared 2 MiB huge mapping to clear 0x700000 can drop unrelated
+    // low-half translations used by kernel-side loader state before user entry.
+    // A direct map attempt gives us a clean overlap error without collateral loss.
+    if vmm::inspect_mapping_current(stack_start).is_some() {
+        return Err("elf: user stack virtual range already mapped");
+    }
 
     let phys = pmm::alloc_pages(USER_STACK_PAGES).ok_or("elf: no physical memory for user stack")?;
     if let Err(e) = vmm::map_owned(
@@ -605,6 +629,25 @@ fn current_rsp() -> u64 {
     hal::arch::x86_64::cpu::read_rsp()
 }
 
+fn range_mapped_in_root(root_phys: u64, start: u64, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+
+    let page = vmm::PAGE_SIZE;
+    let mut current = align_down(start, page);
+    let end = start.saturating_add(len as u64);
+    let limit = align_up(end, page);
+    while current < limit {
+        match vmm::is_mapped_in_page_tables(root_phys, current) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return false,
+        }
+        current = current.saturating_add(page);
+    }
+    true
+}
+
 fn log_mapping(label: &str, virt: u64) {
     if let Some(info) = vmm::inspect_mapping_current(virt) {
         crate::console::println!(
@@ -660,11 +703,6 @@ fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> 
     Ok(code)
 }
 
-fn can_use_fresh_user_root() -> bool {
-    let (ks, _ke) = vmm::kernel_image_range();
-    ks >= vmm::KERNEL_VIRT_BASE
-}
-
 fn can_use_isolated_address_space() -> bool {
     crate::heap::dynamic_mappings_available()
 }
@@ -672,9 +710,23 @@ fn can_use_isolated_address_space() -> bool {
 pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'static str> {
     let handle = saifs::open(path).map_err(|_| "elf: open failed")?;
     let bytes = handle.read().map_err(|_| "elf: read failed")?;
+    let image_ptr = bytes.as_ptr() as u64;
+    crate::console::println!(
+        "elf: image ptr=0x{:x} len=0x{:x} cr3=0x{:x}",
+        image_ptr,
+        bytes.len(),
+        hal::arch::paging::read_cr3()
+    );
+    log_mapping("image-begin", image_ptr);
+    if !bytes.is_empty() {
+        log_mapping("image-end", image_ptr.saturating_add(bytes.len() as u64).saturating_sub(1));
+    }
 
     let header = parse_header(bytes.as_slice())?;
     let phs = parse_program_headers(bytes.as_slice(), &header)?;
+    if phs.iter().any(|ph| ph.p_type == PT_INTERP && ph.p_filesz != 0) {
+        return Err("elf: PT_INTERP executables are not supported yet");
+    }
     let base = runtime_base(&header, image_base);
     let use_isolated_exec =
         header.e_type == ET_EXEC && ET_EXEC_ISOLATED_ADDRESS_SPACE && can_use_isolated_address_space();
@@ -706,39 +758,57 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
 
     let use_isolated_dyn = header.e_type == ET_DYN
         && ET_DYN_PROCESS_ADDRESS_SPACE
-        && can_use_fresh_user_root()
         && can_use_isolated_address_space();
 
-    if use_isolated_exec || use_isolated_dyn {
-        let exec_root = if header.e_type == ET_DYN {
-            crate::console::println!("elf: ET_DYN using fresh user address-space root");
-            vmm::create_user_address_space_root()?
-        } else {
-            vmm::clone_current_address_space_root()?
-        };
+    let mut exec_root = if use_isolated_exec || use_isolated_dyn {
+        Some(vmm::clone_current_address_space_root()?)
+    } else {
+        None
+    };
+
+    if header.e_type == ET_DYN {
+        if let Some(root_phys) = exec_root {
+            let stack_probe_start = align_down(current_rsp().saturating_sub(vmm::PAGE_SIZE * 16), vmm::PAGE_SIZE);
+            let stack_probe_len = usize::try_from(vmm::PAGE_SIZE * 17).unwrap_or(0);
+            let image_ok = range_mapped_in_root(root_phys, bytes.as_ptr() as u64, bytes.len());
+            let stack_ok = range_mapped_in_root(root_phys, stack_probe_start, stack_probe_len);
+            if !image_ok || !stack_ok {
+                crate::console::println!(
+                    "elf: ET_DYN isolated root missing kernel source mappings (image={} stack={}); using shared bring-up path",
+                    image_ok as u8,
+                    stack_ok as u8
+                );
+                let _ = vmm::destroy_address_space_root(root_phys);
+                exec_root = None;
+            }
+        }
+    }
+
+    if let Some(exec_root) = exec_root {
+        if header.e_type == ET_DYN {
+            crate::console::println!(
+                "elf: ET_DYN using cloned address-space root with low-half cleanup"
+            );
+        }
 
         let run_result = vmm::with_address_space(exec_root, || {
             crate::console::println!(
                 "elf: phase=map_load et={} isolated",
                 if header.e_type == ET_DYN { "ET_DYN" } else { "ET_EXEC" }
             );
-            let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base)?;
+            let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base, true)?;
             let mut img = img;
 
-            let initial_rsp = if header.e_type == ET_EXEC {
-                match map_initial_user_stack(
-                    path,
-                    &header,
-                    phs.as_slice(),
-                    img.entry,
-                    base,
-                    &mut img.mapped_starts,
-                ) {
-                    Ok(rsp) => Some(rsp),
-                    Err(e) => { unmap_loaded(&img); return Err(e); }
-                }
-            } else {
-                None
+            let initial_rsp = match map_initial_user_stack(
+                path,
+                &header,
+                phs.as_slice(),
+                img.entry,
+                base,
+                &mut img.mapped_starts,
+            ) {
+                Ok(rsp) => Some(rsp),
+                Err(e) => { unmap_loaded(&img); return Err(e); }
             };
 
             let dyn_opt = match parse_dynamic(bytes.as_slice(), phs.as_slice(), base) {
@@ -783,27 +853,23 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
         }
         if header.e_type == ET_DYN && ET_DYN_PROCESS_ADDRESS_SPACE {
             crate::console::println!(
-                "elf: ET_DYN user-root path deferred (kernel still low-half); using shared bring-up path"
+                "elf: ET_DYN using shared bring-up path"
             );
         }
         crate::console::println!("elf: phase=map_load");
-        let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base)?;
+        let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base, false)?;
         let mut img = img;
 
-        let initial_rsp = if header.e_type == ET_EXEC {
-            match map_initial_user_stack(
-                path,
-                &header,
-                phs.as_slice(),
-                img.entry,
-                base,
-                &mut img.mapped_starts,
-            ) {
-                Ok(rsp) => Some(rsp),
-                Err(e) => { unmap_loaded(&img); return Err(e); }
-            }
-        } else {
-            None
+        let initial_rsp = match map_initial_user_stack(
+            path,
+            &header,
+            phs.as_slice(),
+            img.entry,
+            base,
+            &mut img.mapped_starts,
+        ) {
+            Ok(rsp) => Some(rsp),
+            Err(e) => { unmap_loaded(&img); return Err(e); }
         };
 
         let dyn_opt = match parse_dynamic(bytes.as_slice(), phs.as_slice(), base) {

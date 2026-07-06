@@ -14,6 +14,21 @@ struct RequiredGate {
     name: &'static str,
 }
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub enum ReadinessProfile {
+    V03,
+    V04,
+}
+
+impl ReadinessProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::V03 => "v0.3",
+            Self::V04 => "v0.4",
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 pub struct ReadinessGateStatus {
     pub label: &'static str,
@@ -21,7 +36,7 @@ pub struct ReadinessGateStatus {
     pub skipped: bool,
 }
 
-const REQUIRED_GATES: &[RequiredGate] = &[
+const REQUIRED_GATES_V03: &[RequiredGate] = &[
     RequiredGate {
         label: "Interrupts",
         category: "CPU",
@@ -79,6 +94,56 @@ const REQUIRED_GATES: &[RequiredGate] = &[
     },
 ];
 
+const REQUIRED_GATES_V04: &[RequiredGate] = &[
+    RequiredGate {
+        label: "VFS Open",
+        category: "Filesystem",
+        name: "open",
+    },
+    RequiredGate {
+        label: "VFS Read",
+        category: "Filesystem",
+        name: "read",
+    },
+    RequiredGate {
+        label: "VFS Write",
+        category: "Filesystem",
+        name: "write",
+    },
+    RequiredGate {
+        label: "VFS Direnum",
+        category: "Filesystem",
+        name: "directory enumeration",
+    },
+    RequiredGate {
+        label: "Mounts",
+        category: "Storage",
+        name: "mounted filesystems",
+    },
+    RequiredGate {
+        label: "Proc Spawn",
+        category: "Process",
+        name: "process creation",
+    },
+    RequiredGate {
+        label: "Proc Wait",
+        category: "Process",
+        name: "wait",
+    },
+    RequiredGate {
+        label: "Sys ABI",
+        category: "Syscall",
+        name: "stable ABI smoke",
+    },
+];
+
+fn required_gates(profile: ReadinessProfile) -> &'static [RequiredGate] {
+    match profile {
+        ReadinessProfile::V03 => REQUIRED_GATES_V03,
+        ReadinessProfile::V04 => REQUIRED_GATES_V04,
+    }
+}
+
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum TestStatus {
     Pass,
@@ -101,7 +166,7 @@ pub struct ValidateOptions {
     pub perf: bool,
     pub stress: bool,
     pub json: bool,
-    pub ready: bool,
+    pub readiness: Option<ReadinessProfile>,
 }
 
 impl ValidateOptions {
@@ -111,7 +176,7 @@ impl ValidateOptions {
             perf: false,
             stress: false,
             json: false,
-            ready: false,
+            readiness: None,
         };
 
         for arg in args {
@@ -120,7 +185,8 @@ impl ValidateOptions {
                 "--perf" => options.perf = true,
                 "--stress" => options.stress = true,
                 "--json" => options.json = true,
-                "--ready" => options.ready = true,
+                "--ready" => options.readiness = Some(ReadinessProfile::V03),
+                "--ready-v04" => options.readiness = Some(ReadinessProfile::V04),
                 "--help" | "-h" => return Err("help"),
                 _ => return Err("validate: unknown option"),
             }
@@ -177,6 +243,7 @@ pub struct ValidationReport {
     pub skipped: usize,
     pub health: usize,
     pub time_ms: u64,
+    pub readiness_profile: ReadinessProfile,
 }
 
 impl ValidationReport {
@@ -188,6 +255,7 @@ impl ValidationReport {
             skipped: 0,
             health: 100,
             time_ms: 0,
+            readiness_profile: ReadinessProfile::V03,
         }
     }
 
@@ -217,7 +285,7 @@ impl ValidationReport {
     }
 
     pub fn kernel_ready(&self) -> bool {
-        REQUIRED_GATES.iter().all(|gate| {
+        required_gates(self.readiness_profile).iter().all(|gate| {
             self.find(gate.category, gate.name)
                 .is_some_and(|result| result.status == TestStatus::Pass)
         })
@@ -232,7 +300,7 @@ impl ValidationReport {
     }
 
     pub fn readiness_passed(&self) -> usize {
-        REQUIRED_GATES
+        required_gates(self.readiness_profile)
             .iter()
             .filter(|gate| {
                 self.find(gate.category, gate.name)
@@ -242,7 +310,7 @@ impl ValidationReport {
     }
 
     pub fn readiness_gate_statuses(&self) -> Vec<ReadinessGateStatus> {
-        REQUIRED_GATES
+        required_gates(self.readiness_profile)
             .iter()
             .map(|gate| {
                 let status = self.find(gate.category, gate.name).map(|r| r.status);
@@ -320,12 +388,14 @@ pub fn run(options: &ValidateOptions) -> ValidationReport {
     let mut report = ValidationReport::new();
     let suite_start = now_ms();
 
-    let mut tests = if options.ready {
-        readiness_tests()
+    report.readiness_profile = options.readiness.unwrap_or(ReadinessProfile::V03);
+
+    let mut tests = if let Some(profile) = options.readiness {
+        readiness_tests(profile)
     } else {
         core_tests()
     };
-    if !options.ready {
+    if options.readiness.is_none() {
         if options.perf {
             tests.extend(perf_tests());
         }
@@ -400,8 +470,9 @@ pub fn print_report(report: &ValidationReport, options: &ValidateOptions) {
     console::println!(
         "Readiness Gates: {}/{}",
         report.readiness_passed(),
-        REQUIRED_GATES.len()
+        required_gates(report.readiness_profile).len()
     );
+    console::println!("Readiness Profile: {}", report.readiness_profile.as_str());
     console::println!(
         "Kernel Status: {}",
         if report.kernel_ready() {
@@ -414,7 +485,7 @@ pub fn print_report(report: &ValidationReport, options: &ValidateOptions) {
     console::println!("Readiness Gates");
     console::println!("--------------------------------");
     console::newline();
-    for gate in REQUIRED_GATES {
+    for gate in required_gates(report.readiness_profile) {
         let status = match report.find(gate.category, gate.name).map(|r| r.status) {
             Some(TestStatus::Pass) => "PASS",
             Some(TestStatus::Skip) => "SKIP",
@@ -434,6 +505,7 @@ pub fn print_help() {
     console::println!("  --perf      include performance measurements");
     console::println!("  --stress    include stress tests");
     console::println!("  --ready     run required kernel-readiness gates only");
+    console::println!("  --ready-v04 run v0.4 readiness gates only");
     console::println!("  --json      emit machine-readable JSON");
     console::println!("  --help      show this help text");
 }
@@ -444,6 +516,10 @@ fn print_json(report: &ValidationReport) {
     console::println!("  \"failed\": {},", report.failed);
     console::println!("  \"skipped\": {},", report.skipped);
     console::println!("  \"health\": {},", report.health);
+    console::println!(
+        "  \"readiness_profile\": \"{}\",",
+        report.readiness_profile.as_str()
+    );
     console::println!("  \"kernel_ready\": {},", report.kernel_ready());
     console::println!("  \"fully_clean\": {},", report.fully_clean());
     console::println!("  \"time_ms\": {},", report.time_ms);
@@ -466,8 +542,9 @@ fn print_json(report: &ValidationReport) {
     }
     console::println!("  ]");
     console::println!(", \"readiness\": [");
-    for (idx, gate) in REQUIRED_GATES.iter().enumerate() {
-        let comma = if idx + 1 == REQUIRED_GATES.len() {
+    let gates = required_gates(report.readiness_profile);
+    for (idx, gate) in gates.iter().enumerate() {
+        let comma = if idx + 1 == gates.len() {
             ""
         } else {
             ","
@@ -489,20 +566,32 @@ fn print_json(report: &ValidationReport) {
     console::println!("}}");
 }
 
-fn readiness_tests() -> Vec<TestCase> {
-    alloc::vec![
-        TestCase::new("CPU", "interrupt enable/disable", test_interrupt_toggle),
-        TestCase::new("Timer", "monotonic ticks", test_timer_monotonic),
-        TestCase::new("Scheduler", "sleep", test_sleep),
-        TestCase::new("Scheduler", "wake", test_wake),
-        TestCase::new("Memory", "page faults", test_page_faults),
-        TestCase::new("Memory", "invalid pointer handling", test_invalid_pointer),
-        TestCase::new("Console", "stderr", test_console_stderr),
-        TestCase::new("Filesystem", "rename", test_fs_rename),
-        TestCase::new("Filesystem", "move", test_fs_move),
-        TestCase::new("Drivers", "keyboard", test_driver_keyboard),
-        TestCase::new("Drivers", "mouse", test_driver_mouse),
-    ]
+fn readiness_tests(profile: ReadinessProfile) -> Vec<TestCase> {
+    match profile {
+        ReadinessProfile::V03 => alloc::vec![
+            TestCase::new("CPU", "interrupt enable/disable", test_interrupt_toggle),
+            TestCase::new("Timer", "monotonic ticks", test_timer_monotonic),
+            TestCase::new("Scheduler", "sleep", test_sleep),
+            TestCase::new("Scheduler", "wake", test_wake),
+            TestCase::new("Memory", "page faults", test_page_faults),
+            TestCase::new("Memory", "invalid pointer handling", test_invalid_pointer),
+            TestCase::new("Console", "stderr", test_console_stderr),
+            TestCase::new("Filesystem", "rename", test_fs_rename),
+            TestCase::new("Filesystem", "move", test_fs_move),
+            TestCase::new("Drivers", "keyboard", test_driver_keyboard),
+            TestCase::new("Drivers", "mouse", test_driver_mouse),
+        ],
+        ReadinessProfile::V04 => alloc::vec![
+            TestCase::new("Filesystem", "open", test_fs_open),
+            TestCase::new("Filesystem", "read", test_fs_read),
+            TestCase::new("Filesystem", "write", test_fs_write),
+            TestCase::new("Filesystem", "directory enumeration", test_fs_directory_enumeration),
+            TestCase::new("Storage", "mounted filesystems", test_storage_mounts),
+            TestCase::new("Process", "process creation", test_process_creation),
+            TestCase::new("Process", "wait", test_process_wait),
+            TestCase::new("Syscall", "stable ABI smoke", test_syscall_smoke),
+        ],
+    }
 }
 
 fn json_escape(input: &str) -> String {

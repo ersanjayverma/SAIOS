@@ -258,6 +258,32 @@ fn login_shell_args(shell: &str) -> &'static [&'static str] {
     }
 }
 
+fn shell_launch_plan(preferred: &str) -> Vec<(String, &'static [&'static str])> {
+    let mut plan: Vec<(String, &'static [&'static str])> = Vec::new();
+    let mut push_unique = |name: &str, args: &'static [&'static str]| {
+        if name.is_empty() {
+            return;
+        }
+        if plan.iter().any(|(existing, _)| existing == name) {
+            return;
+        }
+        plan.push((name.to_string(), args));
+    };
+
+    push_unique(preferred, login_shell_args(preferred));
+
+    // Common ring3 shell fallbacks before dropping to kernel SNSH.
+    push_unique("shell", &[]);
+    push_unique("/bin/shell", &[]);
+    push_unique("busybox", &["ash"]);
+    push_unique("/bin/busybox", &["ash"]);
+    push_unique("sh", &[]);
+    push_unique("/bin/sh", &[]);
+    push_unique("/bin/ash", &[]);
+
+    plan
+}
+
 fn prompt_line(prompt: &str) -> String {
     console::set_input_prompt(prompt);
     console::print(prompt);
@@ -314,44 +340,78 @@ pub fn boot_to_login_shell() -> ! {
 
     console::println!("init: ready (hostname={})", state.config.hostname);
 
-    let username;
-    let user_home;
     loop {
-        let user = prompt_line("login: ");
-        let pass = prompt_line("password: ");
-        if authenticate(&state, user.as_str(), pass.as_str()) {
-            user_home = state
-                .accounts
-                .iter()
-                .find(|a| a.username == user)
-                .map(|a| a.home.clone())
-                .unwrap_or_else(|| "/root".to_string());
-            username = user;
-            break;
+        let username;
+        let user_home;
+        loop {
+            let user = prompt_line("login: ");
+            let pass = prompt_line("password: ");
+            if authenticate(&state, user.as_str(), pass.as_str()) {
+                user_home = state
+                    .accounts
+                    .iter()
+                    .find(|a| a.username == user)
+                    .map(|a| a.home.clone())
+                    .unwrap_or_else(|| "/root".to_string());
+                username = user;
+                break;
+            }
+            console::println!("login: authentication failed");
         }
-        console::println!("login: authentication failed");
+
+        ensure_user_home_files(user_home.as_str());
+        let _ = crate::saifs::cd(user_home.as_str());
+
+        let shell_name = state.config.login_shell.as_str();
+        let shell_pid = process::ensure_shell_process(shell_name);
+        let _ = process::create_session(shell_pid);
+        let _ = process::set_foreground_process_group(shell_pid);
+        let mut launched = false;
+        let mut last_errno = 0i64;
+        for (candidate, candidate_args) in shell_launch_plan(shell_name) {
+            if candidate.contains('/') {
+                if let Ok(meta) = crate::shell::programs::binary_metadata_checked(candidate.as_str()) {
+                    if let Some(interp) = meta.interpreter.as_ref() {
+                        console::println!(
+                            "session: ring3 shell '{}' deferred (PT_INTERP='{}' not yet supported)",
+                            candidate,
+                            interp
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            match syscall::linux_execve_for_pid(shell_pid, candidate.as_str(), candidate_args) {
+                Ok(code) => {
+                    console::println!(
+                        "session: ring3 shell '{}' exited code={}",
+                        candidate,
+                        code
+                    );
+                    launched = true;
+                    break;
+                }
+                Err(errno) => {
+                    last_errno = errno;
+                    console::println!(
+                        "session: ring3 shell '{}' failed errno={} (trying fallback candidate)",
+                        candidate,
+                        errno
+                    );
+                }
+            }
+        }
+
+        if launched {
+            console::println!("session: returning to login prompt");
+            continue;
+        }
+
+        console::println!(
+            "session: ring3 shell launch failed (last errno={}) (fallback to kernel SNSH)",
+            last_errno
+        );
+        shell::run_shell_session(username.as_str(), None);
     }
-
-    ensure_user_home_files(user_home.as_str());
-    let _ = crate::saifs::cd(user_home.as_str());
-
-    let shell_name = state.config.login_shell.as_str();
-    let shell_pid = process::ensure_shell_process(shell_name);
-    let _ = process::create_session(shell_pid);
-    let _ = process::set_foreground_process_group(shell_pid);
-    let shell_args = login_shell_args(shell_name);
-    match syscall::linux_execve_for_pid(shell_pid, shell_name, shell_args) {
-        Ok(code) => {
-            console::println!("session: shell exited code={}", code);
-        }
-        Err(errno) => {
-            console::println!(
-                "session: ring3 shell '{}' failed errno={} (fallback to kernel SNSH)",
-                shell_name,
-                errno
-            );
-        }
-    }
-
-    shell::run_shell_session(username.as_str(), None);
 }
