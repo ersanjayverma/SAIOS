@@ -60,37 +60,6 @@ fn detect_nx_page_protection_policy() -> bool {
     features.nx && efer_nxe
 }
 
-type DescriptorTablePtr = hal::arch::x86_64::cpu::DescriptorTablePtr;
-
-fn read_rsp() -> u64 {
-    hal::arch::x86_64::cpu::read_rsp()
-}
-
-fn read_rip() -> u64 {
-    hal::arch::x86_64::cpu::read_rip()
-}
-
-fn read_idt_ptr() -> DescriptorTablePtr {
-    hal::arch::x86_64::cpu::read_idt_ptr()
-}
-
-fn read_gdt_ptr() -> DescriptorTablePtr {
-    hal::arch::x86_64::cpu::read_gdt_ptr()
-}
-
-#[inline(never)]
-fn late_cr3_smoke_test() {
-    // Minimal post-switch probe: instruction stream, global data, and stack.
-    let mut stack_word: u64 = 0x5A5A_A5A5_1122_3344;
-    let marker_ptr = &GLOBAL_ALLOCATOR as *const _ as *const u8;
-    unsafe {
-        let marker = core::ptr::read_volatile(marker_ptr);
-        stack_word ^= marker as u64;
-        core::ptr::write_volatile(&mut stack_word as *mut u64, stack_word.rotate_left(7));
-        core::hint::black_box(stack_word);
-    }
-}
-
 #[global_allocator]
 static GLOBAL_ALLOCATOR: heap::KernelHeapAllocator = heap::KernelHeapAllocator;
 
@@ -132,7 +101,7 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
     // Physical kernel image starts at the boot trampoline (KERNEL_PHYS_BASE)
     // and ends where the higher-half sections end (kernel_vma_end - offset).
     let kernel_start = KERNEL_PHYS_BASE;
-    let kernel_end = kernel_vma_end.saturating_sub(vmm::KERNEL_IMAGE_MIRROR_BASE - KERNEL_PHYS_BASE);
+    let kernel_end = kernel_vma_end.wrapping_sub(vmm::KERNEL_IMAGE_MIRROR_BASE);
     let boot_info_ptr = boot_info as *const SaiosBootInfo as u64;
     let boot_info_size = size_of::<SaiosBootInfo>();
 
@@ -142,7 +111,7 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
     // ELF overlap checks compare against where the kernel actually executes.
     vmm::set_kernel_image_range(kernel_vma_start, kernel_vma_end);
 
-    let (_prepared_kernel_pml4, active_cr3, vmm_bootstrap_ok) =
+    let (_prepared_kernel_pml4, active_cr3, _vmm_bootstrap_ok) =
         match vmm::bootstrap_kernel_page_tables(
             framebuffer_info.base,
             framebuffer_info.size,

@@ -170,22 +170,44 @@ global_asm!(
     ".byte 0",
     ".section .text.boot, \"ax\"",
 
-    ".global hal_enter_user_mode_recoverable",
+ ".global hal_enter_user_mode_recoverable",
     "hal_enter_user_mode_recoverable:",
-    // SysV args: rdi=entry, rsi=user_rsp, rdx=rflags, rcx=user_ss, r8=user_cs
+    // SysV args:
+    // rdi = user RIP
+    // rsi = user RSP
+    // rdx = RFLAGS
+    // rcx = user SS
+    // r8  = user CS
+
     "mov [rip + hal_user_fault_return_rsp], rsp",
     "lea rax, [rip + 2f]",
     "mov [rip + hal_user_fault_return_rip], rax",
     "mov byte ptr [rip + hal_user_fault_return_active], 1",
+
+    // Build IRET frame
     "push rcx", // SS
     "push rsi", // RSP
     "push rdx", // RFLAGS
     "push r8",  // CS
     "push rdi", // RIP
+
+    // DEBUG: output 'B' to COM1 before iretq
+    "mov dx, 0x3F8",
+    "mov al, 'B'",
+    "out dx, al",
+
     "xor eax, eax",
     "iretq",
+
+    // Reached only if recovery path redirects execution here
     "2:",
     "mov byte ptr [rip + hal_user_fault_return_active], 0",
+
+    // DEBUG: output 'A' after recovery
+    "mov dx, 0x3F8",
+    "mov al, 'A'",
+    "out dx, al",
+
     "mov eax, 1",
     "ret",
 
@@ -323,7 +345,6 @@ pub unsafe fn enter_user_mode(entry: u64, user_rsp: u64) -> bool {
         guard_end,
     ));
 
-    crate::arch::x86_64::console::_put_char_force('J');
 
     unsafe {
         hal_enter_user_mode_recoverable(entry, user_rsp, rflags, user_ss, user_cs) != 0
