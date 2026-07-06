@@ -6,11 +6,12 @@ use hal::arch::x86_64::sync::StaticCell;
 
 use crate::console;
 use crate::kernel::process;
+use crate::kernel::syscall;
 use crate::saifs;
 use crate::shell;
 
 const DEFAULT_INIT_SCRIPT: &str = "/system/init";
-const DEFAULT_LOGIN_SHELL: &str = "busybox";
+const DEFAULT_LOGIN_SHELL: &str = "ash";
 const DEFAULT_ROOT_USER: &str = "root";
 const DEFAULT_ROOT_PASSWORD: &str = "root";
 
@@ -251,7 +252,7 @@ fn authenticate(state: &RuntimeState, username: &str, password: &str) -> bool {
 
 fn login_shell_args(shell: &str) -> &'static [&'static str] {
     if shell.eq_ignore_ascii_case("busybox") {
-        &["sh"]
+        &["ash"]
     } else {
         &[]
     }
@@ -334,21 +335,20 @@ pub fn boot_to_login_shell() -> ! {
     ensure_user_home_files(user_home.as_str());
     let _ = crate::saifs::cd(user_home.as_str());
 
-    let shell_pid = process::ensure_shell_process(state.config.login_shell.as_str());
+    let shell_name = state.config.login_shell.as_str();
+    let shell_pid = process::ensure_shell_process(shell_name);
     let _ = process::create_session(shell_pid);
     let _ = process::set_foreground_process_group(shell_pid);
-
-    let shell_name = state.config.login_shell.as_str();
     let shell_args = login_shell_args(shell_name);
-    match process::exec_from(Some(shell_pid), shell_name, shell_args, &[]) {
+    match syscall::linux_execve_for_pid(shell_pid, shell_name, shell_args) {
         Ok(code) => {
             console::println!("session: shell exited code={}", code);
         }
-        Err(e) => {
+        Err(errno) => {
             console::println!(
-                "session: ring3 shell '{}' failed: {} (fallback to kernel SNSH)",
+                "session: ring3 shell '{}' failed errno={} (fallback to kernel SNSH)",
                 shell_name,
-                e
+                errno
             );
         }
     }

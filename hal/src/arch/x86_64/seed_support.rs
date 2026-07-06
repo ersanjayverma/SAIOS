@@ -17,6 +17,92 @@ struct StackGuard([u8; USER_TRANSITION_GUARD_SIZE]);
 static mut USER_TRANSITION_KERNEL_STACK: AlignedStack = AlignedStack([0; USER_TRANSITION_STACK_SIZE]);
 static mut USER_TRANSITION_KERNEL_STACK_GUARD: StackGuard = StackGuard([0; USER_TRANSITION_GUARD_SIZE]);
 
+const PT_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+fn translate_virtual_to_physical(virt: u64) -> Option<u64> {
+    let cr3 = crate::arch::x86_64::paging::read_cr3();
+    let l4 = ((virt >> 39) & 0x1ff) as usize;
+    let l3 = ((virt >> 30) & 0x1ff) as usize;
+    let l2 = ((virt >> 21) & 0x1ff) as usize;
+    let l1 = ((virt >> 12) & 0x1ff) as usize;
+    let page_off = virt & 0xfff;
+
+    // SAFETY: Reads live page tables from the current CR3 to produce diagnostics.
+    let pml4e = unsafe { *((cr3 & PT_ADDR_MASK) as *const u64).add(l4) };
+    if (pml4e & 0x1) == 0 {
+        return None;
+    }
+
+    // SAFETY: pml4e present; next-level table address comes from HW-defined entry bits.
+    let pdpte = unsafe { *((pml4e & PT_ADDR_MASK) as *const u64).add(l3) };
+    if (pdpte & 0x1) == 0 {
+        return None;
+    }
+    if (pdpte & 0x80) != 0 {
+        let base = pdpte & 0x000F_FFFF_C000_0000;
+        return Some(base | (virt & 0x3fff_ffff));
+    }
+
+    // SAFETY: pdpte present and points to the next page-table level.
+    let pde = unsafe { *((pdpte & PT_ADDR_MASK) as *const u64).add(l2) };
+    if (pde & 0x1) == 0 {
+        return None;
+    }
+    if (pde & 0x80) != 0 {
+        let base = pde & 0x000F_FFFF_FFE0_0000;
+        return Some(base | (virt & 0x1f_ffff));
+    }
+
+    // SAFETY: pde present and points to a normal PT page.
+    let pte = unsafe { *((pde & PT_ADDR_MASK) as *const u64).add(l1) };
+    if (pte & 0x1) == 0 {
+        return None;
+    }
+
+    Some((pte & PT_ADDR_MASK) | page_off)
+}
+
+fn read_user_u8_checked(virt: u64) -> Option<u8> {
+    let phys = translate_virtual_to_physical(virt)?;
+    // SAFETY: Only read after translation confirms a present mapping.
+    Some(unsafe { core::ptr::read_volatile(phys as *const u8) })
+}
+
+fn read_user_u64_checked(virt: u64) -> Option<u64> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    while shift < 64 {
+        let b = read_user_u8_checked(virt.wrapping_add((shift / 8) as u64))? as u64;
+        value |= b << shift;
+        shift += 8;
+    }
+    Some(value)
+}
+
+fn dump_user_stack_qwords(rsp: u64) {
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[user-rsp] dump64 base={:#x}\n",
+        rsp
+    ));
+    let mut i = 0u64;
+    while i < 8 {
+        let addr = rsp.wrapping_add(i * 8);
+        if let Some(word) = read_user_u64_checked(addr) {
+            crate::arch::x86_64::console::_print_force(format_args!(
+                "[user-rsp] {:#018x}: {:#018x}\n",
+                addr,
+                word
+            ));
+        } else {
+            crate::arch::x86_64::console::_print_force(format_args!(
+                "[user-rsp] {:#018x}: <unmapped>\n",
+                addr
+            ));
+        }
+        i += 1;
+    }
+}
+
 global_asm!(
     // Boot entry trampoline and static boot page tables.
     ".section .boot, \"ax\"",
@@ -344,6 +430,8 @@ pub unsafe fn enter_user_mode(entry: u64, user_rsp: u64) -> bool {
         guard_base,
         guard_end,
     ));
+
+    dump_user_stack_qwords(user_rsp);
 
 
     unsafe {

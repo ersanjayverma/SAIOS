@@ -144,6 +144,15 @@ pub unsafe extern "C" fn saios_kernel_main(boot_info: *const SaiosBootInfo) -> !
         panic!("VMM: failed to initialize kernel virtual memory manager");
     }
 
+    // Decouple the high-half kernel PD from the shared boot_pd0 so that
+    // splitting higher-half huge pages no longer destroys low-half identity
+    // mappings for the same physical 2 MiB window.
+    if let Err(e) = vmm::unshare_boot_kernel_pd() {
+        hal::arch::x86_64::console::_print(format_args!(
+            "kernel: failed to unshare boot PD: {}\n", e
+        ));
+    }
+
 
 
     heap::init();

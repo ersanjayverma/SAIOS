@@ -471,12 +471,16 @@ fn jump_to_entry(entry: u64) -> i32 {
 }
 
 fn jump_to_entry_with_rsp_recoverable(entry: u64, rsp: u64) -> bool {
-    unsafe {
+    let returned = unsafe {
         let kernel_rsp0 = hal::arch::x86_64::seed_support::user_transition_kernel_rsp0();
         hal::arch::x86_64::tss::set_rsp0(kernel_rsp0);
         hal::arch::x86_64::syscall::set_kernel_rsp0(kernel_rsp0);
         hal::arch::x86_64::seed_support::enter_user_mode(entry, rsp)
+    };
+    if returned {
+        crate::console::println!("[iretq] returned via fault-recovery path");
     }
+    returned
 }
 
 fn stack_push_bytes(mut sp: u64, bytes: &[u8]) -> Result<u64, &'static str> {

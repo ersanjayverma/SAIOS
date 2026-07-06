@@ -749,7 +749,16 @@ pub fn spawn_from(
 fn candidate_program_paths(name: &str) -> Vec<String> {
     let mut out = Vec::new();
     if name.contains('/') {
-        out.push(name.to_string());
+        if name.starts_with('/') {
+            out.push(name.to_string());
+        } else {
+            let cwd = saifs::pwd();
+            if cwd == "/" {
+                out.push(alloc::format!("/{}", name));
+            } else {
+                out.push(alloc::format!("{}/{}", cwd.trim_end_matches('/'), name));
+            }
+        }
         return out;
     }
 

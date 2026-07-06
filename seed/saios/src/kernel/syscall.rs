@@ -477,6 +477,18 @@ fn read_user_argv(argv_ptr: u64, max_args: usize) -> Result<Vec<String>, i64> {
     Ok(out)
 }
 
+fn map_exec_error_to_linux(err: &'static str) -> i64 {
+    if err == "exec: program not found" {
+        LINUX_ENOENT
+    } else {
+        LINUX_EINVAL
+    }
+}
+
+pub fn linux_execve_for_pid(pid: u64, path: &str, argv: &[&str]) -> Result<i32, i64> {
+    process::exec_from(Some(pid), path, argv, &[]).map_err(map_exec_error_to_linux)
+}
+
 fn write_user_bytes(ptr: u64, data: &[u8]) -> Result<(), i64> {
     let dst = unsafe { user_slice_mut(ptr, data.len())? };
     dst.copy_from_slice(data);
@@ -1457,6 +1469,9 @@ fn linux_clock_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<u64, i64> {
     linux_nanosleep(req_ptr, rem_ptr)
 }
 
+static FIRST_SYSCALL_LOGGED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn saios_linux_syscall(
     nr: u64,
@@ -1467,6 +1482,15 @@ pub extern "C" fn saios_linux_syscall(
     a4: u64,
     a5: u64,
 ) -> i64 {
+    if FIRST_SYSCALL_LOGGED
+        .compare_exchange(false, true,
+            core::sync::atomic::Ordering::Relaxed,
+            core::sync::atomic::Ordering::Relaxed)
+        .is_ok()
+    {
+        crate::console::println!("[syscall] first ring-3 syscall: nr={}", nr);
+    }
+
     let pid = match active_linux_pid() {
         Ok(pid) => pid,
         Err(code) => return code,
@@ -1545,9 +1569,7 @@ pub extern "C" fn saios_linux_syscall(
                 Err(code) => return code,
             };
             let arg_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-            process::exec_from(Some(pid), path.as_str(), arg_refs.as_slice(), &[])
-                .map(|code| code as u64)
-                .map_err(|_| LINUX_ENOENT)
+            linux_execve_for_pid(pid, path.as_str(), arg_refs.as_slice()).map(|code| code as u64)
         }
         60 => dispatch_custom(SyscallNumber::Exit, [a0, 0, 0, 0, 0, 0], pid),
         61 => dispatch_wait4(pid, a0, a2, a1),

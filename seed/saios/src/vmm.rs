@@ -386,9 +386,28 @@ fn map_page_hw(virt: VirtAddr, phys: PhysAddr, flags: u64) -> Result<(), &'stati
         pd.entries[l2].set_page(new_page, nonleaf);
         unsafe { (&mut *pt_table_ptr(l4, l3, l2)).clear() };
     } else if (pd.entries[l2].0 & paging::FLAG_HUGE) != 0 {
-        let new_page = pmm::alloc_page().ok_or("vmm: out of memory for pt")?;
+        // The existing PDE is a 2 MiB huge page. Demote it to a 4 KiB PT,
+        // preserving all 512 PTEs from the original identity mapping so that
+        // any code relying on the identity window is not broken.
+        let huge_pde = pd.entries[l2].0;
+        let huge_phys_base = huge_pde & 0x000F_FFFF_FFE0_0000; // 2 MiB aligned
+        // Carry semantic flags from the huge PDE to the new PTEs (strip PS/Huge bit).
+        let pte_flags = huge_pde & !(paging::FLAG_HUGE) & !(ADDR_MASK);
+
+        let new_page = pmm::alloc_page().ok_or("vmm: out of memory for pt (huge split)")?;
         pd.entries[l2].set_page(new_page, nonleaf);
-        unsafe { (&mut *pt_table_ptr(l4, l3, l2)).clear() };
+
+        crate::console::println!(
+            "vmm: split huge PDE l2={} virt={:#x} huge_base={:#x} new_pt={:#x}",
+            l2, virt, huge_phys_base, new_page
+        );
+
+        // Populate all 512 PTEs so the entire 2 MiB identity region stays accessible.
+        let pt = unsafe { &mut *pt_table_ptr(l4, l3, l2) };
+        for i in 0..512usize {
+            let entry_phys = huge_phys_base.saturating_add((i as u64).saturating_mul(PAGE_SIZE));
+            pt.entries[i].0 = entry_phys | pte_flags | paging::FLAG_PRESENT;
+        }
         flush_current_address_space();
     } else {
         pd.entries[l2].set_flags(nonleaf & paging::FLAG_USER);
@@ -961,6 +980,48 @@ pub fn init(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
         } else {
             KERNEL_VIRT_BASE
         };
+        Ok(())
+    })
+}
+
+/// Breaks the shared-PD dependency between the higher-half kernel virtual
+/// space and the low-half identity window.
+///
+/// The boot assembly points both `boot_pdpt_low[0]` and `boot_pdpt_high[510]`
+/// at the same `boot_pd0` static table.  Any `map_page_hw` call that splits a
+/// huge entry in `boot_pd0` via the high-half address simultaneously destroys
+/// the corresponding 2 MiB slice of the low-half identity map.  Fixing that
+/// requires a private PD for the high-half that is a copy of `boot_pd0` at
+/// init time, so later modifications to it are invisible to the low-half path.
+///
+/// Must be called immediately after [`init`] and before any other VMM
+/// operation that allocates kernel virtual addresses.
+pub fn unshare_boot_kernel_pd() -> Result<(), &'static str> {
+    with_state_mut(|state| {
+        if !state.initialized {
+            return Err("vmm: not initialized");
+        }
+
+        // L4=511, L3=510 is the high-half kernel PDPT entry that currently
+        // points to boot_pd0 (shared with the low-half L4=0, L3=0 path).
+        // The recursive virtual address for that PD is pd_table_ptr(511, 510).
+        let src_pd = unsafe { &*pd_table_ptr(511, 510) };
+
+        // Allocate and populate a private copy.
+        let new_pd_phys = pmm::alloc_page().ok_or("vmm: out of memory for private kernel PD")?;
+        let dst_pd = unsafe { &mut *(new_pd_phys as *mut paging::Table) };
+        for i in 0..paging::ENTRY_COUNT {
+            dst_pd.entries[i] = src_pd.entries[i];
+        }
+
+        // Rewire boot_pdpt_high[510] to the private PD.
+        let pdpt_high = unsafe { &mut *pdpt_table_ptr(511) };
+        pdpt_high.entries[510].set_page(new_pd_phys, paging::FLAG_WRITABLE);
+
+        // Flush TLB so the new PDPT entry takes effect immediately.
+        flush_current_address_space();
+
+        let _ = state; // ensure borrow is held across the unsafe ops
         Ok(())
     })
 }

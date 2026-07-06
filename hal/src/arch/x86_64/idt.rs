@@ -595,6 +595,47 @@ extern "C" fn page_fault(error_code: usize, stack_ptr: usize) -> usize {
         saved_rsp,
         cr3
     ));
+
+    // Walk the page tables from the live CR3 for the faulting virtual address.
+    {
+        const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+        let va = fault_addr as u64;
+        let l4 = ((va >> 39) & 0x1ff) as usize;
+        let l3 = ((va >> 30) & 0x1ff) as usize;
+        let l2 = ((va >> 21) & 0x1ff) as usize;
+        let l1 = ((va >> 12) & 0x1ff) as usize;
+        let cr3_phys = cr3 & ADDR_MASK;
+
+        let pml4e = unsafe { *((cr3_phys as *const u64).add(l4)) };
+        crate::arch::x86_64::console::_print_force(format_args!(
+            "[pf-walk] l4={} pml4e={:#018x}\n", l4, pml4e
+        ));
+
+        if pml4e & 0x1 != 0 {
+            let pdpt = (pml4e & ADDR_MASK) as *const u64;
+            let pdpte = unsafe { *pdpt.add(l3) };
+            crate::arch::x86_64::console::_print_force(format_args!(
+                "[pf-walk] l3={} pdpte={:#018x}\n", l3, pdpte
+            ));
+
+            if pdpte & 0x1 != 0 && pdpte & 0x80 == 0 {
+                let pd = (pdpte & ADDR_MASK) as *const u64;
+                let pde = unsafe { *pd.add(l2) };
+                crate::arch::x86_64::console::_print_force(format_args!(
+                    "[pf-walk] l2={} pde={:#018x} huge={}\n",
+                    l2, pde, (pde & 0x80 != 0) as u8
+                ));
+
+                if pde & 0x1 != 0 && pde & 0x80 == 0 {
+                    let pt = (pde & ADDR_MASK) as *const u64;
+                    let pte = unsafe { *pt.add(l1) };
+                    crate::arch::x86_64::console::_print_force(format_args!(
+                        "[pf-walk] l1={} pte={:#018x}\n", l1, pte
+                    ));
+                }
+            }
+        }
+    }
     let present = (error_code & (1 << 0)) != 0;
     let write = (error_code & (1 << 1)) != 0;
     let user = (error_code & (1 << 2)) != 0;
