@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-
 # Robust UEFI ISO builder for SAIOS.
 #
 # Produces an ISO with a proper UEFI El Torito entry backed by a FAT EFI image
