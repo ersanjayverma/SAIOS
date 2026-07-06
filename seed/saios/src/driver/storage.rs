@@ -14,8 +14,22 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use hal::arch::x86_64::sync::StaticCell;
 
 use crate::driver::ahci;
+use crate::driver::fat32 as fat32_driver;
 use crate::kernel::device::{self, DeviceStatus};
 use crate::pci;
+
+/// Adapts a `DiskDevice` to the `fat32_driver::BlockIo` trait so all FAT32
+/// driver calls can use a single mutable reference instead of two closures.
+struct DiskIo<'a>(&'a mut DiskDevice);
+
+impl<'a> fat32_driver::BlockIo for DiskIo<'a> {
+    fn read_sector(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        self.0.block.read_sector(lba, buf)
+    }
+    fn write_sector(&mut self, lba: u64, buf: &[u8]) -> Result<(), &'static str> {
+        self.0.block.write_sector(lba, buf)
+    }
+}
 
 const FAT_STORE_MAGIC: &[u8; 8] = b"SAFAT32\0";
 const EXT4_STORE_MAGIC: &[u8; 8] = b"SAEXT4\0\0";
@@ -196,6 +210,20 @@ struct MountedFs {
     nodes: Vec<FsNode>,
 }
 
+/// Per-volume FAT32 native-driver state (superblock + FAT cache).
+#[derive(Clone)]
+struct Fat32VolumeCache {
+    volume: String,
+    sb: fat32_driver::Fat32Superblock,
+    fat: fat32_driver::FatCache,
+}
+
+impl Fat32VolumeCache {
+    fn new(volume: String, sb: fat32_driver::Fat32Superblock) -> Self {
+        Self { volume, sb, fat: fat32_driver::FatCache::new() }
+    }
+}
+
 #[derive(Clone)]
 struct StorageState {
     initialized: bool,
@@ -203,6 +231,7 @@ struct StorageState {
     disks: Vec<DiskDevice>,
     mounted: Vec<MountedFs>,
     ext4_caches: Vec<Ext4VolumeCache>,
+    fat32_caches: Vec<Fat32VolumeCache>,
     diagnostics: Vec<String>,
 }
 
@@ -214,6 +243,7 @@ impl StorageState {
             disks: Vec::new(),
             mounted: Vec::new(),
             ext4_caches: Vec::new(),
+            fat32_caches: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -1132,13 +1162,22 @@ fn ensure_volume_mounted(
     }
 
     // Native ext4: all I/O is demand-paged through the per-volume cache.
-    // Managed/store ext4 volumes still need the mounted node tree loaded.
     if fs == FilesystemKind::Ext4 {
         let is_native = ext4_with_volume(state, volume, |disk, part| {
             ext4_load_superblock(disk, part)
         })
         .is_ok();
         if is_native {
+            return Ok(());
+        }
+    }
+
+    // Native FAT32/FAT16: all I/O is handled by the fat32 driver.
+    // fat32_with_cache_mut probes the BPB; if probe fails the partition
+    // is a managed-store FAT32 volume and we fall through.
+    if matches!(fs, FilesystemKind::Fat32 | FilesystemKind::Fat16 | FilesystemKind::Fat64 | FilesystemKind::Fat128) {
+        let probe_ok = fat32_with_cache_mut(state, volume, |_disk, _part, _cache| Ok(())).is_ok();
+        if probe_ok {
             return Ok(());
         }
     }
@@ -2153,7 +2192,16 @@ fn ext4_load_inode(
     let group = ino_index / sb.inodes_per_group;
     let index = ino_index % sb.inodes_per_group;
 
-    let gd = ext4_read_group_desc(disk, part, sb, group)?;
+    let gd = match ext4_read_group_desc(disk, part, sb, group) {
+        Ok(g) => g,
+        Err(e) => {
+            crate::console::println!(
+                "ext4: inode {} group {} gd read failed: {}",
+                inode_no, group, e
+            );
+            return Err(e);
+        }
+    };
     let inode_table_lo = le_u32(gd.as_slice(), 8).ok_or("storage: ext4 group desc truncated")?;
     let inode_table_hi = if sb.desc_size >= 64 {
         le_u32(gd.as_slice(), 40).unwrap_or(0)
@@ -2164,7 +2212,21 @@ fn ext4_load_inode(
     let inode_offset = inode_table_block
         .saturating_mul(sb.block_size)
         .saturating_add((index as u64).saturating_mul(sb.inode_size as u64));
-    let raw = read_partition_at(disk, part, inode_offset, sb.inode_size as usize)?;
+    let raw = match read_partition_at(disk, part, inode_offset, sb.inode_size as usize) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::console::println!(
+                "ext4: inode {} offset {:#x} sectors {}-{} of {} read failed: {}",
+                inode_no,
+                inode_offset,
+                inode_offset / disk.block.sector_size() as u64,
+                (inode_offset + sb.inode_size as u64 - 1) / disk.block.sector_size() as u64,
+                part.sector_count,
+                e
+            );
+            return Err(e);
+        }
+    };
     if raw.len() < 128 {
         return Err("storage: ext4 inode truncated");
     }
@@ -2946,6 +3008,113 @@ fn ext4_invalidate_volume_cache(state: &mut StorageState, volume: &str) {
     }
 }
 
+// ── FAT32 native volume helpers ───────────────────────────────────────────
+
+/// Build a closure-based sector reader for a given disk + partition start LBA.
+/// Passes `(absolute_lba, &mut buf)` to the provided AHCI read function.
+macro_rules! fat32_reader {
+    ($disk:expr, $part:expr) => {{
+        |lba: u64, buf: &mut [u8]| -> Result<(), &'static str> {
+            // lba is already absolute (driver::fat32 adds part_start_lba internally)
+            $disk.block.read_sector(lba, buf)
+        }
+    }};
+}
+
+macro_rules! fat32_writer {
+    ($disk:expr, $part:expr) => {{
+        |lba: u64, buf: &[u8]| -> Result<(), &'static str> {
+            $disk.block.write_sector(lba, buf)
+        }
+    }};
+}
+
+/// Access (or lazily initialise) the FAT32 per-volume cache plus disk/partition.
+fn fat32_with_cache_mut<R>(
+    state: &mut StorageState,
+    volume: &str,
+    f: impl FnOnce(
+        &mut DiskDevice,
+        &Partition,
+        &mut Fat32VolumeCache,
+    ) -> Result<R, &'static str>,
+) -> Result<R, &'static str> {
+    let (disk_name, part_name) = resolve_volume_owner(state, volume)?;
+
+    // Lazy-init: probe superblock if cache not yet present.
+    if !state.fat32_caches.iter().any(|c| c.volume.eq_ignore_ascii_case(volume)) {
+        let disk_idx = state.disks.iter().position(|d| d.name.eq_ignore_ascii_case(&disk_name))
+            .ok_or("storage: disk missing")?;
+        let part_idx = state.disks[disk_idx].partitions.iter().position(|p| p.name.eq_ignore_ascii_case(&part_name))
+            .ok_or("storage: partition missing")?;
+        let part_start = state.disks[disk_idx].partitions[part_idx].start_lba;
+        let sector_size = state.disks[disk_idx].block.sector_size() as usize;
+        let disk_ref = &mut state.disks[disk_idx];
+        let sb = {
+            let mut io = DiskIo(disk_ref);
+            fat32_driver::probe(part_start, sector_size, &mut io)
+                .ok_or("storage: FAT32 superblock probe failed")?
+        };
+        state.fat32_caches.push(Fat32VolumeCache::new(volume.to_string(), sb));
+    }
+
+    let cache_idx = state.fat32_caches.iter().position(|c| c.volume.eq_ignore_ascii_case(volume))
+        .ok_or("storage: fat32 cache unavailable")?;
+    let disk_idx = state.disks.iter().position(|d| d.name.eq_ignore_ascii_case(&disk_name))
+        .ok_or("storage: disk missing")?;
+    let part_idx = state.disks[disk_idx].partitions.iter().position(|p| p.name.eq_ignore_ascii_case(&part_name))
+        .ok_or("storage: partition missing")?;
+
+    let StorageState { ref mut disks, ref mut fat32_caches, .. } = *state;
+    let cache = &mut fat32_caches[cache_idx];
+    let disk = &mut disks[disk_idx];
+    let part = &disk.partitions[part_idx].clone();
+
+    // Ensure FAT is loaded.
+    let part_start = part.start_lba;
+    {
+        let sb = cache.sb;
+        let fat = &mut cache.fat;
+        if !fat.is_loaded() {
+            let mut io = DiskIo(disk);
+            fat.load(&sb, part_start, &mut io)?;
+        }
+    }
+
+    f(disk, part, cache)
+}
+
+fn fat32_invalidate_volume_cache(state: &mut StorageState, volume: &str) {
+    if let Some(cache) = state.fat32_caches.iter_mut().find(|c| c.volume.eq_ignore_ascii_case(volume)) {
+        let sb = cache.sb;
+        let name = cache.volume.clone();
+        *cache = Fat32VolumeCache::new(name, sb);
+    }
+}
+
+/// Probe whether a volume has a valid native FAT32 superblock.
+#[allow(dead_code)]
+fn fat32_probe_volume(state: &StorageState, volume: &str) -> bool {
+    let (disk_name, part_name) = match resolve_volume_owner(state, volume) {
+        Ok(v) => v, Err(_) => return false,
+    };
+    let disk = match state.disks.iter().find(|d| d.name.eq_ignore_ascii_case(&disk_name)) {
+        Some(d) => d, None => return false,
+    };
+    let part = match disk.partitions.iter().find(|p| p.name.eq_ignore_ascii_case(&part_name)) {
+        Some(p) => p, None => return false,
+    };
+    // Check if already cached.
+    if state.fat32_caches.iter().any(|c| c.volume.eq_ignore_ascii_case(volume)) {
+        return true;
+    }
+    // Quick check: can we probe the superblock?
+    // (read-only borrow, can't easily call probe here without mut disk – use volume filesystem hint)
+    let vol = state.volumes.iter().find(|v| v.name.eq_ignore_ascii_case(volume));
+    matches!(vol.map(|v| v.filesystem), Some(FilesystemKind::Fat32) | Some(FilesystemKind::Fat16))
+        && part.sector_count > 0
+}
+
 // ── cache-aware low-level ext4 helpers ──────────────────────────────────────
 
 /// Read a filesystem block, using the block cache to avoid redundant disk I/O.
@@ -3134,7 +3303,14 @@ fn ext4_htree_enumerate_leaves(
         return Ok(Vec::new());
     }
 
-    let indirect_levels = *root.get(26).unwrap_or(&0); // dx_root_info.indirect_levels
+    // dx_root layout:
+    //   0-11:  '.' entry  (fake_dirent 8 B + name 4 B)
+    //   12-23: '..' entry (fake_dirent 8 B + name 4 B)
+    //   24-31: dx_root_info { reserved_zero:4, hash_version:1, info_length:1,
+    //                         indirect_levels:1, unused_flags:1 }
+    //   32-35: dx_countlimit { limit:2, count:2 }
+    //   36+:   dx_entry[] { hash:4, block:4 } each
+    let indirect_levels = *root.get(30).unwrap_or(&0); // dx_root_info.indirect_levels (offset 30)
     let entry_count = le_u16(root.as_slice(), 34).unwrap_or(0) as usize; // dx_countlimit.count
 
     let mut leaves: Vec<u64> = Vec::new();
@@ -3294,6 +3470,16 @@ fn is_native_ext4_read_only_volume(state: &StorageState, volume: &str) -> bool {
     }
 
     ext4_with_volume(state, volume, |disk, part| ext4_load_superblock(disk, part)).is_ok()
+}
+
+/// Returns true if the volume is a native FAT32/FAT16 filesystem (not a managed store).
+fn is_native_fat32_volume(state: &StorageState, volume: &str) -> bool {
+    // If it is in state.mounted it is a managed-store volume.
+    if state.mounted.iter().any(|m| m.volume.eq_ignore_ascii_case(volume)) {
+        return false;
+    }
+    // Already probed successfully.
+    state.fat32_caches.iter().any(|c| c.volume.eq_ignore_ascii_case(volume))
 }
 
 fn is_volume_writable(state: &StorageState, volume: &str) -> bool {
@@ -3632,28 +3818,42 @@ pub fn format_volume(name: &str, fs: FilesystemKind) -> Result<(), &'static str>
             .position(|v| v.name.eq_ignore_ascii_case(name))
             .ok_or("storage: volume not found")?;
 
-        if !fs_supports_rw_tree(fs) {
-            return Err("storage: formatter not implemented for requested filesystem");
-        }
-
         if state.volumes[idx].mounted_at.is_some() {
             return Err("storage: volume is currently mounted; unmount before formatting");
         }
 
-        state.volumes[idx].filesystem = fs;
         let (disk_name, part_name) = resolve_volume_owner(state, name)?;
-        let disk = state
-            .disks
-            .iter_mut()
-            .find(|d| d.name.eq_ignore_ascii_case(disk_name.as_str()))
+        let disk_idx = state.disks.iter().position(|d| d.name.eq_ignore_ascii_case(&disk_name))
             .ok_or("storage: disk missing")?;
-        let part = disk
-            .partitions
-            .iter()
-            .find(|p| p.name.eq_ignore_ascii_case(part_name.as_str()))
+        let part = state.disks[disk_idx].partitions.iter()
+            .find(|p| p.name.eq_ignore_ascii_case(&part_name))
             .ok_or("storage: partition missing")?
             .clone();
 
+        // ── Real FAT32 mkfs ───────────────────────────────────────────────
+        if fs == FilesystemKind::Fat32 {
+            let total_sectors = part.sector_count;
+            let part_start = part.start_lba;
+            let disk = &mut state.disks[disk_idx];
+            let sector_size = disk.block.sector_size() as usize;
+            let new_sb = {
+                let mut io = DiskIo(disk);
+                fat32_driver::format(part_start, total_sectors, sector_size, &mut io)?
+            };
+            disk.block.flush();
+            state.volumes[idx].filesystem = FilesystemKind::Fat32;
+            // Evict any stale FAT32 cache so next mount re-probes.
+            state.fat32_caches.retain(|c| !c.volume.eq_ignore_ascii_case(name));
+            state.fat32_caches.push(Fat32VolumeCache::new(name.to_string(), new_sb));
+            return Ok(());
+        }
+
+        // ── Managed store (ext4 + others) ─────────────────────────────────
+        if !fs_supports_rw_tree(fs) {
+            return Err("storage: formatter not implemented for requested filesystem");
+        }
+        state.volumes[idx].filesystem = fs;
+        let disk = &mut state.disks[disk_idx];
         let tree = default_rw_tree(fs);
         let bytes = serialize_tree(tree.as_slice(), fs);
         write_partition_bytes(disk, &part, bytes.as_slice())?;
@@ -3686,6 +3886,25 @@ pub fn fs_stat(path: &str) -> Result<FsStat, &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
+
+        // ── Native FAT32/FAT16 ────────────────────────────────────────────
+        if matches!(vol_fs, FilesystemKind::Fat32 | FilesystemKind::Fat16) && is_native_fat32_volume(state, &vol_name) {
+            return fat32_with_cache_mut(state, vol_name.as_str(), |disk, part, cache| {
+                let part_start = part.start_lba;
+                let sb = cache.sb;
+                let fat = &cache.fat;
+                let mut io = DiskIo(disk);
+                match fat32_driver::lookup_path(&sb, fat, rel.as_str(), part_start, &mut io)? {
+                    None => Err("path not found"),
+                    Some(entry) => Ok(FsStat {
+                        kind: if entry.is_dir() { FsNodeKind::Directory } else { FsNodeKind::File },
+                        size: entry.file_size as usize,
+                    }),
+                }
+            });
+        }
+
+        // ── Native ext4 ───────────────────────────────────────────────────
         if vol_fs == FilesystemKind::Ext4 {
             if let Some(mounted) = state
                 .mounted
@@ -3717,6 +3936,8 @@ pub fn fs_stat(path: &str) -> Result<FsStat, &'static str> {
                 },
             );
         }
+
+        // ── Managed store (FAT32 / other) ─────────────────────────────────
         if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
@@ -3999,6 +4220,22 @@ pub fn fs_read(path: &str) -> Result<Vec<u8>, &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
+
+        // ── Native FAT32/FAT16 ────────────────────────────────────────────
+        if matches!(vol_fs, FilesystemKind::Fat32 | FilesystemKind::Fat16) && is_native_fat32_volume(state, &vol_name) {
+            return fat32_with_cache_mut(state, vol_name.as_str(), |disk, part, cache| {
+                let part_start = part.start_lba;
+                let sb = cache.sb;
+                let fat = &cache.fat;
+                let mut io = DiskIo(disk);
+                let entry = fat32_driver::lookup_path(&sb, fat, rel.as_str(), part_start, &mut io)?
+                    .ok_or("path not found")?;
+                if entry.is_dir() { return Err("not a file"); }
+                fat32_driver::read_file(&sb, fat, entry.cluster, entry.file_size, part_start, &mut io)
+            });
+        }
+
+        // ── Native ext4 ───────────────────────────────────────────────────
         if vol_fs == FilesystemKind::Ext4 {
             if let Some(mounted) = state
                 .mounted
@@ -4026,6 +4263,8 @@ pub fn fs_read(path: &str) -> Result<Vec<u8>, &'static str> {
                 },
             );
         }
+
+        // ── Managed store ─────────────────────────────────────────────────
         if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
@@ -4050,14 +4289,46 @@ pub fn fs_write(path: &str, data: &[u8]) -> Result<(), &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
+        if !is_volume_writable(state, vol_name.as_str()) {
+            return Err("storage: volume is mounted read-only");
+        }
+
+        // ── Native FAT32/FAT16 ────────────────────────────────────────────
+        if matches!(vol_fs, FilesystemKind::Fat32 | FilesystemKind::Fat16) && is_native_fat32_volume(state, &vol_name) {
+            return fat32_with_cache_mut(state, vol_name.as_str(), |disk, part, cache| {
+                let part_start = part.start_lba;
+                let sb = cache.sb;
+                let (parent_path, file_name) = match split_parent(rel.as_str()) {
+                    Some(p) => p,
+                    None => return Err("fat32: invalid path for write"),
+                };
+                let dir_cluster = {
+                    let fat = &cache.fat;
+                    let mut io = DiskIo(disk);
+                    if parent_path == "/" {
+                        fat32_driver::Fat32Superblock::root_cluster_for_(&sb)
+                    } else {
+                        match fat32_driver::lookup_path(&sb, fat, parent_path.as_str(), part_start, &mut io)? {
+                            None => return Err("fat32: parent directory not found"),
+                            Some(e) if !e.is_dir() => return Err("fat32: parent is not a directory"),
+                            Some(e) => e.cluster,
+                        }
+                    }
+                };
+                let fat = &mut cache.fat;
+                let mut io = DiskIo(disk);
+                fat32_driver::write_file(&sb, fat, dir_cluster, file_name.as_str(), data, part_start, &mut io)?;
+                let _ = fat32_driver::update_fsinfo(&sb, fat, part_start, &mut io);
+                disk.block.flush();
+                Ok(())
+            });
+        }
+
         if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
         if !fs_supports_rw_tree(vol_fs) {
             return Err("storage: filesystem is read-only in this build");
-        }
-        if !is_volume_writable(state, vol_name.as_str()) {
-            return Err("storage: volume is mounted read-only");
         }
         if vol_fs == FilesystemKind::Ext4
             && is_native_ext4_read_only_volume(state, vol_name.as_str())
@@ -4113,6 +4384,29 @@ pub fn fs_readdir(path: &str) -> Result<Vec<String>, &'static str> {
     with_state_mut(|state| {
         let (vol_name, vol_fs, rel) = mounted_volume_info_internal(state, path)
             .ok_or("storage: path is not on a mounted volume")?;
+
+        // ── Native FAT32/FAT16 ────────────────────────────────────────────
+        if matches!(vol_fs, FilesystemKind::Fat32 | FilesystemKind::Fat16) && is_native_fat32_volume(state, &vol_name) {
+            return fat32_with_cache_mut(state, vol_name.as_str(), |disk, part, cache| {
+                let part_start = part.start_lba;
+                let sb = cache.sb;
+                let fat = &cache.fat;
+                let mut io = DiskIo(disk);
+                // Find the directory cluster.
+                let dir_cluster = if rel == "/" {
+                    fat32_driver::Fat32Superblock::root_cluster_for_(&sb)
+                } else {
+                    match fat32_driver::lookup_path(&sb, fat, rel.as_str(), part_start, &mut io)? {
+                        None => return Err("path not found"),
+                        Some(e) if !e.is_dir() => return Err("not a directory"),
+                        Some(e) => e.cluster,
+                    }
+                };
+                fat32_driver::readdir(&sb, fat, dir_cluster, part_start, &mut io)
+            });
+        }
+
+        // ── Native ext4 ───────────────────────────────────────────────────
         if vol_fs == FilesystemKind::Ext4 {
             if let Some(mounted) = state
                 .mounted
@@ -4127,19 +4421,11 @@ pub fn fs_readdir(path: &str) -> Result<Vec<String>, &'static str> {
 
                 let mut out = Vec::new();
                 for node in &mounted.nodes {
-                    if node.path == rel {
-                        continue;
-                    }
-                    let Some((parent, name)) = split_parent(node.path.as_str()) else {
-                        continue;
-                    };
-                    if parent == rel {
-                        out.push(name);
-                    }
+                    if node.path == rel { continue; }
+                    let Some((parent, name)) = split_parent(node.path.as_str()) else { continue; };
+                    if parent == rel { out.push(name); }
                 }
-
-                out.sort();
-                out.dedup();
+                out.sort(); out.dedup();
                 return Ok(out);
             }
 
@@ -4152,17 +4438,16 @@ pub fn fs_readdir(path: &str) -> Result<Vec<String>, &'static str> {
                     let entries = ext4_list_dir_c(disk, part, &sb, ino, &inode, cache)?;
                     let mut out = Vec::new();
                     for ent in entries {
-                        if ent.name == "." || ent.name == ".." {
-                            continue;
-                        }
+                        if ent.name == "." || ent.name == ".." { continue; }
                         out.push(ent.name);
                     }
-                    out.sort();
-                    out.dedup();
+                    out.sort(); out.dedup();
                     Ok(out)
                 },
             );
         }
+
+        // ── Managed store ─────────────────────────────────────────────────
         if !fs_supports_mount_tree(vol_fs) {
             return Err("storage: filesystem backend not implemented");
         }
@@ -4181,19 +4466,11 @@ pub fn fs_readdir(path: &str) -> Result<Vec<String>, &'static str> {
 
         let mut out = Vec::new();
         for node in &mounted.nodes {
-            if node.path == rel {
-                continue;
-            }
-            let Some((parent, name)) = split_parent(node.path.as_str()) else {
-                continue;
-            };
-            if parent == rel {
-                out.push(name);
-            }
+            if node.path == rel { continue; }
+            let Some((parent, name)) = split_parent(node.path.as_str()) else { continue; };
+            if parent == rel { out.push(name); }
         }
-
-        out.sort();
-        out.dedup();
+        out.sort(); out.dedup();
         Ok(out)
     })
 }
