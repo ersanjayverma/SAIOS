@@ -415,14 +415,5 @@ fn health_label(value: crate::object_manager::Health) -> &'static str {
 }
 
 fn resolve_relative_path(path: &str) -> String {
-    if path.starts_with('/') {
-        return path.to_string();
-    }
-
-    let cwd = saifs::pwd();
-    if cwd == "/" {
-        format!("/{}", path)
-    } else {
-        format!("{}/{}", cwd, path)
-    }
+    saifs::absolute_path(path)
 }

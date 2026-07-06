@@ -2965,16 +2965,7 @@ fn cmd_umount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
 fn cmd_df(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let target = args.first().copied().unwrap_or("/");
-    let path = if target.starts_with('/') {
-        target.to_string()
-    } else {
-        let cwd = saifs::pwd();
-        if cwd == "/" {
-            format!("/{}", target)
-        } else {
-            format!("{}/{}", cwd, target)
-        }
-    };
+    let path = saifs::absolute_path(target);
 
     let volume = disk::mounted_volume_for_path(path.as_str())
         .ok_or("df: path is not on a mounted volume")?;
@@ -3003,16 +2994,7 @@ fn cmd_df(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 
 fn cmd_tree(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
     let root = if let Some(path) = args.first().copied() {
-        if path.starts_with('/') {
-            path.to_string()
-        } else {
-            let cwd = saifs::pwd();
-            if cwd == "/" {
-                alloc::format!("/{}", path)
-            } else {
-                alloc::format!("{}/{}", cwd, path)
-            }
-        }
+        saifs::absolute_path(path)
     } else {
         saifs::pwd()
     };

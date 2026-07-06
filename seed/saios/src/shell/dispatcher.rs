@@ -157,10 +157,15 @@ impl CommandDispatcher {
                     Err(e) => {
                         exit_code = 127;
                         if !suppress_console {
-                            if e == "exec: program not found" {
+                            // For path-style commands (./foo, /path/foo) always show
+                            // the actual error so the user knows why execution failed.
+                            let is_path_cmd = cmd.command.contains('/');
+                            if e == "exec: program not found" && !is_path_cmd {
                                 console::println!("Unknown command: {}", cmd.command);
+                            } else if e == "exec: program not found" && is_path_cmd {
+                                console::println!("{}: not found", cmd.command);
                             } else {
-                                console::println!("{}", e);
+                                console::println!("{}: {}", cmd.command, e);
                             }
                         }
                         Ok(())
@@ -282,16 +287,7 @@ impl CommandDispatcher {
         ctx: &mut CommandContext,
         path: &str,
     ) -> ShellResult {
-        let abs = if path.starts_with('/') {
-            path.to_string()
-        } else {
-            let cwd = saifs::pwd();
-            if cwd == "/" {
-                alloc::format!("/{}", path)
-            } else {
-                alloc::format!("{}/{}", cwd, path)
-            }
-        };
+        let abs = saifs::absolute_path(path);
 
         let script = saifs::read_text(abs.as_str()).map_err(|_| "source: read failed")?;
         for raw in script.lines() {
@@ -325,16 +321,7 @@ impl CommandDispatcher {
     }
 
     fn resolve_shell_path(&self, path: &str) -> String {
-        if path.starts_with('/') {
-            return path.to_string();
-        }
-
-        let cwd = saifs::pwd();
-        if cwd == "/" {
-            alloc::format!("/{}", path)
-        } else {
-            alloc::format!("{}/{}", cwd, path)
-        }
+        saifs::absolute_path(path)
     }
 }
 

@@ -1316,6 +1316,7 @@ struct Ext4DirEntryParsed {
 const EXT4_S_IFDIR: u16 = 0x4000;
 const EXT4_S_IFREG: u16 = 0x8000;
 const EXT4_S_IFLNK: u16 = 0xA000;
+const EXT4_S_IFMT: u16 = 0xF000;
 const EXT4_FT_REG_FILE: u8 = 1;
 const EXT4_FT_DIR: u8 = 2;
 const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
@@ -1329,6 +1330,22 @@ const EXT4_NATIVE_STAGE8_EXPERIMENTAL: bool = true; // JBD2 journaling now activ
 // JOURNAL_DEV(0x8): this partition IS the journal, not a data fs.
 // ENCRYPT(0x10000): blocks are encrypted – can't read file data.
 const EXT4_INCOMPAT_REJECT_MASK: u32 = 0x0001 | 0x0008 | 0x0001_0000;
+
+fn ext4_mode_type(mode: u16) -> u16 {
+    mode & EXT4_S_IFMT
+}
+
+fn ext4_mode_is_dir(mode: u16) -> bool {
+    ext4_mode_type(mode) == EXT4_S_IFDIR
+}
+
+fn ext4_mode_is_reg(mode: u16) -> bool {
+    ext4_mode_type(mode) == EXT4_S_IFREG
+}
+
+fn ext4_mode_is_lnk(mode: u16) -> bool {
+    ext4_mode_type(mode) == EXT4_S_IFLNK
+}
 
 /// Validate ext4 superblock incompat features before mounting.
 /// Returns Err with a descriptive message for any unsupported flag that would
@@ -1950,7 +1967,7 @@ fn ext4_append_dir_entry(
     child_type: u8,
     name: &str,
 ) -> Result<(), &'static str> {
-    if (parent_inode.mode & EXT4_S_IFDIR) == 0 {
+    if !ext4_mode_is_dir(parent_inode.mode) {
         return Err("storage: parent is not a directory");
     }
 
@@ -2036,7 +2053,7 @@ fn ext4_remove_dir_entry(
 }
 
 fn ext4_file_type_from_mode(mode: u16) -> u8 {
-    if (mode & EXT4_S_IFDIR) != 0 {
+    if ext4_mode_is_dir(mode) {
         EXT4_FT_DIR
     } else {
         EXT4_FT_REG_FILE
@@ -2077,7 +2094,7 @@ fn ext4_delete_path(
         .map(|ent| ent.inode)
         .ok_or("path not found")?;
 
-    if (target_inode.mode & EXT4_S_IFDIR) != 0 {
+    if ext4_mode_is_dir(target_inode.mode) {
         let child_entries = ext4_list_dir(disk, part, &sb, &target_inode)?;
         if child_entries.iter().any(|ent| ent.name != "." && ent.name != "..") {
             return Err("directory not empty");
@@ -2139,7 +2156,7 @@ fn ext4_create_empty_file(
     let (parent_rel, name) = split_parent(rel).ok_or("storage: invalid path")?;
     let sb = ext4_load_superblock(disk, part)?;
     let (_parent_sb, parent_ino, parent_inode) = ext4_lookup_path(disk, part, parent_rel.as_str())?;
-    if (parent_inode.mode & EXT4_S_IFDIR) == 0 {
+    if !ext4_mode_is_dir(parent_inode.mode) {
         return Err("storage: parent is not a directory");
     }
 
@@ -2191,7 +2208,7 @@ fn ext4_create_directory(
     let (parent_rel, name) = split_parent(rel).ok_or("storage: invalid path")?;
     let sb = ext4_load_superblock(disk, part)?;
     let (_parent_sb, parent_ino, parent_inode) = ext4_lookup_path(disk, part, parent_rel.as_str())?;
-    if (parent_inode.mode & EXT4_S_IFDIR) == 0 {
+    if !ext4_mode_is_dir(parent_inode.mode) {
         return Err("storage: parent is not a directory");
     }
 
@@ -2421,7 +2438,7 @@ fn ext4_write_inode_data_inplace(
     inode: &Ext4Inode,
     data: &[u8],
 ) -> Result<(), &'static str> {
-    if (inode.mode & EXT4_S_IFREG) == 0 {
+    if !ext4_mode_is_reg(inode.mode) {
         return Err("not a file");
     }
     if (inode.flags & EXT4_INLINE_DATA_FL) != 0 {
@@ -2470,7 +2487,7 @@ fn ext4_write_inode_data_journaled(
     volume: &str,
     journals: &mut Vec<Ext4JournalCache>,
 ) -> Result<(), &'static str> {
-    if (inode.mode & EXT4_S_IFREG) == 0 {
+    if !ext4_mode_is_reg(inode.mode) {
         return Err("not a file");
     }
     if (inode.flags & EXT4_INLINE_DATA_FL) != 0 {
@@ -2747,7 +2764,7 @@ fn ext4_list_dir(
     sb: &Ext4Superblock,
     inode: &Ext4Inode,
 ) -> Result<Vec<Ext4DirEntry>, &'static str> {
-    if (inode.mode & EXT4_S_IFDIR) == 0 {
+    if !ext4_mode_is_dir(inode.mode) {
         return Err("not a directory");
     }
 
@@ -2809,7 +2826,7 @@ where
         let mut restarted = false;
 
         for (idx, seg) in segments.iter().enumerate() {
-            if (inode.mode & EXT4_S_IFDIR) == 0 {
+            if !ext4_mode_is_dir(inode.mode) {
                 return Err("not a directory");
             }
             let entries = list_dir(disk, part, sb, inode_no, &inode, ctx)?;
@@ -2823,7 +2840,7 @@ where
             let next = found_ino.ok_or("path not found")?;
             let next_inode = load_inode(disk, part, sb, next, ctx)?;
 
-            if (next_inode.mode & EXT4_S_IFLNK) != 0 {
+            if ext4_mode_is_lnk(next_inode.mode) {
                 let target_bytes = if next_inode.size as usize <= next_inode.block.len() {
                     next_inode.block[..next_inode.size as usize].to_vec()
                 } else {
@@ -3558,7 +3575,7 @@ fn ext4_list_dir_c(
     if let Some(cached) = cache.dirs.get(inode_no) {
         return Ok(cached);
     }
-    if (inode.mode & EXT4_S_IFDIR) == 0 {
+    if !ext4_mode_is_dir(inode.mode) {
         return Err("not a directory");
     }
     let inode_copy = *inode;
@@ -3575,11 +3592,16 @@ fn ext4_list_dir_c(
         }
         // Enumerate all leaf blocks via the HTree index.
         let leaf_blocks = ext4_htree_enumerate_leaves(disk, part, sb, &inode_copy, cache)?;
+        let leaf_count = leaf_blocks.len();
         for phys in leaf_blocks {
             if let Ok(blk) = ext4_read_block_c(disk, part, sb, phys, cache) {
                 data.extend_from_slice(blk.as_slice());
             }
         }
+        crate::console::println!(
+            "ext4: htree inode={} leaves={} raw_bytes={}",
+            inode_no, leaf_count, data.len()
+        );
         data
     } else {
         ext4_read_inode_data_c(disk, part, sb, &inode_copy, cache)?
@@ -3615,7 +3637,7 @@ fn ext4_lookup_path_c(
     }
 
     let sb = cache.sb;
-    let (inode_no, inode) = ext4_lookup_path_impl(
+    let result = ext4_lookup_path_impl(
         disk,
         part,
         &sb,
@@ -3626,9 +3648,17 @@ fn ext4_lookup_path_c(
             ext4_list_dir_c(disk, part, sb, inode_no, inode, cache)
         },
         |disk, part, sb, inode, cache| ext4_read_inode_data_c(disk, part, sb, inode, cache),
-    )?;
-    cache.paths.put(norm.clone(), inode_no);
-    Ok((inode_no, inode))
+    );
+    match result {
+        Ok((inode_no, inode)) => {
+            cache.paths.put(norm.clone(), inode_no);
+            Ok((inode_no, inode))
+        }
+        Err(e) => {
+            crate::console::println!("ext4: lookup '{}' failed: {}", norm, e);
+            Err(e)
+        }
+    }
 }
 
 fn mounted_volume_info_internal(
@@ -4120,7 +4150,7 @@ pub fn fs_stat(path: &str) -> Result<FsStat, &'static str> {
                 vol_name.as_str(),
                 |disk, part, cache| {
                     let (_ino, inode) = ext4_lookup_path_c(disk, part, rel.as_str(), cache)?;
-                    let kind = if (inode.mode & EXT4_S_IFDIR) != 0 {
+                    let kind = if ext4_mode_is_dir(inode.mode) {
                         FsNodeKind::Directory
                     } else {
                         FsNodeKind::File
@@ -4451,7 +4481,7 @@ pub fn fs_read(path: &str) -> Result<Vec<u8>, &'static str> {
                 vol_name.as_str(),
                 |disk, part, cache| {
                     let (_ino, inode) = ext4_lookup_path_c(disk, part, rel.as_str(), cache)?;
-                    if (inode.mode & EXT4_S_IFREG) == 0 {
+                    if !ext4_mode_is_reg(inode.mode) {
                         return Err("not a file");
                     }
                     let sb = cache.sb;

@@ -300,7 +300,12 @@ fn canonicalize_path(path: &str) -> Result<String, SaifsError> {
     let source = if path.starts_with('/') {
         path.to_string()
     } else {
-        format!("/{}", path)
+        let cwd = vfs::pwd();
+        if cwd == "/" {
+            format!("/{}", path)
+        } else {
+            format!("{}/{}", cwd.trim_end_matches('/'), path)
+        }
     };
 
     let mut parts: Vec<&str> = Vec::new();
@@ -905,7 +910,29 @@ pub fn open(path: &str) -> Result<SaifsHandle, SaifsError> {
 pub fn read_text(path: &str) -> Result<String, SaifsError> {
     let handle = open(path)?;
     let bytes = handle.read()?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    Ok(normalize_text_line_endings(
+        String::from_utf8_lossy(&bytes).into_owned(),
+    ))
+}
+
+fn normalize_text_line_endings(input: String) -> String {
+    if !input.as_bytes().contains(&b'\r') {
+        return input;
+    }
+
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                let _ = chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 pub fn list(path: &str) -> Result<Vec<String>, SaifsError> {
@@ -949,6 +976,11 @@ pub fn cd(path: &str) -> Result<(), SaifsError> {
 pub fn pwd() -> String {
     init();
     vfs::pwd()
+}
+
+pub fn absolute_path(path: &str) -> String {
+    init();
+    normalize_path(path)
 }
 
 pub fn explain(path: &str) -> Result<Vec<String>, SaifsError> {

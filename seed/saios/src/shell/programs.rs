@@ -67,16 +67,7 @@ fn hello_program(args: &[&str], env: &[(String, String)]) -> i32 {
 }
 
 fn resolve_relative_path(path: &str) -> String {
-    if path.starts_with('/') {
-        return path.to_string();
-    }
-
-    let cwd = saifs::pwd();
-    if cwd == "/" {
-        format!("/{}", path)
-    } else {
-        format!("{}/{}", cwd, path)
-    }
+    saifs::absolute_path(path)
 }
 
 fn parse_cc_output(args: &[&str]) -> Option<String> {
