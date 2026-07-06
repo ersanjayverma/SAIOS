@@ -35,9 +35,9 @@ Boot policy during v0.3:
 
 Current v0.4 note:
 
-- The `mounted filesystems` gate validates SAIFS/VFS mount topology (including
-	root mount presence) and no longer skips solely because no non-tmpfs storage
-	volume is mounted.
+- The `mounted filesystems` gate validates SAIFS/VFS root topology first.
+- It reports `SKIP` when no non-tmpfs storage volumes are detected.
+- It reports `FAIL` when storage volumes are detected but none are mounted.
 
 ## Subsystems
 
@@ -65,6 +65,7 @@ Storage contract note (current build):
 - Native ext4 traversal is validated for read paths.
 - Native ext4 write validation is currently scoped to in-place updates of existing regular files.
 - Native ext4 metadata-mutating operations (`create`, `mkdir`, `delete`, `rename`) are expected to return explicit unsupported errors until allocator/journal phases are implemented.
+- Operator default is now stability-first: `mount` without mode flag uses read-only; pass explicit `rw` only when intentionally validating write flows.
 
 ## v0.3 Readiness Gate
 
@@ -97,6 +98,14 @@ The v0.4 profile (`validate --ready-v04`) currently tracks these required gates:
 - process creation
 - wait
 - stable ABI smoke
+
+Runtime stability note:
+
+- Process readiness checks use deterministic `SAIOS_BIN_V1` fixtures so the
+	gate validates process accounting/wait semantics without relying on the
+	unstable ELF user-mode launch path during current bring-up.
+- Login-shell fallback policy excludes unstable `shell`/`/bin/shell` ET_EXEC
+	stub candidates during bring-up to avoid session deadlock before SNSH fallback.
 
 ## Extending
 

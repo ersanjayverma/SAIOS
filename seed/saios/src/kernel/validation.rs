@@ -179,17 +179,37 @@ impl ValidateOptions {
             readiness: None,
         };
 
-        for arg in args {
-            match *arg {
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = args[i];
+            match arg {
                 "-v" => options.verbose = true,
                 "--perf" => options.perf = true,
                 "--stress" => options.stress = true,
                 "--json" => options.json = true,
                 "--ready" => options.readiness = Some(ReadinessProfile::V03),
-                "--ready-v04" => options.readiness = Some(ReadinessProfile::V04),
+                "--ready-v04" | "--ready-v4" | "--ready-v0.4" => {
+                    options.readiness = Some(ReadinessProfile::V04)
+                }
+                "--ready-0" => {
+                    // Compatibility for legacy/typo split form: `--ready-0 v04`
+                    let Some(next) = args.get(i + 1).copied() else {
+                        return Err("validate: unknown option");
+                    };
+                    if next.eq_ignore_ascii_case("v04")
+                        || next.eq_ignore_ascii_case("v4")
+                        || next.eq_ignore_ascii_case("0.4")
+                    {
+                        options.readiness = Some(ReadinessProfile::V04);
+                        i += 1; // consume version token
+                    } else {
+                        return Err("validate: unknown option");
+                    }
+                }
                 "--help" | "-h" => return Err("help"),
                 _ => return Err("validate: unknown option"),
             }
+            i += 1;
         }
 
         Ok(options)
@@ -508,6 +528,7 @@ pub fn print_help() {
     console::println!("  --stress    include stress tests");
     console::println!("  --ready     run required kernel-readiness gates only");
     console::println!("  --ready-v04 run v0.4 readiness gates only");
+    console::println!("              aliases: --ready-v4, --ready-v0.4, --ready-0 v04");
     console::println!("  --json      emit machine-readable JSON");
     console::println!("  --help      show this help text");
 }
@@ -923,8 +944,21 @@ fn spawn_silent(name: &str, args: &[&str]) -> Result<u64, &'static str> {
     result
 }
 
+fn spawn_validation_program(tag: &str, args: &[&str]) -> Result<u64, &'static str> {
+    // Use a tiny SAIOS_BIN_V1 fixture so validation process gates exercise the
+    // process manager/runtime path without depending on unstable ELF user-mode
+    // transitions during bring-up.
+    let path = temp_path(tag);
+    saifs::touch(path.as_str()).map_err(|_| "spawn fixture create failed")?;
+    vfs::write_path(path.as_str(), b"SAIOS_BIN_V1\nentry=hello\n")
+        .map_err(|_| "spawn fixture write failed")?;
+    let pid = spawn_silent(path.as_str(), args)?;
+    let _ = saifs::remove(path.as_str());
+    Ok(pid)
+}
+
 fn test_process_creation() -> Result<(), &'static str> {
-    let pid = spawn_silent("hello", &["validate"])?;
+    let pid = spawn_validation_program("proc-create", &["validate"])?;
     if pid == 0 {
         return Err("process spawn returned invalid pid");
     }
@@ -935,7 +969,7 @@ fn test_process_creation() -> Result<(), &'static str> {
 }
 
 fn test_process_exit() -> Result<(), &'static str> {
-    let pid = spawn_silent("hello", &["exit"])?;
+    let pid = spawn_validation_program("proc-exit", &["exit"])?;
     let rec = process::jobs()
         .into_iter()
         .find(|job| job.pid == pid)
@@ -947,7 +981,7 @@ fn test_process_exit() -> Result<(), &'static str> {
 }
 
 fn test_process_wait() -> Result<(), &'static str> {
-    let pid = spawn_silent("hello", &["wait"])?;
+    let pid = spawn_validation_program("proc-wait", &["wait"])?;
     for _ in 0..16 {
         if process::wait(pid).is_ok() {
             return Ok(());
@@ -959,8 +993,8 @@ fn test_process_wait() -> Result<(), &'static str> {
 }
 
 fn test_pid_uniqueness() -> Result<(), &'static str> {
-    let a = spawn_silent("hello", &["pid-a"])?;
-    let b = spawn_silent("hello", &["pid-b"])?;
+    let a = spawn_validation_program("proc-pid-a", &["pid-a"])?;
+    let b = spawn_validation_program("proc-pid-b", &["pid-b"])?;
     if a == b {
         return Err("duplicate process id");
     }
@@ -968,7 +1002,7 @@ fn test_pid_uniqueness() -> Result<(), &'static str> {
 }
 
 fn test_argument_passing() -> Result<(), &'static str> {
-    let pid = spawn_silent("hello", &["alpha", "beta"])?;
+    let pid = spawn_validation_program("proc-argv", &["alpha", "beta"])?;
     if pid == 0 {
         return Err("argument process spawn failed");
     }
@@ -1229,15 +1263,21 @@ fn test_storage_mounts() -> Result<(), &'static str> {
         return Err("root VFS mount missing");
     }
 
-    let mounted_volumes = crate::driver::storage::volumes()
-        .into_iter()
+    let volumes = crate::driver::storage::volumes();
+    let non_tmpfs_volumes = volumes
+        .iter()
+        .filter(|volume| volume.name != "tmpfs")
+        .count();
+    if non_tmpfs_volumes == 0 {
+        return Err("skip: no storage volumes detected");
+    }
+
+    let mounted_volumes = volumes
+        .iter()
         .filter(|volume| volume.name != "tmpfs" && volume.mounted_at.is_some())
         .count();
-
-    // Treat the baseline root mount topology as a pass when no hardware-backed
-    // volumes are mounted yet; those flows are covered by explicit storage tests.
     if mounted_volumes == 0 {
-        return Ok(());
+        return Err("no storage volumes mounted");
     }
 
     Ok(())

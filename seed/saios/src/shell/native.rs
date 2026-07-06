@@ -2503,7 +2503,7 @@ fn cmd_volumes(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             console::println!("volumes scan            Request background storage discovery");
             console::println!("volumes info <vol>      Show volume details");
             console::println!("volumes format <vol> <fs>  Format a volume (fat32|ext4|extf4|ntfs)");
-            console::println!("volumes mount <vol> <path> [ro]  Mount a volume");
+            console::println!("volumes mount <vol> <path> [ro|rw]  Mount a volume (default: ro)");
             console::println!("volumes umount <path>   Unmount a mounted path");
             console::println!("volumes check           Storage check summary");
             console::println!("volume                  Alias for volumes");
@@ -2908,7 +2908,9 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             console::println!("mount disks                   Alias for volumes disks");
             console::println!("mount volumes                 List detected volumes (cached)");
             console::println!("mount scan                    Alias for volumes scan");
-            console::println!("mount <device> <path> [ro]    Mount a storage volume");
+            console::println!(
+                "mount <device> <path> [ro|rw] Mount a storage volume (default: ro)"
+            );
             console::println!("umount <path>                 Unmount a mounted path");
             console::println!("");
             console::println!(
@@ -2918,23 +2920,25 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
             Ok(())
         }
 
-        // ── mount <device> <mountpoint> [ro] ────────────────────────────────
+        // ── mount <device> <mountpoint> [ro|rw] ─────────────────────────────
         device => {
-            let mountpoint = args
+            let mountpoint_input = args
                 .get(1)
                 .copied()
-                .ok_or("mount: usage: mount <device> <path> [ro]")?;
+                .ok_or("mount: usage: mount <device> <path> [ro|rw]")?;
+            let mountpoint = saifs::absolute_path(mountpoint_input);
 
             // Reject paths that could escape or corrupt critical dirs
             if mountpoint == "/" || mountpoint == "/boot" || mountpoint == "/bin" {
                 return Err("mount: cannot mount over a system directory");
             }
 
-            let read_only = args.get(2).is_some_and(|f| f.eq_ignore_ascii_case("ro"));
+            // Stability-first default: read-only unless explicitly requested rw.
+            let read_only = !args.get(2).is_some_and(|f| f.eq_ignore_ascii_case("rw"));
 
             // Single call: creates mount-point dir, mounts in storage layer,
             // records in VFS mount table.
-            vfs::mount_storage(device, mountpoint, read_only)?;
+            vfs::mount_storage(device, mountpoint.as_str(), read_only)?;
 
             let vol_name = disk::resolve_mountable_volume(device)
                 .map(|v| v.name)
@@ -2951,13 +2955,14 @@ fn cmd_mount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
 }
 
 fn cmd_umount(_ctx: &mut CommandContext, args: &[&str]) -> ShellResult {
-    let mountpoint = args
+    let mountpoint_input = args
         .first()
         .copied()
         .ok_or("umount: usage: umount <path>")?;
+    let mountpoint = saifs::absolute_path(mountpoint_input);
 
     // Single call: removes from both VFS mount table and storage layer.
-    vfs::umount_storage(mountpoint)?;
+    vfs::umount_storage(mountpoint.as_str())?;
 
     console::println!("umount: {} unmounted", mountpoint);
     Ok(())

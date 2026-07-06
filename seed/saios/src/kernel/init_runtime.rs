@@ -258,10 +258,19 @@ fn login_shell_args(shell: &str) -> &'static [&'static str] {
     }
 }
 
+fn is_unstable_shell_stub_candidate(name: &str) -> bool {
+    name.eq_ignore_ascii_case("shell") || name.eq_ignore_ascii_case("/bin/shell")
+}
+
 fn shell_launch_plan(preferred: &str) -> Vec<(String, &'static [&'static str])> {
     let mut plan: Vec<(String, &'static [&'static str])> = Vec::new();
     let mut push_unique = |name: &str, args: &'static [&'static str]| {
         if name.is_empty() {
+            return;
+        }
+        if is_unstable_shell_stub_candidate(name) {
+            // The package-image shell stub currently routes through an unstable
+            // ET_EXEC user-mode path during bring-up and can deadlock session launch.
             return;
         }
         if plan.iter().any(|(existing, _)| existing == name) {
@@ -273,8 +282,6 @@ fn shell_launch_plan(preferred: &str) -> Vec<(String, &'static [&'static str])> 
     push_unique(preferred, login_shell_args(preferred));
 
     // Common ring3 shell fallbacks before dropping to kernel SNSH.
-    push_unique("shell", &[]);
-    push_unique("/bin/shell", &[]);
     push_unique("busybox", &["ash"]);
     push_unique("/bin/busybox", &["ash"]);
     push_unique("sh", &[]);

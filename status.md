@@ -34,10 +34,10 @@ Current blocking reasons:
 Replace selector-based syscall arguments with pointer-buffer path for core file syscalls.
 
 ## Latest Observed Runtime Snapshot
-- Validation summary: `PASS WITH SKIPS` (7/8 gates); `Mounts` was the only skipped gate.
-- Session/runtime: ring3 shell candidates (`ash`, `busybox`, `/bin/busybox`, `sh`) failed in that run and runtime fell back to kernel SNSH.
+- Validation summary: `PASS` (all readiness gates passed; no skips).
+- Readiness gates: 8/8 PASS.
+- Kernel status in latest validation run: `Kernel READY`.
 - Storage boot path: foreground storage scan completed deterministically.
-- Follow-up fix applied: storage mount readiness gate now validates SAIFS+VFS root mount topology and no longer skips solely because no non-tmpfs volume is mounted.
 
 ## Remaining Minimum To Call v0.4 Complete
 - Finish pointer/buffer-based syscall ABI conversion for core file and process launch paths.
@@ -49,7 +49,7 @@ Replace selector-based syscall arguments with pointer-buffer path for core file 
 
 ## Notes
 - Keep this file updated after every substantial change.
-- `State.md` currently exists but is empty; `status.md` is the active tracker for v0.4 closure.
+- `status.md` is the canonical v0.4 closure tracker; `State.md` mirrors concise runtime snapshots.
 - Completed in this step: added central version source at `seed/saios/src/version.rs` and repointed product banners, shell version output, uname version fields, driver registration, and KSF service version strings to shared constants.
 - Completed in this step: moved `USER_STACK_BASE` to high user VA (`0x0000_0000_7000_0000`) and verified `cargo check` passes.
 - Completed in this step: added validation readiness profiles (`--ready` => v0.3, `--ready-v04` => v0.4) and wired profile-aware readiness reporting.
@@ -66,4 +66,7 @@ Replace selector-based syscall arguments with pointer-buffer path for core file 
 - In progress: isolated ET_EXEC execution is now disabled alongside ET_DYN to keep login/session flow on the shared bring-up path until cloned-CR3 low-half faults are fixed.
 - In progress: shared-path low-half ET_EXEC loads are now rejected deterministically instead of being allowed to split/corrupt the low-half identity window during login-shell launch.
 - In progress: v0.4 validation process gates were corrected for current runtime semantics (`wait(pid)` no longer self-mutates the target process, and process-creation validation now checks persistent process records instead of transient job-count growth).
-- In progress: v0.4 storage mount readiness gate semantics were corrected to validate active SAIFS/VFS mount topology and stop skipping when only the baseline root mount is present.
+- In progress: v0.4 storage mount readiness gate semantics were corrected to validate active SAIFS/VFS mount topology, skip only with no detected storage, and fail when detected storage remains unmounted.
+- In progress: shell mount command now defaults to read-only (`ro`) unless explicit `rw` is requested, to reduce post-mount runtime instability while native write-path hardening continues.
+- In progress: readiness process gates were decoupled from unstable ELF user-mode launch path by using deterministic `SAIOS_BIN_V1` validation fixtures, preventing post-mount validation deadlocks/failout during `validate`.
+- In progress: login-shell launch planner now excludes unstable `shell`/`/bin/shell` ET_EXEC stub candidates to prevent pre-shell deadlock during ring3 fallback sequencing.

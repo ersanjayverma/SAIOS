@@ -5,18 +5,18 @@ Last updated: 2026-07-07
 ## Latest Observed Validation Output
 
 - Profile: v0.4 readiness
-- Summary: PASS WITH SKIPS
-- Gates: 7/8 PASS
-- Skipped gate: Mounts (mounted filesystems)
-- Kernel status in that run: Kernel NOT READY
+- Summary: PASS
+- Gates: 8/8 PASS
+- Skipped gate: none
+- Kernel status in that run: Kernel READY
 
 ## Latest Observed Session Outcome
 
-- Ring3 login-shell candidates failed in sequence and runtime fell back to kernel SNSH.
+- Validation flow completed successfully in the latest run.
 
 ## Latest Applied Correction
 
-- Storage mount readiness gate semantics were adjusted to validate SAIFS+VFS root mount topology and avoid skipping when only baseline root mount is present.
+- Storage mount readiness gate semantics were adjusted to validate SAIFS+VFS root mount topology, skip only when no storage volumes are detected, and fail when detected storage volumes are not mounted.
 
 ## Canonical Tracker
 
