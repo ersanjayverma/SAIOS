@@ -16,6 +16,7 @@ struct StackGuard([u8; USER_TRANSITION_GUARD_SIZE]);
 
 static mut USER_TRANSITION_KERNEL_STACK: AlignedStack = AlignedStack([0; USER_TRANSITION_STACK_SIZE]);
 static mut USER_TRANSITION_KERNEL_STACK_GUARD: StackGuard = StackGuard([0; USER_TRANSITION_GUARD_SIZE]);
+const USER_MODE_VERBOSE_LOGS: bool = false;
 
 const PT_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -426,39 +427,41 @@ pub unsafe fn enter_user_mode(entry: u64, user_rsp: u64) -> bool {
     let gdt_storage = crate::arch::x86_64::gdt::storage_base();
     let gdt_storage_limit = crate::arch::x86_64::gdt::storage_limit();
 
-    crate::arch::x86_64::console::_print_force(format_args!(
-        "[user-jump] rip={:#x} rsp={:#x} rflags={:#x} cs={:#x} ss={:#x} rsp0={:#x} if={}\n",
-        entry,
-        user_rsp,
-        rflags,
-        user_cs,
-        user_ss,
-        rsp0,
-        if USER_ENTRY_ENABLE_INTERRUPTS { 1 } else { 0 }
-    ));
-    crate::arch::x86_64::console::_print_force(format_args!(
-        "[user-jump] gdt=({:#x},limit={:#x}) idt=({:#x},limit={:#x})\n",
-        gdt.base,
-        gdt.limit,
-        idt.base,
-        idt.limit
-    ));
-    crate::arch::x86_64::console::_print_force(format_args!(
-        "[user-jump] gdt-storage=({:#x},limit={:#x}) tss={:#x} kernel-rsp={:#x}\n",
-        gdt_storage,
-        gdt_storage_limit,
-        tss,
-        kernel_rsp,
-    ));
-    crate::arch::x86_64::console::_print_force(format_args!(
-        "[user-jump] stack=[{:#x}..{:#x}) guard=[{:#x}..{:#x})\n",
-        stack_base,
-        stack_end,
-        guard_base,
-        guard_end,
-    ));
+    if USER_MODE_VERBOSE_LOGS {
+        crate::arch::x86_64::console::_print_force(format_args!(
+            "[user-jump] rip={:#x} rsp={:#x} rflags={:#x} cs={:#x} ss={:#x} rsp0={:#x} if={}\n",
+            entry,
+            user_rsp,
+            rflags,
+            user_cs,
+            user_ss,
+            rsp0,
+            if USER_ENTRY_ENABLE_INTERRUPTS { 1 } else { 0 }
+        ));
+        crate::arch::x86_64::console::_print_force(format_args!(
+            "[user-jump] gdt=({:#x},limit={:#x}) idt=({:#x},limit={:#x})\n",
+            gdt.base,
+            gdt.limit,
+            idt.base,
+            idt.limit
+        ));
+        crate::arch::x86_64::console::_print_force(format_args!(
+            "[user-jump] gdt-storage=({:#x},limit={:#x}) tss={:#x} kernel-rsp={:#x}\n",
+            gdt_storage,
+            gdt_storage_limit,
+            tss,
+            kernel_rsp,
+        ));
+        crate::arch::x86_64::console::_print_force(format_args!(
+            "[user-jump] stack=[{:#x}..{:#x}) guard=[{:#x}..{:#x})\n",
+            stack_base,
+            stack_end,
+            guard_base,
+            guard_end,
+        ));
 
-    dump_user_stack_qwords(user_rsp);
+        dump_user_stack_qwords(user_rsp);
+    }
 
 
     unsafe {

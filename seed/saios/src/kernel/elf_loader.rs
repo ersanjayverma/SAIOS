@@ -585,12 +585,23 @@ fn map_initial_user_stack(
     let stack_start = USER_STACK_BASE;
     let stack_size = (USER_STACK_PAGES as u64).saturating_mul(vmm::PAGE_SIZE);
     let stack_top = stack_start.saturating_add(stack_size);
+    crate::console::println!(
+        "elf: stack-plan path='{}' start=0x{:x} top=0x{:x} pages={}",
+        path,
+        stack_start,
+        stack_top,
+        USER_STACK_PAGES
+    );
 
     // Avoid untracked teardown of the low-half stack window here.
     // Demoting a shared 2 MiB huge mapping to clear 0x700000 can drop unrelated
     // low-half translations used by kernel-side loader state before user entry.
     // A direct map attempt gives us a clean overlap error without collateral loss.
     if vmm::inspect_mapping_current(stack_start).is_some() {
+        crate::console::println!(
+            "elf: stack-plan start already mapped at 0x{:x}",
+            stack_start
+        );
         return Err("elf: user stack virtual range already mapped");
     }
 
@@ -606,6 +617,13 @@ fn map_initial_user_stack(
         return Err(e);
     }
     mapped_starts.push(stack_start);
+
+    crate::console::println!(
+        "elf: stack-map ok start=0x{:x} phys=0x{:x} end=0x{:x}",
+        stack_start,
+        phys,
+        stack_top
+    );
 
     unsafe {
         core::ptr::write_bytes(stack_start as *mut u8, 0, stack_size as usize);
@@ -816,16 +834,6 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
         }
     );
     let phs = parse_program_headers(bytes.as_slice(), &header)?;
-    let et_exec_load_count = phs
-        .iter()
-        .filter(|ph| ph.p_type == PT_LOAD && ph.p_memsz > 0)
-        .count();
-    let et_exec_total_mem = phs
-        .iter()
-        .filter(|ph| ph.p_type == PT_LOAD)
-        .fold(0u64, |acc, ph| acc.saturating_add(ph.p_memsz));
-    let et_exec_isolated_policy_ok = header.e_type != ET_EXEC
-        || (et_exec_load_count <= 1 && et_exec_total_mem <= 2 * 1024 * 1024);
     if phs.iter().any(|ph| ph.p_type == PT_INTERP && ph.p_filesz != 0) {
         return Err("elf: PT_INTERP executables are not supported yet");
     }
@@ -833,17 +841,14 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
     let use_isolated_exec = header.e_type == ET_EXEC
         && ET_EXEC_ISOLATED_ADDRESS_SPACE
         && can_use_isolated_address_space()
-        && et_exec_isolated_policy_ok;
+        ;
 
-    if header.e_type == ET_EXEC
-        && ET_EXEC_ISOLATED_ADDRESS_SPACE
-        && can_use_isolated_address_space()
-        && !et_exec_isolated_policy_ok
-    {
+    if header.e_type == ET_EXEC {
         crate::console::println!(
-            "elf: ET_EXEC isolated policy declined (load_segments={} total_mem=0x{:x}); using shared bring-up path",
-            et_exec_load_count,
-            et_exec_total_mem
+            "elf: ET_EXEC path isolated={} base=0x{:x} entry=0x{:x}",
+            use_isolated_exec as u8,
+            base,
+            header.e_entry
         );
     }
 
@@ -933,12 +938,36 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
             );
         }
 
+        if header.e_type == ET_EXEC {
+            crate::console::println!(
+                "elf: ET_EXEC using cloned address-space root cr3=0x{:x}",
+                exec_root
+            );
+        }
+
         let run_result = vmm::with_address_space(exec_root, || {
             elf_trace!(
                 "elf: phase=map_load et={} isolated",
                 if header.e_type == ET_DYN { "ET_DYN" } else { "ET_EXEC" }
             );
-            let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base, true)?;
+            if header.e_type == ET_EXEC {
+                for ph in phs.as_slice() {
+                    if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
+                        continue;
+                    }
+                    let seg_start = base.saturating_add(ph.p_vaddr);
+                    let seg_end = seg_start.saturating_add(ph.p_memsz);
+                    crate::console::println!(
+                        "elf: ET_EXEC seg map-plan start=0x{:x} end=0x{:x} filesz=0x{:x} memsz=0x{:x} flags=0x{:x}",
+                        seg_start,
+                        seg_end,
+                        ph.p_filesz,
+                        ph.p_memsz,
+                        ph.p_flags
+                    );
+                }
+            }
+            let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base, false)?;
             let mut img = img;
 
             let initial_rsp = match map_initial_user_stack(

@@ -31,6 +31,7 @@ pub type PhysAddr = u64;
 
 /// Page-table slot used for recursive mapping.
 const RECURSIVE_SLOT: u64 = 510;
+const VMM_VERBOSE_SPLIT_LOGS: bool = false;
 
 /// Page-table flag: readable.
 pub const FLAG_READ: u64 = 1 << 0;
@@ -388,13 +389,9 @@ fn map_page_hw(virt: VirtAddr, phys: PhysAddr, flags: u64) -> Result<(), &'stati
     } else if (pd.entries[l2].0 & paging::FLAG_HUGE) != 0 {
         // Demote a 2 MiB huge PDE to a 4 KiB PT.
         //
-        // The new PT is left completely empty. The boot trampoline's blanket
-        // higher-half huge PDEs are stale convenience mappings; kernel data
-        // and page-table pages are accessed through the low-half identity
-        // window (PML4[0], virtual == physical) so no tracked mapping is lost.
-        // Repopulating the other 511 PTEs with the old identity physicals would
-        // cause the subsequent map_page_hw calls for pages [l1+1..] of a
-        // multi-page mapping to hit occupied PTEs and return "page already mapped".
+        // Preserve the previous 2 MiB identity coverage in the new PT so that
+        // unrelated low-half kernel data remains mapped while this address-space
+        // root receives targeted user mappings.
         //
         // TLB note: the boot trampoline marks its higher-half huge PDEs as
         // GLOBAL, which means a CR3 reload alone will NOT evict the stale
@@ -407,13 +404,44 @@ fn map_page_hw(virt: VirtAddr, phys: PhysAddr, flags: u64) -> Result<(), &'stati
         let new_page = pmm::alloc_page().ok_or("vmm: out of memory for pt (huge split)")?;
         pd.entries[l2].set_page(new_page, nonleaf);
 
-        // Zero all 512 entries in the new PT before use.
-        unsafe { (&mut *pt_table_ptr(l4, l3, l2)).clear() };
+        // Access to the recursive PT-view VA may still be backed by a stale
+        // huge-page TLB entry from before demotion; flush it before touching
+        // the table contents through pt_table_ptr().
+        let pt_view_va = pt_table_ptr(l4, l3, l2) as u64;
+        invlpg(pt_view_va);
+
+        // For user mappings, start from an empty PT to avoid carrying any
+        // stale/placeholder identity entries into low-half user ranges.
+        // For kernel mappings, preserve previous huge-page coverage.
+        let inherited_flags = (huge_pde & !ADDR_MASK) & !paging::FLAG_HUGE;
+        let new_pt = unsafe { &mut *pt_table_ptr(l4, l3, l2) };
+        if (flags & FLAG_USER) != 0 {
+            unsafe { (&mut *pt_table_ptr(l4, l3, l2)).clear() };
+        } else {
+            for i in 0..512usize {
+                let page_phys = huge_phys_base.saturating_add((i as u64).saturating_mul(PAGE_SIZE));
+                new_pt.entries[i].set_page(page_phys, inherited_flags);
+            }
+        }
 
         crate::console::println!(
             "vmm: split huge PDE l2={} virt={:#x} huge_base={:#x} new_pt={:#x}",
             l2, virt, huge_phys_base, new_page
         );
+        if (flags & FLAG_USER) != 0 {
+            crate::console::println!(
+                "vmm: split huge user-map zeroed-pt sample_pte0={:#x} sample_pte511={:#x}",
+                new_pt.entries[0].0,
+                new_pt.entries[511].0
+            );
+        } else {
+            crate::console::println!(
+                "vmm: split huge inherit_flags={:#x} sample_pte0={:#x} sample_pte511={:#x}",
+                inherited_flags,
+                new_pt.entries[0].0,
+                new_pt.entries[511].0
+            );
+        }
 
         // Flush the stale global 2 MiB TLB entry for the entire split window.
         invlpg(align_down(virt, HUGE_PAGE_SIZE_2M));
@@ -422,6 +450,31 @@ fn map_page_hw(virt: VirtAddr, phys: PhysAddr, flags: u64) -> Result<(), &'stati
     }
 
     let pt = unsafe { &mut *pt_table_ptr(l4, l3, l2) };
+    if pt.entries[l1].is_present() {
+        let existing_phys = pt.entries[l1].address();
+        if (flags & FLAG_USER) != 0 && existing_phys == align_down(virt, PAGE_SIZE) {
+            if VMM_VERBOSE_SPLIT_LOGS {
+                crate::console::println!(
+                    "vmm: replace inherited identity pte virt={:#x} phys_old={:#x} flags={:#x}",
+                    virt,
+                    existing_phys,
+                    flags
+                );
+            }
+            // Replace inherited identity mapping with the requested user mapping.
+            pt.entries[l1].0 = 0;
+        } else {
+            crate::console::println!(
+                "vmm: map conflict virt={:#x} phys_old={:#x} phys_new={:#x} flags={:#x}",
+                virt,
+                existing_phys,
+                phys,
+                flags
+            );
+            return Err("vmm: page already mapped");
+        }
+    }
+
     if pt.entries[l1].is_present() {
         return Err("vmm: page already mapped");
     }

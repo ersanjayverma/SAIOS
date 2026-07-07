@@ -653,26 +653,26 @@ fn linux_read(pid: u64, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
     let max_len = len as usize;
     match fd {
         0 => Ok(0),
-        1 | 2 => Err(LINUX_EINVAL),
+        1 | 2 => Err(LINUX_EBADF),
         _ => {
             let data = with_state_mut(|state| {
-                let obj_idx = state.obj_for_fd(pid, fd).ok_or(SyscallError::InvalidArgument)?;
+                let obj_idx = state.obj_for_fd(pid, fd).ok_or(LINUX_EBADF)?;
                 let obj = state
                     .objects
                     .get(obj_idx)
                     .and_then(|o| o.as_ref())
-                    .ok_or(SyscallError::InvalidArgument)?;
+                    .ok_or(LINUX_EBADF)?;
                 match obj.kind {
                     DescriptorKind::Vfs { fd: vfd, .. } => {
-                        vfs::read(vfd, max_len).map_err(|_| SyscallError::InvalidArgument)
+                        vfs::read(vfd, max_len).map_err(|_| LINUX_EINVAL)
                     }
-                    DescriptorKind::Directory(_) => Err(SyscallError::InvalidArgument),
+                    DescriptorKind::Directory(_) => Err(LINUX_EISDIR),
                     DescriptorKind::PipeRead(pipe_id) => {
                         let pipe = state
                             .pipes
                             .get_mut(pipe_id)
                             .and_then(|p| p.as_mut())
-                            .ok_or(SyscallError::InvalidArgument)?;
+                            .ok_or(LINUX_EBADF)?;
                         let available = pipe.data.len().saturating_sub(pipe.read_pos);
                         let take = available.min(max_len);
                         let start = pipe.read_pos;
@@ -685,10 +685,9 @@ fn linux_read(pid: u64, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
                         }
                         Ok(out)
                     }
-                    DescriptorKind::PipeWrite(_) => Err(SyscallError::InvalidArgument),
+                    DescriptorKind::PipeWrite(_) => Err(LINUX_EBADF),
                 }
-            })
-            .map_err(linux_errno)?;
+            })?;
             write_user_bytes(buf, data.as_slice())?;
             Ok(data.len() as u64)
         }
@@ -1480,6 +1479,10 @@ fn linux_exit_now(pid: u64, code: u64) -> ! {
 
 static FIRST_SYSCALL_LOGGED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+static SYSCALL_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
+static ENOSYS_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
+const SYSCALL_TRACE_LIMIT: u32 = 16;
+const ENOSYS_TRACE_LIMIT: u32 = 64;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn saios_linux_syscall(
@@ -1491,6 +1494,18 @@ pub extern "C" fn saios_linux_syscall(
     a4: u64,
     a5: u64,
 ) -> i64 {
+    let seq = SYSCALL_TRACE_COUNT.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    if seq <= SYSCALL_TRACE_LIMIT {
+        crate::console::println!(
+            "[syscall] seq={} nr={} a0=0x{:x} a1=0x{:x} a2=0x{:x}",
+            seq,
+            nr,
+            a0,
+            a1,
+            a2
+        );
+    }
+
     if FIRST_SYSCALL_LOGGED
         .compare_exchange(false, true,
             core::sync::atomic::Ordering::Relaxed,
@@ -1862,8 +1877,43 @@ pub extern "C" fn saios_linux_syscall(
     };
 
     match out {
-        Ok(value) => value as i64,
-        Err(code) => code,
+        Ok(value) => {
+            if seq <= SYSCALL_TRACE_LIMIT {
+                crate::console::println!(
+                    "[syscall] ret seq={} nr={} rv=0x{:x}",
+                    seq,
+                    nr,
+                    value
+                );
+            }
+            value as i64
+        }
+        Err(code) => {
+            if code == LINUX_ENOSYS {
+                let enosys_seq = ENOSYS_TRACE_COUNT
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
+                if enosys_seq <= ENOSYS_TRACE_LIMIT {
+                    crate::console::println!(
+                        "[syscall] enosys seq={} nr={} a0=0x{:x} a1=0x{:x} a2=0x{:x}",
+                        enosys_seq,
+                        nr,
+                        a0,
+                        a1,
+                        a2
+                    );
+                }
+            }
+            if seq <= SYSCALL_TRACE_LIMIT {
+                crate::console::println!(
+                    "[syscall] ret seq={} nr={} err={}",
+                    seq,
+                    nr,
+                    code
+                );
+            }
+            code
+        }
     }
 }
 

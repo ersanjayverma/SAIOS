@@ -46,14 +46,15 @@ global_asm!(
     "mov [rip + SAIOS_SYSCALL_USER_RSP], rsp",
     "mov rsp, [rip + SAIOS_SYSCALL_RSP0]",
     "and rsp, -16",
-    // Preserve userspace return state across the Rust dispatcher call.
-    "mov r12, rcx",
-    "mov r13, r11",
-    "mov r14, [rip + SAIOS_SYSCALL_USER_RSP]",
+    // Save user return state for the iret frame.
+    "sub rsp, 32",
+    "mov [rsp + 0x00], rcx", // user RIP
+    "mov [rsp + 0x08], r11", // user RFLAGS
+    "mov r11, [rip + SAIOS_SYSCALL_USER_RSP]",
+    "mov [rsp + 0x10], r11", // user RSP
     // Linux x86_64 syscall ABI at entry: rax=nr, rdi/rsi/rdx/r10/r8/r9=args.
     // Rust SysV call target: saios_linux_syscall(nr,a0,a1,a2,a3,a4,a5)
     // -> rdi,rsi,rdx,rcx,r8,r9 and 7th arg on stack.
-    "mov r15, rax",
     "sub rsp, 16",
     "mov [rsp], r9",
     "mov r9, r8",
@@ -61,14 +62,35 @@ global_asm!(
     "mov rcx, rdx",
     "mov rdx, rsi",
     "mov rsi, rdi",
-    "mov rdi, r15",
+    "mov rdi, rax",
+    // Proof marker: reached raw SYSCALL entry path.
+    "push rax",
+    "push rdx",
+    "mov dx, 0x3F8",
+    "mov al, 'S'",
+    "out dx, al",
+    "pop rdx",
+    "pop rax",
     "call {dispatch}",
+    // Proof marker: syscall dispatcher returned to asm entry path.
+    "push rax",
+    "push rdx",
+    "mov dx, 0x3F8",
+    "mov al, 'R'",
+    "out dx, al",
+    "pop rdx",
+    "pop rax",
     "add rsp, 16",
+    // Rebuild iret frame and return to user mode.
+    "mov rcx, [rsp + 0x00]", // user RIP
+    "mov r11, [rsp + 0x08]", // user RFLAGS
+    "mov rdx, [rsp + 0x10]", // user RSP
+    "add rsp, 32",
     "push {user_data}",
-    "push r14",
-    "push r13", // saved user RFLAGS from SYSCALL
+    "push rdx",
+    "push r11", // saved user RFLAGS from SYSCALL
     "push {user_code}",
-    "push r12", // saved user RIP from SYSCALL
+    "push rcx", // saved user RIP from SYSCALL
     "iretq",
     dispatch = sym saios_linux_syscall,
     user_data = const USER_DATA_SELECTOR,
