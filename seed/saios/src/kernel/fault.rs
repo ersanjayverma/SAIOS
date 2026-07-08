@@ -4,7 +4,7 @@
 //! can assert before full user-mode fault containment is implemented.
 
 use crate::kernel::constants::PF_ERR_USER;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use hal::arch::paging;
 use hal::arch::x86_64::sync::StaticCell;
@@ -28,6 +28,15 @@ static LAST_FAULT: StaticCell<Option<FaultSnapshot>> = StaticCell::new(None);
 static LAST_FAULT_LOCK: AtomicBool = AtomicBool::new(false);
 static ACTIVE_EXEC_PID: StaticCell<Option<u64>> = StaticCell::new(None);
 static ACTIVE_EXEC_FAULTED: AtomicBool = AtomicBool::new(false);
+/// Lock-free mirror of `ACTIVE_EXEC_PID` (0 = none, else pid). Real pids are
+/// never 0, so 0 is a safe "no active process" sentinel. This exists so
+/// interrupt handlers (e.g. the timer ISR) can check the active pid without
+/// ever taking `LAST_FAULT_LOCK` — that spinlock is also held briefly by
+/// ordinary kernel code in `begin_user_exec`/`end_user_exec`, and a plain
+/// hardware interrupt gate masks further interrupts on entry, so an ISR that
+/// blocks on the same lock while it happens to be held by the code it just
+/// preempted deadlocks the core forever with no further output.
+static ACTIVE_EXEC_PID_ATOMIC: AtomicU64 = AtomicU64::new(0);
 
 fn lock() {
     while LAST_FAULT_LOCK
@@ -96,9 +105,11 @@ pub fn begin_user_exec(pid: u64) {
     }
     ACTIVE_EXEC_FAULTED.store(false, Ordering::Release);
     unlock();
+    ACTIVE_EXEC_PID_ATOMIC.store(pid, Ordering::Release);
 }
 
 pub fn end_user_exec() {
+    ACTIVE_EXEC_PID_ATOMIC.store(0, Ordering::Release);
     lock();
     unsafe {
         *ACTIVE_EXEC_PID.get() = None;
@@ -111,6 +122,15 @@ pub fn active_exec_pid() -> Option<u64> {
     let pid = unsafe { *ACTIVE_EXEC_PID.get() };
     unlock();
     pid
+}
+
+/// Lock-free variant safe to call from interrupt context. See
+/// `ACTIVE_EXEC_PID_ATOMIC` for why this must not take `LAST_FAULT_LOCK`.
+pub fn active_exec_pid_lockfree() -> Option<u64> {
+    match ACTIVE_EXEC_PID_ATOMIC.load(Ordering::Acquire) {
+        0 => None,
+        pid => Some(pid),
+    }
 }
 
 pub fn mark_active_exec_faulted() {

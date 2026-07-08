@@ -2171,6 +2171,22 @@ fn unlock() {
     hal::arch::x86_64::sync::spinlock_release(&LOCK);
 }
 
+/// Point brk/mmap growth at the given page-aligned address instead of the
+/// fixed default. The default (a raw guessed low address) can land inside a
+/// still-huge kernel-identity-mapped 2 MiB PDE; growing brk there forces
+/// `vmm::map_owned` to demote and *clear* that whole 2 MiB window (see
+/// `vmm.rs`'s huge-PDE split), destroying whatever kernel mapping was really
+/// there. Callers should pass an address just past the process's own highest
+/// mapped ELF segment, which is guaranteed to be inside a range this same
+/// process already safely owns (or an already-demoted, already-user-owned
+/// page table), so growth never touches unrelated kernel memory.
+pub fn set_initial_brk(addr: u64) {
+    with_state_mut(|state| {
+        state.brk = addr;
+        state.brk_mapped_end = addr;
+    });
+}
+
 fn with_state_mut<R>(f: impl FnOnce(&mut SyscallState) -> R) -> R {
     lock();
     let out = {

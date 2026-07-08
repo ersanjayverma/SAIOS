@@ -501,6 +501,20 @@ fn map_and_load(
     })
 }
 
+/// Page-aligned address just past the highest PT_LOAD range this image owns.
+/// Used to seed brk/mmap growth in a range this process already safely owns
+/// instead of a raw guessed address that might collide with an unrelated,
+/// still-huge kernel-identity-mapped 2 MiB window (see `syscall::set_initial_brk`).
+fn brk_seed_address(img: &LoadedImage) -> u64 {
+    let end = img
+        .mapped_ranges
+        .iter()
+        .map(|r| r.end)
+        .max()
+        .unwrap_or(0);
+    align_up(end, vmm::PAGE_SIZE)
+}
+
 fn finalize_segment_protections(img: &LoadedImage) -> Result<(), &'static str> {
     for range in &img.mapped_ranges {
         let size = range.end.saturating_sub(range.start);
@@ -1006,6 +1020,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
                 return Err(e);
             }
 
+            crate::kernel::syscall::set_initial_brk(brk_seed_address(&img));
             elf_trace!("elf: phase=jump");
             let result = jump_to_entry_recoverable(img.entry, pid, initial_rsp);
             unmap_loaded(&img);
@@ -1067,6 +1082,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
             return Err(e);
         }
 
+        crate::kernel::syscall::set_initial_brk(brk_seed_address(&img));
         elf_trace!("elf: phase=jump");
         let result = jump_to_entry_recoverable(img.entry, pid, initial_rsp);
         unmap_loaded(&img);

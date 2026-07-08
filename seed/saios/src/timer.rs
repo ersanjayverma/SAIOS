@@ -39,9 +39,25 @@ const PIT_DIVISOR_LOW_BYTE_MASK: u16 = 0x00FF;
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
+/// Diagnostic watchdog: while a user process is active, periodically report
+/// the interrupted RIP so a hang with no fault marker can be told apart from
+/// a tight user-mode spin loop (same RIP every sample) vs. genuine forward
+/// progress (RIP changes / process exits before the next sample).
+const WATCHDOG_SAMPLE_TICKS: u64 = 50; // ~500ms at 100Hz
+
 #[unsafe(no_mangle)]
-extern "C" fn saios_timer_tick() {
+extern "C" fn saios_timer_tick(interrupted_rip: u64) {
     let tick = TICKS.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    if tick % WATCHDOG_SAMPLE_TICKS == 0
+        && let Some(pid) = crate::kernel::fault::active_exec_pid_lockfree()
+    {
+        crate::console::println!(
+            "[watchdog] pid={} interrupted-rip=0x{:x} tick={}",
+            pid,
+            interrupted_rip,
+            tick
+        );
+    }
     crate::scheduler::on_timer_tick(tick);
     crate::console::on_timer_tick();
     // PIC EOI for IRQ0.

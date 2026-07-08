@@ -209,9 +209,15 @@ global_asm!(
     ".global hal_timer_irq0_stub",
     "hal_timer_irq0_stub:",
     "push rax",
+    "push rdx",
+    // Marker written only after rax/rdx are saved on the stack — do not
+    // clobber ax/dx here before the rest of the interrupted context is
+    // preserved; this handler must resume the interrupted code transparently.
+    "mov dx, 0x3F8",
+    "mov al, 't'",
+    "out dx, al",
     "push rbx",
     "push rcx",
-    "push rdx",
     "push rbp",
     "push rsi",
     "push rdi",
@@ -226,6 +232,10 @@ global_asm!(
     // Rust assumes DF=0 and a SysV-aligned stack at call boundaries.
     "cld",
     "mov rbp, rsp",
+    // Interrupted RIP sits at the base of the original (pre-push) iret
+    // frame, i.e. 120 bytes above the 15 GPRs just pushed. rbp still holds
+    // that fixed offset even after the alignment below moves rsp.
+    "mov rdi, [rbp + 120]",
     "and rsp, -16",
     "call saios_timer_tick",
     "mov rsp, rbp",
@@ -240,9 +250,9 @@ global_asm!(
     "pop rdi",
     "pop rsi",
     "pop rbp",
-    "pop rdx",
     "pop rcx",
     "pop rbx",
+    "pop rdx",
     "pop rax",
     "iretq",
 
