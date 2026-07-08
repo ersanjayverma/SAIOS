@@ -15,8 +15,32 @@ use hal::arch::x86_64::sync::StaticCell;
 
 use crate::console;
 use crate::kernel::process;
+use crate::pmm;
 use crate::timer;
 use crate::vfs;
+use crate::vmm;
+
+/// Map zeroed anonymous user pages at `start`. Used by brk/mmap growth.
+fn map_user_anon_pages(start: u64, pages: usize, owner: &str) -> Result<(), &'static str> {
+    if pages == 0 {
+        return Ok(());
+    }
+    let phys = pmm::alloc_pages(pages).ok_or("syscall: no physical memory")?;
+    if let Err(e) = vmm::map_owned(
+        start,
+        phys,
+        pages,
+        vmm::FLAG_USER | vmm::FLAG_READ | vmm::FLAG_WRITE,
+        owner,
+    ) {
+        let _ = pmm::free_pages_range(phys, pages);
+        return Err(e);
+    }
+    unsafe {
+        core::ptr::write_bytes(start as *mut u8, 0, pages * vmm::PAGE_SIZE as usize);
+    }
+    Ok(())
+}
 
 /// Kernel syscall ABI version.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1336,6 +1360,42 @@ fn linux_getsid(target: u64, pid: u64) -> Result<u64, i64> {
     process::session_id(q).ok_or(LINUX_EINVAL)
 }
 
+fn linux_set_tid_address(pid: u64, clear_child_tid: u64) -> Result<u64, i64> {
+    with_state_mut(|state| {
+        let proc = state.proc_mut(pid);
+        proc.clear_child_tid = clear_child_tid;
+    });
+    Ok(pid)
+}
+
+fn linux_set_robust_list(pid: u64, head: u64, len: u64) -> Result<u64, i64> {
+    if len == 0 {
+        return Err(LINUX_EINVAL);
+    }
+    with_state_mut(|state| {
+        let proc = state.proc_mut(pid);
+        proc.robust_list_head = head;
+        proc.robust_list_len = len;
+    });
+    Ok(0)
+}
+
+fn linux_rseq(pid: u64, area: u64, len: u64, flags: u64, sig: u64) -> Result<u64, i64> {
+    if flags != 0 {
+        return Err(LINUX_EINVAL);
+    }
+    if len == 0 {
+        return Err(LINUX_EINVAL);
+    }
+    with_state_mut(|state| {
+        let proc = state.proc_mut(pid);
+        proc.rseq_area = area;
+        proc.rseq_len = len;
+        proc.rseq_sig = sig;
+    });
+    Ok(0)
+}
+
 fn linux_fcntl(pid: u64, fd: u64, cmd: u64, arg: u64) -> Result<u64, i64> {
     match cmd {
         F_GETFD => Ok(0),
@@ -1799,7 +1859,7 @@ pub extern "C" fn saios_linux_syscall(
         215 => Err(LINUX_ENOSYS),
         216 => Ok(0),
         217 => linux_getdents64(pid, a0, a1, a2),
-        218 => dispatch_custom(SyscallNumber::GetPid, [0, 0, 0, 0, 0, 0], pid),
+        218 => linux_set_tid_address(pid, a0),
         219 => Ok(0),
         220 => Err(LINUX_ENOSYS),
         221 => Ok(0),
@@ -1855,7 +1915,7 @@ pub extern "C" fn saios_linux_syscall(
             linux_poll(pid, a0, a1, timeout_ms)
         }
         272 => Ok(0),
-        273 => Ok(0),
+        273 => linux_set_robust_list(pid, a0, a1),
         274 => {
             if a1 != 0 {
                 match write_user_struct(a1, &0u64) {
@@ -1873,6 +1933,7 @@ pub extern "C" fn saios_linux_syscall(
         }
         292 => linux_dup3(pid, a0, a1),
         293 => linux_pipe2(pid, a0, a1),
+        334 => linux_rseq(pid, a0, a1, a2, a3),
         _ => Err(LINUX_ENOSYS),
     };
 
@@ -1990,6 +2051,12 @@ struct PipeBuffer {
 struct ProcessFdTable {
     pid: u64,
     slots: Vec<Option<usize>>,
+    clear_child_tid: u64,
+    robust_list_head: u64,
+    robust_list_len: u64,
+    rseq_area: u64,
+    rseq_len: u64,
+    rseq_sig: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1998,6 +2065,7 @@ struct SyscallState {
     objects: Vec<Option<DescriptorObject>>,
     pipes: Vec<Option<PipeBuffer>>,
     brk: u64,
+    brk_mapped_end: u64,
     next_mmap: u64,
 }
 
@@ -2008,6 +2076,7 @@ impl SyscallState {
             objects: Vec::new(),
             pipes: Vec::new(),
             brk: 0x0100_0000,
+            brk_mapped_end: 0x0100_0000,
             next_mmap: 0x1000_0000,
         }
     }
@@ -2018,7 +2087,16 @@ impl SyscallState {
         }
         let mut slots = Vec::new();
         slots.resize(3, None); // reserve 0,1,2
-        self.procs.push(ProcessFdTable { pid, slots });
+        self.procs.push(ProcessFdTable {
+            pid,
+            slots,
+            clear_child_tid: 0,
+            robust_list_head: 0,
+            robust_list_len: 0,
+            rseq_area: 0,
+            rseq_len: 0,
+            rseq_sig: 0,
+        });
         let idx = self.procs.len() - 1;
         &mut self.procs[idx]
     }
@@ -2557,6 +2635,9 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                 state.next_mmap = state.next_mmap.saturating_add(len_aligned);
                 base
             });
+            let pages = (len_aligned / vmm::PAGE_SIZE) as usize;
+            map_user_anon_pages(addr, pages, "linux-mmap")
+                .map_err(|_| SyscallError::InvalidArgument)?;
             Ok(addr)
         }
         SyscallNumber::Munmap => {
@@ -2566,10 +2647,22 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             Ok(0)
         }
         SyscallNumber::Brk => {
-            // args[0] = new break (0 = query current).
+            // args[0] = new break (0 = query current). Growing the break maps
+            // fresh user pages; on allocation failure the old break is
+            // returned unchanged (Linux brk contract).
             let brk = with_state_mut(|state| {
-                if req.args[0] != 0 {
-                    state.brk = req.args[0];
+                let requested = req.args[0];
+                if requested != 0 {
+                    if requested > state.brk_mapped_end {
+                        let start = state.brk_mapped_end;
+                        let end = (requested + (vmm::PAGE_SIZE - 1)) & !(vmm::PAGE_SIZE - 1);
+                        let pages = ((end - start) / vmm::PAGE_SIZE) as usize;
+                        if map_user_anon_pages(start, pages, "linux-brk").is_err() {
+                            return state.brk;
+                        }
+                        state.brk_mapped_end = end;
+                    }
+                    state.brk = requested;
                 }
                 state.brk
             });

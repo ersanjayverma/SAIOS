@@ -4,7 +4,7 @@
 //! `syscall` instructions enter the kernel through a controlled entry path.
 
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::x86_64::constants::{
     MSR_IA32_EFER, MSR_IA32_STAR, MSR_IA32_LSTAR, MSR_IA32_FMASK,
@@ -19,6 +19,9 @@ pub static SAIOS_SYSCALL_RSP0: AtomicU64 = AtomicU64::new(0);
 
 #[unsafe(no_mangle)]
 pub static SAIOS_SYSCALL_USER_RSP: AtomicU64 = AtomicU64::new(0);
+
+static IRET_FRAME_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
+const IRET_FRAME_TRACE_LIMIT: u32 = 8;
 
 #[derive(Copy, Clone, Debug)]
 pub struct SyscallMsrSnapshot {
@@ -46,56 +49,107 @@ global_asm!(
     "mov [rip + SAIOS_SYSCALL_USER_RSP], rsp",
     "mov rsp, [rip + SAIOS_SYSCALL_RSP0]",
     "and rsp, -16",
-    // Save user return state for the iret frame.
-    "sub rsp, 32",
-    "mov [rsp + 0x00], rcx", // user RIP
-    "mov [rsp + 0x08], r11", // user RFLAGS
-    "mov r11, [rip + SAIOS_SYSCALL_USER_RSP]",
-    "mov [rsp + 0x10], r11", // user RSP
-    // Linux x86_64 syscall ABI at entry: rax=nr, rdi/rsi/rdx/r10/r8/r9=args.
-    // Rust SysV call target: saios_linux_syscall(nr,a0,a1,a2,a3,a4,a5)
-    // -> rdi,rsi,rdx,rcx,r8,r9 and 7th arg on stack.
-    "sub rsp, 16",
-    "mov [rsp], r9",
-    "mov r9, r8",
-    "mov r8, r10",
-    "mov rcx, rdx",
-    "mov rdx, rsi",
-    "mov rsi, rdi",
-    "mov rdi, rax",
-    // Proof marker: reached raw SYSCALL entry path.
+    // Build the iret frame up front: SS, RSP, RFLAGS, CS, RIP.
+    "push {user_data}",
+    "push qword ptr [rip + SAIOS_SYSCALL_USER_RSP]",
+    "push r11", // user RFLAGS saved by SYSCALL
+    "push {user_code}",
+    "push rcx", // user RIP saved by SYSCALL
+    // Save the full user GPR state. Linux ABI: only rax/rcx/r11 may be
+    // clobbered across a syscall; the Rust dispatcher clobbers all
+    // caller-saved registers, so everything must be restored from here.
     "push rax",
+    "push rbx",
     "push rdx",
+    "push rsi",
+    "push rdi",
+    "push rbp",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    // Proof marker: reached raw SYSCALL entry path.
     "mov dx, 0x3F8",
     "mov al, 'S'",
     "out dx, al",
-    "pop rdx",
-    "pop rax",
+    // Linux x86_64 syscall ABI at entry: rax=nr, rdi/rsi/rdx/r10/r8/r9=args.
+    // Rust SysV call target: saios_linux_syscall(nr,a0,a1,a2,a3,a4,a5)
+    // -> rdi,rsi,rdx,rcx,r8,r9 and 7th arg on stack.
+    // Load arguments from the saved user registers on the stack.
+    "sub rsp, 16",
+    "mov rax, [rsp + 16 + 40]", // user r9  = a5
+    "mov [rsp], rax",
+    "mov rdi, [rsp + 16 + 96]", // user rax = nr
+    "mov rsi, [rsp + 16 + 64]", // user rdi = a0
+    "mov rdx, [rsp + 16 + 72]", // user rsi = a1
+    "mov rcx, [rsp + 16 + 80]", // user rdx = a2
+    "mov r8,  [rsp + 16 + 32]", // user r10 = a3
+    "mov r9,  [rsp + 16 + 48]", // user r8  = a4
     "call {dispatch}",
+    "add rsp, 16",
+    // Store the return value into the saved user rax slot.
+    "mov [rsp + 96], rax",
     // Proof marker: syscall dispatcher returned to asm entry path.
-    "push rax",
-    "push rdx",
     "mov dx, 0x3F8",
     "mov al, 'R'",
     "out dx, al",
+    // Dump the synthesized iret frame before returning to user mode.
+    // Frame layout at rsp+104: RIP, CS, RFLAGS, RSP, SS.
+    "mov rdi, rsp",
+    "add rdi, 104",
+    "call {debug_iret_frame}",
+    // Restore the full user register state and return to ring 3.
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rbp",
+    "pop rdi",
+    "pop rsi",
     "pop rdx",
+    "pop rbx",
     "pop rax",
-    "add rsp, 16",
-    // Rebuild iret frame and return to user mode.
-    "mov rcx, [rsp + 0x00]", // user RIP
-    "mov r11, [rsp + 0x08]", // user RFLAGS
-    "mov rdx, [rsp + 0x10]", // user RSP
-    "add rsp, 32",
-    "push {user_data}",
-    "push rdx",
-    "push r11", // saved user RFLAGS from SYSCALL
-    "push {user_code}",
-    "push rcx", // saved user RIP from SYSCALL
+    "mov rcx, [rsp + 0x00]", // user RIP (also restored by iretq frame)
+    "mov r11, [rsp + 0x10]", // user RFLAGS
     "iretq",
     dispatch = sym saios_linux_syscall,
+    debug_iret_frame = sym saios_debug_iret_frame,
     user_data = const USER_DATA_SELECTOR,
     user_code = const USER_CODE_SELECTOR,
 );
+
+#[unsafe(no_mangle)]
+extern "C" fn saios_debug_iret_frame(frame_ptr: u64) {
+    let seq = IRET_FRAME_TRACE_COUNT
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    if seq > IRET_FRAME_TRACE_LIMIT {
+        return;
+    }
+
+    let frame = frame_ptr as *const u64;
+    let rip = unsafe { frame.read_unaligned() };
+    let cs = unsafe { frame.add(1).read_unaligned() };
+    let rflags = unsafe { frame.add(2).read_unaligned() };
+    let rsp = unsafe { frame.add(3).read_unaligned() };
+    let ss = unsafe { frame.add(4).read_unaligned() };
+
+    crate::arch::x86_64::console::_print_force(format_args!(
+        "[syscall] iret-frame seq={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x}\n",
+        seq,
+        rip,
+        cs,
+        rflags,
+        rsp,
+        ss
+    ));
+}
 
 unsafe extern "C" {
     fn saios_syscall_entry();

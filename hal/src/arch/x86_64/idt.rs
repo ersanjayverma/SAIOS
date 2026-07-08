@@ -9,8 +9,14 @@ use core::{
 use crate::arch::x86_64::sync::StaticCell;
 
 const ERROR_CODE_VECTORS: &[u8] = &[8, 10, 11, 12, 13, 14, 17, 21, 29, 30];
+const IST_STACK_SIZE: usize = 16 * 1024;
+
+#[repr(align(16))]
+struct IstStack([u8; IST_STACK_SIZE]);
 
 static IDT: StaticCell<InterruptDescriptorTable> = StaticCell::new(InterruptDescriptorTable::new());
+static DF_IST_STACK: StaticCell<IstStack> = StaticCell::new(IstStack([0; IST_STACK_SIZE]));
+static GP_IST_STACK: StaticCell<IstStack> = StaticCell::new(IstStack([0; IST_STACK_SIZE]));
 type InvalidOpcodeHandler = fn(stack_ptr: usize) -> bool;
 type GeneralProtectionHandler = fn(error_code: usize, stack_ptr: usize) -> bool;
 type PageFaultHandler = fn(fault_addr: usize, error_code: usize, stack_ptr: usize) -> bool;
@@ -356,6 +362,13 @@ pub fn register_raw(vector: u8, handler_addr: usize) {
     }
 }
 
+pub fn set_ist(vector: u8, ist: u8) {
+    unsafe {
+        let idt = &mut *IDT.get();
+        idt.entries[vector as usize].ist = ist;
+    }
+}
+
 #[inline(always)]
 pub fn load_null_idt() {
     let raw: [u8; 10] = [0; 10];
@@ -377,6 +390,13 @@ pub fn load() {
     }
 }
 pub fn init() {
+    // Provide dedicated fault stacks so exception delivery during CPL
+    // transitions can still run handlers even if the current stack is broken.
+    let df_top = unsafe { (*DF_IST_STACK.get()).0.as_ptr().add(IST_STACK_SIZE) as u64 };
+    let gp_top = unsafe { (*GP_IST_STACK.get()).0.as_ptr().add(IST_STACK_SIZE) as u64 };
+    crate::arch::x86_64::tss::set_ist(0, df_top);
+    crate::arch::x86_64::tss::set_ist(1, gp_top);
+
     for vector in 0u8..=255 {
         register_raw(vector, saios_default_interrupt_stub as *const () as usize);
     }
@@ -392,14 +412,20 @@ pub fn init() {
     register_raw(3, saios_breakpoint_stub as *const () as usize);
     register_raw(6, saios_invalid_opcode_stub as *const () as usize);
     register_raw(8, saios_double_fault_stub as *const () as usize);
+    set_ist(8, 1);
     // Task-switch, segment-not-present, and stack-segment faults commonly
     // surface during CPL3 entry via iretq and use the same error-code frame
     // shape as #GP, so route them through the same logging/recovery path.
     register_raw(10, saios_invalid_tss_stub as *const () as usize);
+    set_ist(10, 2);
     register_raw(11, saios_segment_not_present_stub as *const () as usize);
+    set_ist(11, 2);
     register_raw(12, saios_stack_segment_stub as *const () as usize);
+    set_ist(12, 2);
     register_raw(13, saios_general_protection_stub as *const () as usize);
+    set_ist(13, 2);
     register_raw(14, saios_page_fault_stub as *const () as usize);
+    set_ist(14, 2);
 
     load();
 }
