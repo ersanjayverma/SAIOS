@@ -836,13 +836,6 @@ fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> 
         let proc_rsp0 = proc_kstack.as_mut_ptr() as u64
             + USER_PROCESS_KERNEL_STACK_SIZE as u64;
 
-        crate::console::println!(
-            "[elf] pid={} proc_kstack={:#x} proc_rsp0={:#x}",
-            pid,
-            proc_kstack.as_mut_ptr() as u64,
-            proc_rsp0
-        );
-
         let saved_rsp0 = hal::arch::x86_64::syscall::SAIOS_SYSCALL_RSP0
             .load(core::sync::atomic::Ordering::Acquire);
         hal::arch::x86_64::tss::set_rsp0(proc_rsp0);

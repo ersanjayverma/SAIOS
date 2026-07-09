@@ -256,8 +256,11 @@ global_asm!(
     "push r9",
     "push r10",
     "push r11",
-    "mov rdi, [rsp + 64]",
-    "lea rsi, [rsp + 64]",
+    // After 9 pushes (rax,rcx,rdx,rsi,rdi,r8,r9,r10,r11 = 72 bytes), the
+    // CPU-pushed error_code is at [rsp+72], followed by RIP/CS/RFLAGS/RSP/SS.
+    // Pass error_code as first arg and a pointer to the CPU frame as second.
+    "mov rdi, [rsp + 72]",
+    "lea rsi, [rsp + 72]",
     "call page_fault",
     "pop r11",
     "pop r10",

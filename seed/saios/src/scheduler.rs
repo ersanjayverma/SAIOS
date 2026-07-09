@@ -475,12 +475,34 @@ fn child_exec_entry() {
     let child_pid = data.child_pid;
     let frame     = data.child_frame;
 
+    // Allocate a dedicated kernel transition stack for the child's ring-0
+    // syscall handling.  Without this, `saios_syscall_entry` resets RSP to
+    // K_child_top on every syscall, and the resulting call chain (e.g. the
+    // execve → ELF-loader path) overwrites the `hal_enter_user_mode_from_frame`
+    // recovery frame that was saved in K_child, causing a corrupted `ret`
+    // target when `resume_from_user_fault` fires.
+    let mut child_kstack = vec![0u8; USER_PROCESS_KERNEL_STACK_SIZE].into_boxed_slice();
+    let child_rsp0 = child_kstack.as_mut_ptr() as u64
+        + USER_PROCESS_KERNEL_STACK_SIZE as u64;
+
+    let saved_rsp0 = hal::arch::x86_64::syscall::SAIOS_SYSCALL_RSP0
+        .load(core::sync::atomic::Ordering::Acquire);
+    hal::arch::x86_64::tss::set_rsp0(child_rsp0);
+    hal::arch::x86_64::syscall::set_kernel_rsp0(child_rsp0);
+    set_current_user_rsp0(child_rsp0);
+
     // Enter ring 3 as the child (fork returns 0 in rax).
     crate::kernel::fault::begin_user_exec(child_pid);
     let _returned = unsafe {
         hal::arch::x86_64::seed_support::enter_user_mode_from_frame(&frame)
     };
     crate::kernel::fault::end_user_exec();
+
+    // Restore the outer kernel transition stack before any further kernel work.
+    hal::arch::x86_64::tss::set_rsp0(saved_rsp0);
+    hal::arch::x86_64::syscall::set_kernel_rsp0(saved_rsp0);
+    set_current_user_rsp0(saved_rsp0);
+    drop(child_kstack);
 
     // The child has exited (exit syscall already marked it via exit_quiet /
     // linux_exit_now).  Ensure the process record is exited just in case.
@@ -519,13 +541,6 @@ pub fn spawn_user_child_thread(
         let mut user_stack = vec![0u8; USER_PROCESS_KERNEL_STACK_SIZE].into_boxed_slice();
         let user_rsp0 = user_stack.as_mut_ptr() as u64
             + USER_PROCESS_KERNEL_STACK_SIZE as u64;
-        crate::console::println!(
-            "[sched] spawn_child pid={} K_child={:#x} K_child_top={:#x}",
-            child_pid,
-            user_stack.as_mut_ptr() as u64,
-            user_rsp0
-        );
-
         scheduler.spawn_internal_with_user_stack(
             child_exec_entry,
             Some(user_stack),
