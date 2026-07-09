@@ -12,12 +12,17 @@ Last updated: 2026-07-09
 
 ## Latest Observed Session Outcome
 
-- `busybox ash` (isolated ET_EXEC ring3 launch) boots to a real `/root #` prompt and
-  exits cleanly in **QEMU** (verified, zero faults). In **VirtualBox** it still crashes
-  (`VMState=gurumeditation`) a few syscalls later, deterministically, on the identical
-  binary — confirmed to be running on VBox's NEM fallback backend (not real VT-x), so
-  this looks like a hypervisor-backend-specific issue rather than a remaining SAIOS bug.
-  See `status.md` for the full evidence and recommended next steps.
+- `busybox ash` is now a genuinely usable interactive login shell, verified end-to-end
+  in **both QEMU and VirtualBox**: login -> real `/root #` prompt -> type a command with
+  live echo -> command executes and prints output -> back to a fresh prompt, repeatable,
+  zero crashes. The VBox-specific triple fault (`VMState=gurumeditation`) is fully
+  root-caused and fixed (IST-forced stack switch on ring0-mode exceptions failing under
+  VBox's NEM backend specifically), and two more real bugs the fix exposed are also
+  fixed: a huge-page-split path that destroyed unrelated kernel heap memory sharing its
+  2 MiB window, and a `read(0, ...)` stdin stub that always returned EOF immediately
+  (which is why ash could never stay interactive even before the crash was fixed).
+  `ls /` hits a separate, minor, non-crashing VFS permission bug -- noted as a follow-up,
+  not blocking. Full detail in `status.md`.
 
 ## Latest Applied Correction
 

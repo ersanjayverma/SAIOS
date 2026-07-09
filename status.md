@@ -182,6 +182,54 @@ mystery in `constants.rs` was confirmed to reproduce under *both* QEMU and VBox,
    specifically (VBox's own logging, or attaching via `VBoxManage debugvm`), since QEMU
    tracing is no longer reproducing the failure to compare against.
 
+## 2026-07-09 (continued): root-caused and fixed the real VBox architecture bug, plus made ash actually interactive
+
+The panic dumps unlocked by the IST fix above immediately paid off — they pointed
+straight at two more real, fixable bugs, found in the same session:
+
+### Bug: huge-page split zeroed unrelated kernel memory sharing its 2 MiB window
+
+`vmm::map_owned`'s huge-PDE-demote path, when the new mapping was `FLAG_USER`, started
+the freshly-split page table **empty** instead of inheriting the huge page's previous
+coverage (`unsafe { (&mut *pt_table_ptr(...)).clear() }`), on the theory that this
+avoided "leaking" stale kernel identity entries into a user range. It didn't need to:
+inherited entries come from a kernel-owned huge PDE and never carry `FLAG_USER`, so
+ring3 code could never reach them either way — clearing bought no isolation. What it
+did do is destroy every *other* 4 KiB page inside that same 2 MiB window that happened
+to be in real use for something unrelated — confirmed to be exactly what corrupted the
+kernel heap backing `vfs::TmpFs`'s node table (`Vec<Option<Node>>`) when busybox's
+low-address ET_EXEC RW segment (`0x6371c0`-`0x648070`) shared a 2 MiB window
+(`0x600000`-`0x800000`) with an in-use kernel heap chunk. `TmpFs::node()`'s bounds check
+(`idx < len`) correctly passed, yet the read still `#PF`'d, because `len` was accurate
+but the backing pages the split had just wiped out weren't. Fixed by always inheriting
+the huge page's coverage across all 512 entries, regardless of whether the new mapping
+is `FLAG_USER`.
+
+### Bug: `read(0, ...)` (stdin) always returned EOF immediately — ash could never be interactive
+
+`linux_read`'s `fd == 0` arm was a stub: `0 => Ok(0)`, unconditionally. Every ring3 shell
+launch saw immediate EOF on its very first stdin read and exited right after printing
+its prompt (correct behavior for a shell that reads EOF) -- it never had a chance to be
+interactive, in QEMU or VBox alike. This is almost certainly the root cause behind
+"ash failed errno=-2 (trying fallback candidate)" landing on busybox as a fallback in
+the first place, and why nobody had noticed ash exits immediately even once the crash
+was fixed. Fixed by wiring `fd == 0` to `console::poll_input()` -- the same
+non-interrupt-driven (direct PS/2/USB/serial port polling), line-editing/echo-capable
+input source the kernel's own SNSH shell already uses -- busy-waiting for a completed
+line and handing it to the caller. Since busybox ash's own line editor reads stdin a
+single byte at a time (it implements its own echo/editing when it can't get a real
+tty, per "ash: can't access tty; job control turned off"), a completed line has to
+survive across many separate `read()` calls rather than being truncated to the first
+`read()`'s buffer size; added a small pending-bytes buffer (`STDIN_PENDING`) so each
+call drains only what its caller asked for and the remainder carries over.
+
+**Verified end-to-end in VirtualBox** (not just QEMU): login -> `busybox ash` launches,
+prints a real `/root #` prompt, accepts typed commands with live echo, executes them
+(`echo HELLO_INTERACTIVE` printed `HELLO_INTERACTIVE`), and returns to a fresh prompt
+for the next command -- repeatable, no crash, `VMState=running` throughout. `ls /`
+surfaced a separate, unrelated, minor bug ("Permission denied" from a VFS permission
+check) -- not a crash, just worth a follow-up.
+
 ## Notes
 - Keep this file updated after every substantial change.
 - `status.md` is the canonical v0.4 closure tracker; `State.md` mirrors concise runtime snapshots.

@@ -673,10 +673,55 @@ fn linux_close(pid: u64, fd: u64) -> Result<u64, i64> {
     dispatch_custom(SyscallNumber::Close, [fd, 0, 0, 0, 0, 0], pid)
 }
 
+/// Bytes from the most recently completed console input line that haven't
+/// been handed to a `read(0, ...)` caller yet. See `linux_read`'s fd==0 arm.
+static STDIN_PENDING: StaticCell<Vec<u8>> = StaticCell::new(Vec::new());
+
 fn linux_read(pid: u64, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
     let max_len = len as usize;
     match fd {
-        0 => Ok(0),
+        0 => {
+            // Read from the interactive console, canonical-tty style: a
+            // whole line is captured at once (editing/echo already handled
+            // by `console::poll_input` itself), but handed out to the
+            // caller in whatever chunk size *it* asks for. ash's own line
+            // editor reads stdin a single byte at a time, so a completed
+            // line has to survive across many separate `read()` calls --
+            // stashed here in `STDIN_PENDING` -- rather than being
+            // truncated to the first `max_len` bytes and discarding the
+            // rest (which made every read after the first return only its
+            // first byte, e.g. "e" of "echo ...", with the remainder of
+            // the line silently lost).
+            //
+            // This used to unconditionally return `Ok(0)` (immediate EOF)
+            // -- a stub that made every ring3 shell (ash included) see EOF
+            // on its very first read and exit right after printing its
+            // prompt, since a shell reading EOF on stdin is completely
+            // correct end-of-input behavior. It never had a real chance to
+            // be interactive.
+            //
+            // `console::poll_input` polls PS/2/USB/serial hardware
+            // directly (not interrupt-driven), so busy-waiting on it here
+            // is safe even though IF is 0 for the whole duration of syscall
+            // handling (see `USER_ENTRY_ENABLE_INTERRUPTS` in
+            // hal::arch::x86_64::constants) -- it never depends on an IRQ
+            // actually being delivered.
+            let pending = unsafe { &mut *STDIN_PENDING.get() };
+            if pending.is_empty() {
+                let mut line = loop {
+                    if let Some(line) = console::poll_input() {
+                        break line;
+                    }
+                    core::hint::spin_loop();
+                };
+                let _ = line.push('\n');
+                pending.extend_from_slice(line.as_bytes());
+            }
+            let take = pending.len().min(max_len);
+            write_user_bytes(buf, &pending[..take])?;
+            pending.drain(..take);
+            Ok(take as u64)
+        }
         1 | 2 => Err(LINUX_EBADF),
         _ => {
             let data = with_state_mut(|state| {
