@@ -214,6 +214,20 @@ fn add_map_range(ranges: &mut Vec<MapRange>, mut newr: MapRange) {
     ranges.push(newr);
 }
 
+fn clear_existing_user_pages(start: u64, end: u64) -> Result<(), &'static str> {
+    let mut current = start;
+    while current < end {
+        if vmm::inspect_mapping_current(current)
+            .map(|info| info.user)
+            .unwrap_or(false)
+        {
+            let _ = vmm::unmap_pages_untracked(current, 1);
+        }
+        current = current.saturating_add(vmm::PAGE_SIZE);
+    }
+    Ok(())
+}
+
 fn runtime_base(h: &ElfHeader, image_base: u64) -> u64 {
     if h.e_type == ET_DYN { image_base } else { 0 }
 }
@@ -369,11 +383,7 @@ fn map_and_load(
         );
 
         if clear_existing_mappings {
-            // Remove stale tracked mappings from prior attempts. Do not force an
-            // untracked teardown here: dropping a shared low-half huge mapping can
-            // invalidate unrelated kernel source bytes used by the loader copy path.
-            // `map_owned`/`map_page_hw` handles huge-PDE split at map time.
-            let _ = vmm::unmap(r.start);
+            clear_existing_user_pages(r.start, r.end)?;
         }
 
         let phys = pmm::alloc_pages(pages).ok_or("elf: no physical memory for segment")?;
@@ -1038,13 +1048,13 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64, args: &[&str]) -> Res
     if let Some(exec_root) = exec_root {
         if header.e_type == ET_DYN {
             elf_trace!(
-                "elf: ET_DYN using cloned address-space root with low-half cleanup"
+                "elf: ET_DYN using cloned address-space root with replacement cleanup"
             );
         }
 
         if header.e_type == ET_EXEC {
             elf_trace!(
-                "elf: ET_EXEC using cloned address-space root cr3=0x{:x}",
+                "elf: ET_EXEC using cloned address-space root with replacement cleanup cr3=0x{:x}",
                 exec_root
             );
         }
@@ -1071,7 +1081,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64, args: &[&str]) -> Res
                     );
                 }
             }
-            let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base, false)?;
+            let img = map_and_load(bytes.as_slice(), &header, phs.as_slice(), base, true)?;
             let mut img = img;
 
             let initial_rsp = match map_initial_user_stack(

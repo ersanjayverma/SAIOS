@@ -1,6 +1,6 @@
 # SAIOS v0.4 Status
 
-Last updated: 2026-07-10 (forked ash child PID attribution fix implemented; live boot verification pending)
+Last updated: 2026-07-10 (ash fork/exec now reaches exec path; ET_EXEC replacement map-conflict fix implemented)
 
 ## Objective
 Finish v0.4 foundation with stable static ELF execution, realistic Linux ABI behavior, and init/session correctness.
@@ -306,6 +306,25 @@ Validation completed here: `cargo check` from `seed/saios` passed, and the relea
 loader/kernel plus `saios.iso` rebuilt successfully. Live `ash -> ls` smoke testing is
 still pending in this environment because neither `qemu-system-x86_64` nor `VBoxManage`
 is available on PATH.
+
+### 2026-07-10: current serial log showed child exec reached loader but failed replacing `ash` image
+
+The latest serial log shows the previous PID-attribution fix moved the failure forward:
+after `cd /`, `cd bin`, and `ls`, `ash` now reports `ls: Invalid argument` instead of
+silently producing no output. The decisive evidence is the pair of map conflicts at
+`virt=0x400000` while launching `ls`: the child is reaching the ELF load path for
+busybox/`ls`, but the isolated ET_EXEC path was still created by cloning the current CR3.
+That clone carried the already-mapped busybox/`ash` low-half image into the child exec
+root, so mapping the replacement busybox image at the same ET_EXEC virtual address
+failed with `vmm: page already mapped`/`EINVAL`.
+
+Implemented fix: isolated ET_EXEC/ET_DYN execution now uses
+`vmm::create_user_address_space_root()` instead of
+`vmm::clone_current_address_space_root()`. A fresh user root shares the live kernel
+high half but starts with an empty user low half, matching exec semantics: the new image
+replaces the old one instead of inheriting its mappings. Validation completed here:
+`cargo check` passed and the release UEFI loader/kernel plus `saios.iso` rebuilt
+successfully. Live `ash -> ls` retest is still pending on the user's boot environment.
 
 ## Notes
 - Keep this file updated after every substantial change.
