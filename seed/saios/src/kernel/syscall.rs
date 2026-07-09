@@ -625,6 +625,7 @@ fn descriptor_path(state: &SyscallState, pid: u64, fd: u64) -> Result<String, Sy
         .ok_or(SyscallError::InvalidArgument)?;
     match &obj.kind {
         DescriptorKind::Vfs { path, .. } | DescriptorKind::Directory(path) => Ok(path.clone()),
+        DescriptorKind::Tty => Ok("/dev/tty".to_string()),
         DescriptorKind::PipeRead(_) | DescriptorKind::PipeWrite(_) => {
             Err(SyscallError::InvalidArgument)
         }
@@ -653,6 +654,14 @@ fn resolve_at_path_str(pid: u64, dirfd: u64, path: &str) -> Result<String, i64> 
 }
 
 fn linux_open_path(pid: u64, path: &str, flags: u64) -> Result<u64, i64> {
+    if path == "/dev/tty" || path == "/dev/console" {
+        let fd = with_state_mut(|state| {
+            let obj = state.alloc_object(DescriptorKind::Tty);
+            state.alloc_fd(pid, obj)
+        });
+        return Ok(fd);
+    }
+
     let opts = decode_open_options(flags);
     if let Ok(stat) = vfs::stat(path)
         && stat.kind == vfs::FileType::Directory
@@ -750,6 +759,7 @@ fn linux_read(pid: u64, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
                         vfs::read(vfd, max_len).map_err(|_| LINUX_EINVAL)
                     }
                     DescriptorKind::Directory(_) => Err(LINUX_EISDIR),
+                    DescriptorKind::Tty => Err(LINUX_EBADF),
                     DescriptorKind::PipeRead(pipe_id) => {
                         let pipe = state
                             .pipes
@@ -803,6 +813,11 @@ fn linux_write(pid: u64, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
                         vfs::write(vfd, data).map_err(|_| SyscallError::InvalidArgument)
                     }
                     DescriptorKind::Directory(_) => Err(SyscallError::InvalidArgument),
+                    DescriptorKind::Tty => {
+                        let text = core::str::from_utf8(data).unwrap_or("<binary>");
+                        console::print(text);
+                        Ok(data.len())
+                    }
                     DescriptorKind::PipeWrite(pipe_id) => {
                         let pipe = state
                             .pipes
@@ -2037,6 +2052,7 @@ fn open_mode_to_options(mode: u64) -> Option<vfs::OpenOptions> {
 enum DescriptorKind {
     Vfs { fd: vfs::VfsFd, path: String },
     Directory(String),
+    Tty,
     PipeRead(usize),
     PipeWrite(usize),
 }
@@ -2338,7 +2354,7 @@ fn poll_fd_mask(
     };
     let mut revents = 0u64;
     match obj.kind {
-        DescriptorKind::Vfs { .. } | DescriptorKind::Directory(_) => {
+        DescriptorKind::Vfs { .. } | DescriptorKind::Directory(_) | DescriptorKind::Tty => {
             revents |= requested & (POLLIN | POLLOUT);
         }
         DescriptorKind::PipeRead(pipe_id) => {
@@ -2523,6 +2539,7 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                         vfs::read(vfd, max_len).map_err(|_| SyscallError::InvalidArgument)
                     }
                     DescriptorKind::Directory(_) => Err(SyscallError::InvalidArgument),
+                    DescriptorKind::Tty => Err(SyscallError::InvalidArgument),
                     DescriptorKind::PipeRead(pipe_id) => {
                         let pipe = state
                             .pipes
@@ -2586,6 +2603,11 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                                 vfs::write(vfd, data).map_err(|_| SyscallError::InvalidArgument)
                             }
                             DescriptorKind::Directory(_) => Err(SyscallError::InvalidArgument),
+                            DescriptorKind::Tty => {
+                                let text = core::str::from_utf8(data).unwrap_or("<binary>");
+                                console::print(text);
+                                Ok(data.len())
+                            }
                             DescriptorKind::PipeWrite(pipe_id) => {
                                 let pipe = state
                                     .pipes
@@ -2841,13 +2863,14 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                         }
                         _ => Ok(0),
                     },
+                    TCGETS => Ok(0),
                     TIOCGPGRP => Ok(process::foreground_process_group().unwrap_or(ctx.pid)),
                     TIOCSPGRP => {
                         process::set_foreground_process_group(value)
                             .map_err(|_| SyscallError::InvalidArgument)?;
                         Ok(0)
                     }
-                    TCGETS | TIOCGWINSZ => Err(SyscallError::NotTty),
+                    TIOCGWINSZ => Ok((24u64 << 16) | 80u64),
                     _ => Err(SyscallError::NotTty),
                 }
             })

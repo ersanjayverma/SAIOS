@@ -95,6 +95,10 @@ struct ThreadRecord {
     /// Restored when the thread is switched back in so syscalls can resolve
     /// the correct process pid.
     saved_active_exec_pid: Option<u64>,
+    /// CR3 active when this thread was last context-switched out.
+    /// User-exec threads can run under isolated roots; kernel-only threads
+    /// must restore the kernel root before resuming.
+    saved_cr3: u64,
 }
 
 struct Scheduler {
@@ -171,6 +175,7 @@ impl Scheduler {
             waiting_for_pid: None,
             fault_recovery: FaultRecoveryContext::default(),
             saved_active_exec_pid: None,
+            saved_cr3: crate::vmm::stats().cr3 & crate::vmm::ADDR_MASK,
         });
 
         let idx = self.threads.len() - 1;
@@ -303,6 +308,8 @@ fn do_schedule() {
         hal::arch::x86_64::seed_support::save_fault_recovery_context();
     scheduler.threads[old_idx].saved_active_exec_pid =
         crate::kernel::fault::active_exec_pid();
+    scheduler.threads[old_idx].saved_cr3 =
+        hal::arch::paging::read_cr3() & crate::vmm::ADDR_MASK;
 
     if scheduler.threads[old_idx].thread.state == ThreadState::Running && old_idx != scheduler.idle
     {
@@ -325,12 +332,20 @@ fn do_schedule() {
     // Restore the incoming thread's fault recovery context and exec pid.
     let new_recovery = scheduler.threads[next_idx].fault_recovery;
     let new_exec_pid = scheduler.threads[next_idx].saved_active_exec_pid;
+    let kernel_cr3 = crate::vmm::stats().cr3 & crate::vmm::ADDR_MASK;
+    let new_cr3 = match scheduler.threads[next_idx].saved_cr3 {
+        0 => kernel_cr3,
+        cr3 => cr3 & crate::vmm::ADDR_MASK,
+    };
 
     let old_ctx = &mut scheduler.threads[old_idx].thread.context as *mut CpuContext;
     let new_ctx = &scheduler.threads[next_idx].thread.context as *const CpuContext;
 
-    // Restore the incoming thread's recovery context and exec pid BEFORE the
-    // context switch so they are in effect as soon as that thread resumes.
+    // Restore the incoming thread's CR3, recovery context, and exec pid BEFORE
+    // the context switch so they are in effect as soon as that thread resumes.
+    if new_cr3 != 0 && (hal::arch::paging::read_cr3() & crate::vmm::ADDR_MASK) != new_cr3 {
+        unsafe { hal::arch::paging::write_cr3(new_cr3) };
+    }
     unsafe {
         hal::arch::x86_64::seed_support::restore_fault_recovery_context(&new_recovery);
     }
@@ -372,6 +387,7 @@ pub fn init() {
             waiting_for_pid: None,
             fault_recovery: FaultRecoveryContext::default(),
             saved_active_exec_pid: None,
+            saved_cr3: hal::arch::paging::read_cr3() & crate::vmm::ADDR_MASK,
         });
         scheduler.current = 0;
 

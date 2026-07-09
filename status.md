@@ -330,6 +330,24 @@ image is mapped at the same virtual addresses. Validation completed here: `cargo
 passed, and the release UEFI loader/kernel plus `saios.iso` rebuilt successfully. Live
 `ash -> ls` retest is still pending on the user's boot environment.
 
+### 2026-07-10: current serial log showed separate tty warning and scheduler CR3 leak during `ls`
+
+The latest serial log selected `ash: can't access tty; job control turned off`, followed
+by `ls` and then a kernel-mode page fault at `rip=0xffffffff801a8d26` with
+`cr3=0x2ec7000`. Resolving the RIP against the release kernel places it in the optimized
+`saios_kernel_main`/idle path immediately after interrupts are enabled, not inside the
+`ls` binary itself. That means the scheduler had switched back to a kernel/idle thread
+while the child's isolated process CR3 was still loaded.
+
+Implemented fixes: scheduler thread records now save and restore CR3 alongside the
+existing per-thread fault-recovery and active-exec-pid context, falling back to the
+kernel root for kernel-only threads. This prevents idle/main kernel code from running
+under an isolated user process page table after timer/preemption. Separately, `/dev/tty`
+and `/dev/console` now open as a minimal TTY descriptor, write to the console, poll as a
+terminal, and answer the same basic tty ioctls as fds 0-2, which should suppress ash's
+controlling-tty warning. Validation completed here: `cargo check` passed, and the
+release UEFI loader/kernel plus `saios.iso` rebuilt successfully.
+
 ## Notes
 - Keep this file updated after every substantial change.
 - `status.md` is the canonical v0.4 closure tracker; `State.md` mirrors concise runtime snapshots.

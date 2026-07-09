@@ -70,6 +70,11 @@ Last updated: 2026-07-10
   keeps cloned roots for loader reachability but clears inherited user pages in each
   replacement PT_LOAD range before mapping the exec image. `cargo check` passed and
   `saios.iso` was rebuilt; live boot retest is pending.
+- Latest serial log also showed `ash: can't access tty; job control turned off` and then
+  a kernel-mode page fault after `ls` with the child isolated CR3 still loaded in the
+  idle/main path. Fixed scheduler context switching to save/restore CR3 per thread and
+  added a minimal `/dev/tty`/`/dev/console` descriptor so ash can open a controlling tty
+  and use the basic tty ioctls. `cargo check` passed and `saios.iso` was rebuilt.
 
 ## Canonical Tracker
 
