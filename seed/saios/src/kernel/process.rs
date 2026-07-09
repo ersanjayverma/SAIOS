@@ -701,7 +701,7 @@ pub fn spawn_from(
     );
 
     let run = if metadata.load_segments > 0 {
-        crate::kernel::elf_loader::load_and_run(resolved.as_str(), image_base, pid)
+        crate::kernel::elf_loader::load_and_run(resolved.as_str(), image_base, pid, args)
     } else {
         programs::execute_path(resolved.as_str(), program_name, args, env)
     };

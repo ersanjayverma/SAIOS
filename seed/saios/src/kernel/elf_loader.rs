@@ -590,6 +590,7 @@ fn auxv_phdr_addr(phs: &[ProgramHeader], h: &ElfHeader, base: u64) -> Option<u64
 
 fn map_initial_user_stack(
     path: &str,
+    extra_args: &[&str],
     h: &ElfHeader,
     phs: &[ProgramHeader],
     entry: u64,
@@ -651,6 +652,19 @@ fn map_initial_user_stack(
     sp = stack_push_bytes(sp, arg0.as_slice())?;
     let arg0_ptr = sp;
 
+    // Extra argv entries (e.g. "ash" so a busybox multi-call binary dispatches
+    // to that applet instead of printing its usage banner). Pushed in reverse
+    // so the resulting pointers come out in the original order.
+    let mut extra_arg_ptrs = Vec::with_capacity(extra_args.len());
+    for arg in extra_args.iter().rev() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(arg.as_bytes());
+        bytes.push(0);
+        sp = stack_push_bytes(sp, bytes.as_slice())?;
+        extra_arg_ptrs.push(sp);
+    }
+    extra_arg_ptrs.reverse();
+
     // AT_RANDOM: 16 bytes libc uses to seed the stack-protector canary and
     // (on some libcs) TLS. Not present before caused musl/glibc startup to
     // stall silently before main() ever ran, with no further syscalls and no
@@ -694,16 +708,20 @@ fn map_initial_user_stack(
     // envp terminator
     sp = stack_push_u64(sp, 0)?;
 
-    // argv[1] = NULL, argv[0] = arg0
+    // argv[] = [arg0, extra_args..., NULL]
     sp = stack_push_u64(sp, 0)?;
+    for &ptr in extra_arg_ptrs.iter().rev() {
+        sp = stack_push_u64(sp, ptr)?;
+    }
     sp = stack_push_u64(sp, arg0_ptr)?;
     let argv_ptr = sp;
 
-    // argc
-    sp = stack_push_u64(sp, 1)?;
+    let argc = 1 + extra_arg_ptrs.len() as u64;
+    sp = stack_push_u64(sp, argc)?;
 
     elf_trace!(
-        "elf: startup argc=1 argv=0x{:x} argv0=0x{:x}",
+        "elf: startup argc={} argv=0x{:x} argv0=0x{:x}",
+        argc,
         argv_ptr,
         arg0_ptr
     );
@@ -834,7 +852,7 @@ fn can_use_isolated_address_space() -> bool {
     crate::heap::dynamic_mappings_available()
 }
 
-pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'static str> {
+pub fn load_and_run(path: &str, image_base: u64, pid: u64, args: &[&str]) -> Result<i32, &'static str> {
     let handle = saifs::open(path).map_err(|_| "elf: open failed")?;
     let bytes = handle.read().map_err(|_| "elf: read failed")?;
     let image_ptr = bytes.as_ptr() as u64;
@@ -1003,6 +1021,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
 
             let initial_rsp = match map_initial_user_stack(
                 path,
+                args,
                 &header,
                 phs.as_slice(),
                 img.entry,
@@ -1065,6 +1084,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64) -> Result<i32, &'stat
 
         let initial_rsp = match map_initial_user_stack(
             path,
+            args,
             &header,
             phs.as_slice(),
             img.entry,
