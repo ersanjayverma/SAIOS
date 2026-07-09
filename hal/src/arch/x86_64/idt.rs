@@ -17,6 +17,14 @@ struct IstStack([u8; IST_STACK_SIZE]);
 static IDT: StaticCell<InterruptDescriptorTable> = StaticCell::new(InterruptDescriptorTable::new());
 static DF_IST_STACK: StaticCell<IstStack> = StaticCell::new(IstStack([0; IST_STACK_SIZE]));
 static GP_IST_STACK: StaticCell<IstStack> = StaticCell::new(IstStack([0; IST_STACK_SIZE]));
+/// Dedicated stack for hardware IRQs that can interrupt ring 3 (currently
+/// just the PIT timer, vector 32). Without an IST, a ring3->ring0 interrupt
+/// falls back to TSS.RSP0 for the stack switch; that path raises #SS the
+/// instant the timer fires while user code is running, which cascades to a
+/// double fault whose own delivery also hits #SS, forcing a triple fault.
+/// Confirmed via QEMU's `-d int` trace: v=20 (timer) at cpl=3 -> #SS -> #DF
+/// -> #SS again -> triple fault, reproducible on the very first ring3 entry.
+static IRQ_IST_STACK: StaticCell<IstStack> = StaticCell::new(IstStack([0; IST_STACK_SIZE]));
 type InvalidOpcodeHandler = fn(stack_ptr: usize) -> bool;
 type GeneralProtectionHandler = fn(error_code: usize, stack_ptr: usize) -> bool;
 type PageFaultHandler = fn(fault_addr: usize, error_code: usize, stack_ptr: usize) -> bool;
@@ -407,6 +415,18 @@ pub fn set_ist(vector: u8, ist: u8) {
     }
 }
 
+/// Debug readback: (ist field, offset, selector, attributes) for a vector.
+pub fn debug_entry(vector: u8) -> (u8, u64, u16, u8) {
+    unsafe {
+        let idt = &*IDT.get();
+        let e = &idt.entries[vector as usize];
+        let offset = (e.offset_low as u64)
+            | ((e.offset_mid as u64) << 16)
+            | ((e.offset_high as u64) << 32);
+        (e.ist, offset, e.selector, e.attributes)
+    }
+}
+
 #[inline(always)]
 pub fn load_null_idt() {
     let raw: [u8; 10] = [0; 10];
@@ -432,8 +452,10 @@ pub fn init() {
     // transitions can still run handlers even if the current stack is broken.
     let df_top = unsafe { (*DF_IST_STACK.get()).0.as_ptr().add(IST_STACK_SIZE) as u64 };
     let gp_top = unsafe { (*GP_IST_STACK.get()).0.as_ptr().add(IST_STACK_SIZE) as u64 };
+    let irq_top = unsafe { (*IRQ_IST_STACK.get()).0.as_ptr().add(IST_STACK_SIZE) as u64 };
     crate::arch::x86_64::tss::set_ist(0, df_top);
     crate::arch::x86_64::tss::set_ist(1, gp_top);
+    crate::arch::x86_64::tss::set_ist(2, irq_top);
 
     for vector in 0u8..=255 {
         register_raw(vector, saios_default_interrupt_stub as *const () as usize);
@@ -464,6 +486,13 @@ pub fn init() {
     set_ist(13, 2);
     register_raw(14, saios_page_fault_stub as *const () as usize);
     set_ist(14, 2);
+
+    // The PIT timer IRQ (vector 32) also needs IST slot 3 (irq_top, tss
+    // index 2) — see IRQ_IST_STACK above for why. It can't be wired up here:
+    // timer::init() calls register_raw() for vector 32 *after* this function
+    // runs, and register_raw()/set_handler_addr() unconditionally clears the
+    // entry's IST field. timer::init() re-applies set_ist(32, 3) itself,
+    // immediately after its register_raw() call.
 
     load();
 }

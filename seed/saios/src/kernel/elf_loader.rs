@@ -1,5 +1,5 @@
 use crate::kernel::constants::{
-    AT_ENTRY, AT_EXECFN, AT_NULL, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ,
+    AT_ENTRY, AT_EXECFN, AT_NULL, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_RANDOM,
     ELFCLASS64, ELFDATA2LSB, EM_X86_64, ET_DYN, ET_EXEC, EV_CURRENT, ELF_MAGIC,
     DT_NULL, DT_RELA, DT_RELASZ, DT_RELAENT, DT_RELACOUNT, R_X86_64_RELATIVE,
     PF_R, PF_W, PF_X, PT_DYNAMIC, PT_INTERP, PT_LOAD,
@@ -651,9 +651,26 @@ fn map_initial_user_stack(
     sp = stack_push_bytes(sp, arg0.as_slice())?;
     let arg0_ptr = sp;
 
+    // AT_RANDOM: 16 bytes libc uses to seed the stack-protector canary and
+    // (on some libcs) TLS. Not present before caused musl/glibc startup to
+    // stall silently before main() ever ran, with no further syscalls and no
+    // fault — this isn't cryptographically random, just non-zero/non-constant
+    // filler, which is all libc startup actually requires here.
+    let random_seed: [u8; 16] = {
+        let mut bytes = [0u8; 16];
+        let mix = sp ^ (entry.rotate_left(17)) ^ (base.rotate_left(29));
+        bytes[0..8].copy_from_slice(&mix.to_le_bytes());
+        bytes[8..16].copy_from_slice(&(!mix).to_le_bytes());
+        bytes
+    };
+    sp = stack_push_bytes(sp, &random_seed)?;
+    let random_ptr = sp;
+
     sp = stack_align_down(sp, 16);
 
     // auxv: minimal Linux-compatible vector.
+    sp = stack_push_u64(sp, random_ptr)?;
+    sp = stack_push_u64(sp, AT_RANDOM)?;
     sp = stack_push_u64(sp, arg0_ptr)?;
     sp = stack_push_u64(sp, AT_EXECFN)?;
     sp = stack_push_u64(sp, entry)?;

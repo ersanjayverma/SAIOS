@@ -102,9 +102,26 @@ pub const USER_TRANSITION_GUARD_SIZE: usize = 4096;
 
 // ─── User-mode entry control ─────────────────────────────────────────────────
 
-/// Whether interrupts are re-enabled on entry to ring-3. `false` during
-/// debugging so no timer preemption occurs before the first instruction.
-pub const USER_ENTRY_ENABLE_INTERRUPTS: bool = true;
+/// Whether interrupts are re-enabled on entry to ring-3.
+///
+/// Kept `false`: a hardware IRQ (confirmed via QEMU's `-d int` trace: the PIT
+/// timer, vector 32) landing during ring-3 execution under the isolated
+/// per-process CR3 (see `vmm::clone_current_address_space_root`) reliably
+/// raises #SS on delivery, which cascades #SS -> #DF -> #SS -> triple fault —
+/// reproducible on the very first ring3 entry, before a single user
+/// instruction runs. This happens even with a dedicated IST stack for vector
+/// 32 (IDT ist field, TSS.ist slot, and the backing stack are all verified
+/// present in the cloned page tables) and with TSS/GDT/RSP0 all verified
+/// mapped too, so the cause is deeper than any of those — most likely in how
+/// the recursive address-space clone or the emulator's interrupt-delivery
+/// path interacts with a CR3 that isn't the one active when `ltr`/`lidt`
+/// originally ran. Disabling IF on ring-3 entry (and thus for the isolated
+/// process's whole run, since syscalls preserve the caller's RFLAGS)
+/// sidesteps it entirely: verified via QEMU trace to run 6+ clean syscalls
+/// (brk, arch_prctl, set_tid_address, rseq, ...) with zero fault. The
+/// tradeoff is no preemption for isolated ET_EXEC/ET_DYN processes until the
+/// underlying interrupt-delivery issue is root-caused.
+pub const USER_ENTRY_ENABLE_INTERRUPTS: bool = false;
 
 // ─── RFLAGS ──────────────────────────────────────────────────────────────────
 

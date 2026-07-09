@@ -75,3 +75,7 @@ pub fn set_rsp0(stack: u64) {
 pub fn rsp0() -> u64 {
     unsafe { (*TSS.get()).rsp[0] }
 }
+
+pub fn ist(index: usize) -> u64 {
+    unsafe { (*TSS.get()).ist[index] }
+}

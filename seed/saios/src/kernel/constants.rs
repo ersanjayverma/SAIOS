@@ -66,6 +66,7 @@ pub const AT_PHENT: u64 = 4;
 pub const AT_PHNUM: u64 = 5;
 pub const AT_PAGESZ: u64 = 6;
 pub const AT_ENTRY: u64 = 9;
+pub const AT_RANDOM: u64 = 25;
 pub const AT_EXECFN: u64 = 31;
 pub const PF_ERR_USER: usize = 1 << 2;
 

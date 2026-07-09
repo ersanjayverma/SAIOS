@@ -124,6 +124,12 @@ pub fn init() {
     remap_pic();
     init_pit();
     idt::register_raw(TIMER_VECTOR, hal::arch::x86_64::seed_support::timer_irq0_stub_addr());
+    // register_raw() unconditionally clears the IDT entry's IST field, so the
+    // dedicated IST stack set up in idt::init() must be re-applied here,
+    // after registration — otherwise the timer IRQ falls back to TSS.RSP0
+    // for its ring3->ring0 stack switch, which raises #SS -> #DF -> #SS ->
+    // triple fault the moment a tick lands while user code is running.
+    idt::set_ist(TIMER_VECTOR, 3);
 }
 
 /// Returns the number of timer ticks since initialization.
