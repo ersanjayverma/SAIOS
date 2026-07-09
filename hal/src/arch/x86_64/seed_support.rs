@@ -312,7 +312,14 @@ global_asm!(
     "mov al, 'B'",
     "out dx, al",
 
+    // Zero all GPRs the SysV entry ABI cares about before handing off to
+    // user code. In particular rdx must be 0 (it's the "rtld_fini"
+    // function-pointer slot _start propagates into __libc_start_main's
+    // rtld_fini param) -- the debug marker above clobbers it with the
+    // COM1 port number (0x3F8), which musl then tries to call as a
+    // function pointer during static-binary startup, hanging forever.
     "xor eax, eax",
+    "xor edx, edx",
     "iretq",
 
     // Reached only if recovery path redirects execution here
