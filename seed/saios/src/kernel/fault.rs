@@ -171,9 +171,6 @@ fn handle_page_fault(fault_addr: usize, error_code: usize, stack_ptr: usize) -> 
 
     let _ = stack_ptr;
 
-    // Proof marker: page fault occurred during active user execution window.
-    crate::console::put_char('F');
-
     mark_active_exec_faulted();
     true
 }
@@ -184,8 +181,6 @@ fn handle_invalid_opcode(stack_ptr: usize) -> bool {
     }
 
     let _ = stack_ptr;
-    // Proof marker: invalid opcode during active user execution.
-    crate::console::put_char('U');
     mark_active_exec_faulted();
     true
 }
@@ -196,8 +191,6 @@ fn handle_general_protection(_error_code: usize, stack_ptr: usize) -> bool {
     }
 
     let _ = stack_ptr;
-    // Proof marker: general protection fault during active user execution.
-    crate::console::put_char('G');
     mark_active_exec_faulted();
     true
 }
@@ -206,8 +199,6 @@ pub extern "C" fn abort_active_exec() -> ! {
     const ADDR_MASK: u64 = crate::vmm::ADDR_MASK;
 
     let pid = active_exec_pid();
-    // Proof marker: escalated user fault abort path entered.
-    crate::console::put_char('X');
     mark_active_exec_faulted();
     crate::console::println!(
         "fault: abort_active_exec pid={} cr3=0x{:x}",

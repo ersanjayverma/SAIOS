@@ -775,7 +775,37 @@ fn candidate_program_paths(name: &str) -> Vec<String> {
     out
 }
 
+/// Coreutils-style names that `vfs::seed_standard_tree` seeded as empty
+/// placeholder files under `/bin` long before real ELF execution (and
+/// `busybox`) existed. They're 0-byte stubs, not real binaries -- a PATH
+/// search finds them before it would ever reach a real implementation, so
+/// resolving one of these names always finds a broken placeholder instead
+/// of ever running the working busybox applet of the same name. Redirect
+/// them to busybox instead, the same way a real Linux system would use a
+/// `/bin/ls -> busybox` symlink: only the *resolved path* changes, argv is
+/// left untouched, so busybox's own argv[0]-based applet dispatch picks the
+/// right applet automatically.
+const BUSYBOX_REDIRECT_APPLETS: &[&str] = &[
+    "ls", "cat", "cp", "mv", "rm", "mkdir", "true", "false", "ps", "kill", "top", "uname",
+];
+
+fn resolve_busybox_path() -> Option<String> {
+    for candidate in ["/bin/busybox", "/usr/bin/busybox"] {
+        if saifs::open(candidate).is_ok() {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
 fn resolve_program_name(name: &str) -> Result<String, &'static str> {
+    let base_name = name.rsplit('/').next().unwrap_or(name);
+    if BUSYBOX_REDIRECT_APPLETS.contains(&base_name) {
+        if let Some(busybox_path) = resolve_busybox_path() {
+            return Ok(busybox_path);
+        }
+    }
+
     let candidates = candidate_program_paths(name);
     for candidate in candidates {
         if saifs::open(candidate.as_str()).is_ok() {

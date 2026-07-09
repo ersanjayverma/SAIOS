@@ -210,12 +210,6 @@ global_asm!(
     "hal_timer_irq0_stub:",
     "push rax",
     "push rdx",
-    // Marker written only after rax/rdx are saved on the stack — do not
-    // clobber ax/dx here before the rest of the interrupted context is
-    // preserved; this handler must resume the interrupted code transparently.
-    "mov dx, 0x3F8",
-    "mov al, 't'",
-    "out dx, al",
     "push rbx",
     "push rcx",
     "push rbp",
@@ -307,17 +301,11 @@ global_asm!(
     "push r8",  // CS
     "push rdi", // RIP
 
-    // DEBUG: output 'B' to COM1 before iretq
-    "mov dx, 0x3F8",
-    "mov al, 'B'",
-    "out dx, al",
-
     // Zero all GPRs the SysV entry ABI cares about before handing off to
     // user code. In particular rdx must be 0 (it's the "rtld_fini"
     // function-pointer slot _start propagates into __libc_start_main's
-    // rtld_fini param) -- the debug marker above clobbers it with the
-    // COM1 port number (0x3F8), which musl then tries to call as a
-    // function pointer during static-binary startup, hanging forever.
+    // rtld_fini param) -- musl calls it as a function pointer during
+    // static-binary startup if nonzero, hanging forever.
     "xor eax, eax",
     "xor edx, edx",
     "iretq",
@@ -333,11 +321,6 @@ global_asm!(
     "mov r13, [rip + hal_user_fault_saved_r13]",
     "mov r14, [rip + hal_user_fault_saved_r14]",
     "mov r15, [rip + hal_user_fault_saved_r15]",
-
-    // DEBUG: output 'A' after recovery
-    "mov dx, 0x3F8",
-    "mov al, 'A'",
-    "out dx, al",
 
     "mov eax, 1",
     "ret",

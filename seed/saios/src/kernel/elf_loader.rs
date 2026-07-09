@@ -600,7 +600,7 @@ fn map_initial_user_stack(
     let stack_start = USER_STACK_BASE;
     let stack_size = (USER_STACK_PAGES as u64).saturating_mul(vmm::PAGE_SIZE);
     let stack_top = stack_start.saturating_add(stack_size);
-    crate::console::println!(
+    elf_trace!(
         "elf: stack-plan path='{}' start=0x{:x} top=0x{:x} pages={}",
         path,
         stack_start,
@@ -613,7 +613,7 @@ fn map_initial_user_stack(
     // low-half translations used by kernel-side loader state before user entry.
     // A direct map attempt gives us a clean overlap error without collateral loss.
     if vmm::inspect_mapping_current(stack_start).is_some() {
-        crate::console::println!(
+        elf_trace!(
             "elf: stack-plan start already mapped at 0x{:x}",
             stack_start
         );
@@ -633,7 +633,7 @@ fn map_initial_user_stack(
     }
     mapped_starts.push(stack_start);
 
-    crate::console::println!(
+    elf_trace!(
         "elf: stack-map ok start=0x{:x} phys=0x{:x} end=0x{:x}",
         stack_start,
         phys,
@@ -803,7 +803,7 @@ fn log_mapping(label: &str, virt: u64) {
 
 fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> Result<i32, &'static str> {
     crate::kernel::fault::begin_user_exec(pid);
-    crate::console::println!(
+    elf_trace!(
         "elf: user-enter pid={} rip=0x{:x} rsp=0x{:x}",
         pid,
         entry,
@@ -882,7 +882,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64, args: &[&str]) -> Res
     }
 
     let header = parse_header(bytes.as_slice())?;
-    crate::console::println!(
+    elf_trace!(
         "elf: load path='{}' type={} mode={}",
         path,
         if header.e_type == ET_DYN { "ET_DYN" } else { "ET_EXEC" },
@@ -905,7 +905,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64, args: &[&str]) -> Res
         ;
 
     if header.e_type == ET_EXEC {
-        crate::console::println!(
+        elf_trace!(
             "elf: ET_EXEC path isolated={} base=0x{:x} entry=0x{:x}",
             use_isolated_exec as u8,
             base,
@@ -994,13 +994,13 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64, args: &[&str]) -> Res
 
     if let Some(exec_root) = exec_root {
         if header.e_type == ET_DYN {
-            crate::console::println!(
+            elf_trace!(
                 "elf: ET_DYN using cloned address-space root with low-half cleanup"
             );
         }
 
         if header.e_type == ET_EXEC {
-            crate::console::println!(
+            elf_trace!(
                 "elf: ET_EXEC using cloned address-space root cr3=0x{:x}",
                 exec_root
             );
@@ -1018,7 +1018,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64, args: &[&str]) -> Res
                     }
                     let seg_start = base.saturating_add(ph.p_vaddr);
                     let seg_end = seg_start.saturating_add(ph.p_memsz);
-                    crate::console::println!(
+                    elf_trace!(
                         "elf: ET_EXEC seg map-plan start=0x{:x} end=0x{:x} filesz=0x{:x} memsz=0x{:x} flags=0x{:x}",
                         seg_start,
                         seg_end,

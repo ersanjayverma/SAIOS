@@ -438,16 +438,18 @@ fn map_page_hw(virt: VirtAddr, phys: PhysAddr, flags: u64) -> Result<(), &'stati
             new_pt.entries[i].set_page(page_phys, inherited_flags);
         }
 
-        crate::console::println!(
-            "vmm: split huge PDE l2={} virt={:#x} huge_base={:#x} new_pt={:#x}",
-            l2, virt, huge_phys_base, new_page
-        );
-        crate::console::println!(
-            "vmm: split huge inherit_flags={:#x} sample_pte0={:#x} sample_pte511={:#x}",
-            inherited_flags,
-            new_pt.entries[0].0,
-            new_pt.entries[511].0
-        );
+        if VMM_VERBOSE_SPLIT_LOGS {
+            crate::console::println!(
+                "vmm: split huge PDE l2={} virt={:#x} huge_base={:#x} new_pt={:#x}",
+                l2, virt, huge_phys_base, new_page
+            );
+            crate::console::println!(
+                "vmm: split huge inherit_flags={:#x} sample_pte0={:#x} sample_pte511={:#x}",
+                inherited_flags,
+                new_pt.entries[0].0,
+                new_pt.entries[511].0
+            );
+        }
 
         // Flush the stale global 2 MiB TLB entry for the entire split window.
         invlpg(align_down(virt, HUGE_PAGE_SIZE_2M));

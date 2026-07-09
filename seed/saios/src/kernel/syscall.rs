@@ -538,7 +538,19 @@ fn zero_user_bytes(ptr: u64, len: usize) -> Result<(), i64> {
 fn linux_stat_mode(kind: vfs::FileType) -> u32 {
     match kind {
         vfs::FileType::Directory => 0o040755,
-        vfs::FileType::File => 0o100644,
+        // No per-file executable bit is tracked yet, so every regular file
+        // reports as executable (0o100755, not 0o100644). Without this, ash
+        // (and any other exec-search that pre-checks executability via
+        // stat/access before calling execve, per standard shell PATH-search
+        // convention) sees every candidate -- including a perfectly good
+        // `/bin/busybox` -- as non-executable and refuses to even attempt
+        // running it, silently, without ever making an execve syscall.
+        // That's a strictly worse default than always-executable at this
+        // stage: SAIOS has no real permission model to violate yet, and the
+        // failure mode for a genuinely non-executable file (a text file,
+        // say) is just a normal ENOEXEC from the real exec attempt instead
+        // of a client-side pre-check -- not a new hazard.
+        vfs::FileType::File => 0o100755,
     }
 }
 
@@ -1582,12 +1594,6 @@ fn linux_exit_now(pid: u64, code: u64) -> ! {
     hal::arch::x86_64::seed_support::resume_from_user_fault()
 }
 
-static FIRST_SYSCALL_LOGGED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-static SYSCALL_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
-static ENOSYS_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
-const SYSCALL_TRACE_LIMIT: u32 = 16;
-const ENOSYS_TRACE_LIMIT: u32 = 64;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn saios_linux_syscall(
@@ -1599,27 +1605,6 @@ pub extern "C" fn saios_linux_syscall(
     a4: u64,
     a5: u64,
 ) -> i64 {
-    let seq = SYSCALL_TRACE_COUNT.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-    if seq <= SYSCALL_TRACE_LIMIT {
-        crate::console::println!(
-            "[syscall] seq={} nr={} a0=0x{:x} a1=0x{:x} a2=0x{:x}",
-            seq,
-            nr,
-            a0,
-            a1,
-            a2
-        );
-    }
-
-    if FIRST_SYSCALL_LOGGED
-        .compare_exchange(false, true,
-            core::sync::atomic::Ordering::Relaxed,
-            core::sync::atomic::Ordering::Relaxed)
-        .is_ok()
-    {
-        crate::console::println!("[syscall] first ring-3 syscall: nr={}", nr);
-    }
-
     let pid = match active_linux_pid() {
         Ok(pid) => pid,
         Err(code) => return code,
@@ -1983,43 +1968,8 @@ pub extern "C" fn saios_linux_syscall(
     };
 
     match out {
-        Ok(value) => {
-            if seq <= SYSCALL_TRACE_LIMIT {
-                crate::console::println!(
-                    "[syscall] ret seq={} nr={} rv=0x{:x}",
-                    seq,
-                    nr,
-                    value
-                );
-            }
-            value as i64
-        }
-        Err(code) => {
-            if code == LINUX_ENOSYS {
-                let enosys_seq = ENOSYS_TRACE_COUNT
-                    .fetch_add(1, Ordering::Relaxed)
-                    .saturating_add(1);
-                if enosys_seq <= ENOSYS_TRACE_LIMIT {
-                    crate::console::println!(
-                        "[syscall] enosys seq={} nr={} a0=0x{:x} a1=0x{:x} a2=0x{:x}",
-                        enosys_seq,
-                        nr,
-                        a0,
-                        a1,
-                        a2
-                    );
-                }
-            }
-            if seq <= SYSCALL_TRACE_LIMIT {
-                crate::console::println!(
-                    "[syscall] ret seq={} nr={} err={}",
-                    seq,
-                    nr,
-                    code
-                );
-            }
-            code
-        }
+        Ok(value) => value as i64,
+        Err(code) => code,
     }
 }
 

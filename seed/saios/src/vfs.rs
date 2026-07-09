@@ -651,12 +651,28 @@ fn seed_standard_tree(fs: &mut TmpFs) {
         let _ = fs.mkdir(path);
     }
 
-    let user_programs = [
-        "hello", "true", "false", "argc", "env", "fail", "ls", "cat", "cp", "mv", "rm", "mkdir",
-        "ps", "kill", "top", "uname", "calc", "stress", "cc",
-    ];
-    for name in user_programs {
-        let _ = fs.create(format!("/bin/{}", name).as_str());
+    // Coreutils-style names that have a real implementation once busybox is
+    // present: `process::resolve_program_name`'s `BUSYBOX_REDIRECT_APPLETS`
+    // sends exec of these straight to `/bin/busybox` (argv[0] unchanged, so
+    // busybox's own dispatch picks the right applet) before ever consulting
+    // the filesystem, so no placeholder file needs to exist here for them.
+    // Seeding one anyway used to actively make things worse: a 0-byte
+    // regular file at e.g. `/bin/ls` shows up as a real, listable-but-dead
+    // entry, which is strictly more confusing than the path not existing.
+    //
+    // SAIOS-native demo programs below are genuinely implemented in
+    // `shell::programs::execute_entry` and get real `SAIOS_BIN_V1` stub
+    // content so they're actually runnable, not just decorative -- an empty
+    // file here previously meant `binary_metadata_checked` couldn't
+    // recognize them as a native stub at all (falls through to ELF
+    // parsing, which fails on 0 bytes), so these have never once worked.
+    let native_programs = ["hello", "calc", "stress", "cc"];
+    for name in native_programs {
+        let path = format!("/bin/{}", name);
+        if fs.create(path.as_str()).is_ok() {
+            let stub = format!("SAIOS_BIN_V1\nentry={}\n", name);
+            let _ = fs.write(path.as_str(), stub.as_bytes());
+        }
     }
 }
 

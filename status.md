@@ -230,6 +230,81 @@ for the next command -- repeatable, no crash, `VMState=running` throughout. `ls 
 surfaced a separate, unrelated, minor bug ("Permission denied" from a VFS permission
 check) -- not a crash, just worth a follow-up.
 
+## 2026-07-09 (continued): fixed "ls: Permission denied", cleaned up debug noise, exposed a deeper fork/exec bug
+
+### Bug: every regular file reported as non-executable, so ash's own PATH-search pre-check refused everything
+
+`linux_stat_mode()` hardcoded `0o100644` (no execute bit at all) for `vfs::FileType::File`,
+unconditionally. `ash` (and any POSIX-compliant shell) checks executability via
+stat/access *before* calling `execve()` per standard PATH-search convention -- with no
+execute bit ever reported on *any* file, this refused everything, including a perfectly
+good `/bin/busybox`, without ever making an execve syscall (confirmed: no such syscall
+appeared in a full trace). Fixed by reporting `0o100755` for regular files. SAIOS has no
+real per-file permission model yet, so this is a strict improvement, not a new hazard --
+the failure mode for a genuinely non-executable file (a text file) is just a normal
+`ENOEXEC` from a real exec attempt, not a client-side refusal.
+
+### VFS seeding fix: coreutils placeholders were always-broken decoration
+
+`vfs::seed_standard_tree` seeded `/bin/ls`, `/bin/cat`, `/bin/cp`, etc. as empty (0-byte)
+placeholder files, long before `busybox`/real ELF execution existed. They were never
+functional: `programs::binary_metadata_checked` requires a `SAIOS_BIN_V1` text header to
+recognize a native stub, which an empty file can never have, so it fell through to ELF
+parsing on 0 bytes and failed. Two-part fix:
+1. `process::resolve_program_name` now redirects a fixed list of real busybox applet
+   names (`ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `true`, `false`, `ps`, `kill`, `top`,
+   `uname`) straight to `/bin/busybox` before ever consulting the filesystem -- argv is
+   left untouched, so busybox's own argv[0] dispatch picks the right applet, the same
+   way a real `/bin/ls -> busybox` symlink would. `seed_standard_tree` no longer creates
+   placeholder files for these names at all (a dead 0-byte file that's now provably
+   unreachable is worse than not seeding it -- it just misleads anyone who lists `/bin`).
+2. Actually-implemented SAIOS-native demo programs (`hello`, `calc`, `stress`, `cc`,
+   which have real handlers in `shell::programs::execute_entry`) now get real
+   `SAIOS_BIN_V1\nentry=<name>\n` stub content instead of being empty, so they're
+   genuinely runnable for the first time. Names with no real implementation at all
+   (`argc`, `env`, `fail`) are no longer seeded -- a phantom command is worse than a
+   missing one.
+
+### Debug-noise cleanup
+
+Removed all the raw single-byte COM1 markers (`'S'`/`'R'` around every syscall, `'B'`/`'A'`
+around ring3 entry/recovery, `'D'`/`'G'`/`'P'`/`'T'`/`'N'`/`'K'`/`'?'`/`'!'`/`'t'` per fault
+vector, `'F'`/`'U'`/`'G'`/`'X'` proof markers in `kernel/fault.rs`) and the per-syscall
+`[syscall] seq=... nr=...`/`enosys`/`iret-frame` trace scaffolding (`SYSCALL_TRACE_LIMIT`,
+`ENOSYS_TRACE_LIMIT`, `saios_debug_iret_frame`) that flooded every boot with noise once the
+underlying bugs they were added to diagnose were fixed. Also gated the routine
+`vmm: split huge PDE ...` prints behind the existing (already-off) `VMM_VERBOSE_SPLIT_LOGS`
+flag, and converted the per-load `elf: ...` informational prints (`seg map-plan`,
+`stack-plan`, `stack-map ok`, `user-enter`, `using cloned address-space root`, etc.) to the
+existing `elf_trace!` macro (also already off by default). Genuinely exceptional
+diagnostics -- the `page_fault()` handler's `[fault] #PF ...` dump, real error paths, and
+one-time process-lifecycle logs (`[iretq] returned via fault-recovery path`,
+`session: ...`) -- were deliberately left alone; they only fire when something unusual
+happens, not on every syscall.
+
+### New finding (not fixed, needs its own session): child processes forked from `ash` never actually exec, and get silently misattributed to the parent's pid
+
+Verified live in QEMU with a temporary full syscall trace (added and removed again --
+not left in the tree). Typing `ls`, `busybox`, or `busybox ls /` at the `ash` prompt (any
+command requiring `ash` to fork+exec a child, as opposed to a shell builtin like `echo`
+which needs no fork) produces **zero output**, not even an error. The trace shows why:
+`ash` calls `vfork` (`nr=58`), then `wait4` (`nr=61`), and every syscall *after* that --
+including an `openat`/`fstat`/`read`/`close` sequence that looks like it's peeking at the
+target binary's header -- is still tagged with the *parent's* pid in
+`active_linux_pid()`. Critically, `execve` (`nr=59`) never appears anywhere in the trace
+after the fork. The child never actually replaces itself with the new program. This is
+very likely a gap in `process::fork_from`'s per-process execution-context tracking (the
+"currently active process" the kernel attributes syscalls to doesn't actually switch when
+a forked child starts running), not anything related to today's other fixes -- it
+reproduces identically regardless of which command is run, and did not exist to test
+before today (this session never previously tried running an external command *from
+inside* the interactive shell; every previous test invoked busybox directly from
+`init`/session code, which doesn't go through fork at all).
+
+**Recommended next step**: instrument `process::fork_from` and `active_linux_pid()`
+directly (not just the syscall entry point) to find exactly where the child's execution
+context diverges from -- or fails to diverge from -- the parent's.
+
 ## Notes
 - Keep this file updated after every substantial change.
 - `status.md` is the canonical v0.4 closure tracker; `State.md` mirrors concise runtime snapshots.

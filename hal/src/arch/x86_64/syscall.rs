@@ -4,7 +4,7 @@
 //! `syscall` instructions enter the kernel through a controlled entry path.
 
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::x86_64::constants::{
     MSR_IA32_EFER, MSR_IA32_STAR, MSR_IA32_LSTAR, MSR_IA32_FMASK,
@@ -19,9 +19,6 @@ pub static SAIOS_SYSCALL_RSP0: AtomicU64 = AtomicU64::new(0);
 
 #[unsafe(no_mangle)]
 pub static SAIOS_SYSCALL_USER_RSP: AtomicU64 = AtomicU64::new(0);
-
-static IRET_FRAME_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
-const IRET_FRAME_TRACE_LIMIT: u32 = 8;
 
 #[derive(Copy, Clone, Debug)]
 pub struct SyscallMsrSnapshot {
@@ -71,10 +68,6 @@ global_asm!(
     "push r13",
     "push r14",
     "push r15",
-    // Proof marker: reached raw SYSCALL entry path.
-    "mov dx, 0x3F8",
-    "mov al, 'S'",
-    "out dx, al",
     // Linux x86_64 syscall ABI at entry: rax=nr, rdi/rsi/rdx/r10/r8/r9=args.
     // Rust SysV call target: saios_linux_syscall(nr,a0,a1,a2,a3,a4,a5)
     // -> rdi,rsi,rdx,rcx,r8,r9 and 7th arg on stack.
@@ -92,15 +85,6 @@ global_asm!(
     "add rsp, 16",
     // Store the return value into the saved user rax slot.
     "mov [rsp + 96], rax",
-    // Proof marker: syscall dispatcher returned to asm entry path.
-    "mov dx, 0x3F8",
-    "mov al, 'R'",
-    "out dx, al",
-    // Dump the synthesized iret frame before returning to user mode.
-    // Frame layout at rsp+104: RIP, CS, RFLAGS, RSP, SS.
-    "mov rdi, rsp",
-    "add rdi, 104",
-    "call {debug_iret_frame}",
     // Restore the full user register state and return to ring 3.
     "pop r15",
     "pop r14",
@@ -119,37 +103,9 @@ global_asm!(
     "mov r11, [rsp + 0x10]", // user RFLAGS
     "iretq",
     dispatch = sym saios_linux_syscall,
-    debug_iret_frame = sym saios_debug_iret_frame,
     user_data = const USER_DATA_SELECTOR,
     user_code = const USER_CODE_SELECTOR,
 );
-
-#[unsafe(no_mangle)]
-extern "C" fn saios_debug_iret_frame(frame_ptr: u64) {
-    let seq = IRET_FRAME_TRACE_COUNT
-        .fetch_add(1, Ordering::Relaxed)
-        .saturating_add(1);
-    if seq > IRET_FRAME_TRACE_LIMIT {
-        return;
-    }
-
-    let frame = frame_ptr as *const u64;
-    let rip = unsafe { frame.read_unaligned() };
-    let cs = unsafe { frame.add(1).read_unaligned() };
-    let rflags = unsafe { frame.add(2).read_unaligned() };
-    let rsp = unsafe { frame.add(3).read_unaligned() };
-    let ss = unsafe { frame.add(4).read_unaligned() };
-
-    crate::arch::x86_64::console::_print_force(format_args!(
-        "[syscall] iret-frame seq={} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x}\n",
-        seq,
-        rip,
-        cs,
-        rflags,
-        rsp,
-        ss
-    ));
-}
 
 unsafe extern "C" {
     fn saios_syscall_entry();

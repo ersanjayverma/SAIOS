@@ -40,6 +40,24 @@ Last updated: 2026-07-09
   `create_user_address_space_root` does; `destroy_address_space_root` updated to match
   (only frees the low half it owns). Full detail in `status.md`.
 
+## Latest Applied Correction (continued)
+
+- Fixed `linux_stat_mode` reporting 0 execute permission on every regular file, which
+  made `ash`'s own PATH-search pre-check refuse to run anything (including
+  `/bin/busybox`) without ever calling `execve`. Fixed `vfs::seed_standard_tree` to stop
+  seeding dead 0-byte coreutils placeholders and redirect those names to busybox instead
+  (`process::resolve_program_name`), and to give the SAIOS-native demo programs that
+  actually have handlers (`hello`, `calc`, `stress`, `cc`) real stub content so they're
+  runnable for the first time. Removed the debug-marker/trace-scaffolding noise added
+  during this session's crash investigations (raw COM1 byte markers, per-syscall trace
+  prints, per-load `elf:`/`vmm:` prints) now that the bugs they were added to diagnose
+  are fixed.
+- Found (not yet fixed) a separate, deeper bug: any command that requires `ash` to
+  fork+exec a child (as opposed to a shell builtin) produces no output at all --
+  `execve` never appears in the syscall trace after `vfork`, and the child's syscalls
+  are still attributed to the parent's pid. Needs its own investigation into
+  `process::fork_from`/`active_linux_pid`. Full detail in `status.md`.
+
 ## Canonical Tracker
 
 - See status.md for full v0.4 blocker list and active workboard.
