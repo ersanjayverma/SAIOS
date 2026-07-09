@@ -519,6 +519,12 @@ pub fn spawn_user_child_thread(
         let mut user_stack = vec![0u8; USER_PROCESS_KERNEL_STACK_SIZE].into_boxed_slice();
         let user_rsp0 = user_stack.as_mut_ptr() as u64
             + USER_PROCESS_KERNEL_STACK_SIZE as u64;
+        crate::console::println!(
+            "[sched] spawn_child pid={} K_child={:#x} K_child_top={:#x}",
+            child_pid,
+            user_stack.as_mut_ptr() as u64,
+            user_rsp0
+        );
 
         scheduler.spawn_internal_with_user_stack(
             child_exec_entry,

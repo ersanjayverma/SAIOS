@@ -136,15 +136,17 @@ const FIONBIO: u64 = 0x5421;
 
 const SIGCHLD: u64 = 17;
 
-const CLONE_VM: u64 = 0x0000_0100;
-const CLONE_FS: u64 = 0x0000_0200;
-const CLONE_FILES: u64 = 0x0000_0400;
-const CLONE_SIGHAND: u64 = 0x0000_0800;
-const CLONE_THREAD: u64 = 0x0001_0000;
-const CLONE_SETTLS: u64 = 0x0008_0000;
-const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+#[allow(dead_code)] const CLONE_VM:       u64 = 0x0000_0100;
+#[allow(dead_code)] const CLONE_FS:       u64 = 0x0000_0200;
+#[allow(dead_code)] const CLONE_FILES:    u64 = 0x0000_0400;
+#[allow(dead_code)] const CLONE_SIGHAND:  u64 = 0x0000_0800;
+const CLONE_THREAD:         u64 = 0x0001_0000;
+const CLONE_SETTLS:         u64 = 0x0008_0000;
+const CLONE_PARENT_SETTID:  u64 = 0x0010_0000;
 const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
 
+// Kept for documentation; individual flags above are tested directly now.
+#[allow(dead_code)]
 const UNSUPPORTED_CLONE_FLAGS: u64 = CLONE_VM
     | CLONE_FS
     | CLONE_FILES
