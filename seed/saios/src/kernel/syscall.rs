@@ -1595,6 +1595,20 @@ fn linux_exit_now(pid: u64, code: u64) -> ! {
     let _ = process::exit_quiet(pid, code as i32);
     // Wake any thread blocked in waitpid for this pid.
     crate::scheduler::unblock_waiters_for_pid(pid);
+    // Switch back to the kernel's main address space before reading
+    // fault-recovery globals: an isolated exec_root may have stale/corrupted
+    // kernel identity-map entries (e.g. from VMM segment-load side effects)
+    // that would make reads of hal_user_fault_return_rip return garbage.
+    {
+        use crate::vmm;
+        use hal::arch::x86_64::paging;
+        const ADDR_MASK: u64 = crate::vmm::ADDR_MASK;
+        let kernel_cr3 = vmm::stats().cr3 & ADDR_MASK;
+        let current_cr3 = paging::read_cr3() & ADDR_MASK;
+        if kernel_cr3 != 0 && kernel_cr3 != current_cr3 {
+            unsafe { paging::write_cr3(kernel_cr3) };
+        }
+    }
     hal::arch::x86_64::seed_support::resume_from_user_fault()
 }
 
@@ -1687,7 +1701,13 @@ pub extern "C" fn saios_linux_syscall(
                 Err(code) => return code,
             };
             let arg_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-            linux_execve_for_pid(pid, path.as_str(), arg_refs.as_slice()).map(|code| code as u64)
+            // execve replaces the calling process: on success the process must
+            // never return to ring-3.  Exit the child immediately with the
+            // child program's own exit code so the parent sees a clean exit.
+            match process::exec_from(Some(pid), path.as_str(), arg_refs.as_slice(), &[]) {
+                Ok(exit_code) => linux_exit_now(pid, exit_code as u64),
+                Err(e) => Err(map_exec_error_to_linux(e)),
+            }
         }
         60 => linux_exit_now(pid, a0),
         61 => dispatch_wait4(pid, a0, a2, a1),

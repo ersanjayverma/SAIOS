@@ -1,6 +1,6 @@
 # SAIOS v0.4 Status
 
-Last updated: 2026-07-09 (busybox/ash ring3 launch now boots; isolated-CR3 exception-delivery risk documented)
+Last updated: 2026-07-10 (forked ash child PID attribution fix implemented; live boot verification pending)
 
 ## Objective
 Finish v0.4 foundation with stable static ELF execution, realistic Linux ABI behavior, and init/session correctness.
@@ -282,7 +282,7 @@ one-time process-lifecycle logs (`[iretq] returned via fault-recovery path`,
 `session: ...`) -- were deliberately left alone; they only fire when something unusual
 happens, not on every syscall.
 
-### New finding (not fixed, needs its own session): child processes forked from `ash` never actually exec, and get silently misattributed to the parent's pid
+### 2026-07-10: candidate fix for forked `ash` children being misattributed to the parent pid
 
 Verified live in QEMU with a temporary full syscall trace (added and removed again --
 not left in the tree). Typing `ls`, `busybox`, or `busybox ls /` at the `ash` prompt (any
@@ -293,17 +293,19 @@ including an `openat`/`fstat`/`read`/`close` sequence that looks like it's peeki
 target binary's header -- is still tagged with the *parent's* pid in
 `active_linux_pid()`. Critically, `execve` (`nr=59`) never appears anywhere in the trace
 after the fork. The child never actually replaces itself with the new program. This is
-very likely a gap in `process::fork_from`'s per-process execution-context tracking (the
-"currently active process" the kernel attributes syscalls to doesn't actually switch when
-a forked child starts running), not anything related to today's other fixes -- it
-reproduces identically regardless of which command is run, and did not exist to test
-before today (this session never previously tried running an external command *from
-inside* the interactive shell; every previous test invoked busybox directly from
-`init`/session code, which doesn't go through fork at all).
+consistent with the forked child thread starting with `saved_active_exec_pid = None`, so
+the first schedule into that thread could restore the global active exec pid to "none"
+or leave subsequent accounting tied to the parent's epoch instead of the child's.
 
-**Recommended next step**: instrument `process::fork_from` and `active_linux_pid()`
-directly (not just the syscall entry point) to find exactly where the child's execution
-context diverges from -- or fails to diverge from -- the parent's.
+Implemented fix: `scheduler::spawn_user_child_thread` now seeds the newly-created child
+thread record with `saved_active_exec_pid = Some(child_pid)`. That makes the scheduler's
+normal per-thread restore path install the child pid before the child enters its saved
+ring3 context, aligning `active_linux_pid()` with the child-side fork return path.
+
+Validation completed here: `cargo check` from `seed/saios` passed, and the release UEFI
+loader/kernel plus `saios.iso` rebuilt successfully. Live `ash -> ls` smoke testing is
+still pending in this environment because neither `qemu-system-x86_64` nor `VBoxManage`
+is available on PATH.
 
 ## Notes
 - Keep this file updated after every substantial change.

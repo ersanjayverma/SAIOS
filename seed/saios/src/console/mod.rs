@@ -790,9 +790,9 @@ pub fn print(s: &str) {
 /// Writes a string to the stderr stream.
 ///
 /// The current implementation keeps stderr visible on the same physical
-/// console devices but marks output distinctly for stream separation.
+/// console devices. Interactive programs commonly write prompts to stderr,
+/// so the terminal view deliberately does not decorate the stream.
 pub fn stderr_write_str(s: &str) {
-    write_str("[stderr] ");
     write_str(s);
 }
 

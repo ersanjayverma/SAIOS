@@ -1036,8 +1036,8 @@ fn test_console_stderr() -> Result<(), &'static str> {
     if !captured.contains("stdout-probe") {
         return Err("stdout capture missing");
     }
-    if !captured.contains("[stderr] stderr-probe") {
-        return Err("stderr stream marker missing");
+    if !captured.contains("stderr-probe") {
+        return Err("stderr capture missing");
     }
 
     Ok(())

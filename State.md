@@ -1,6 +1,6 @@
 # SAIOS Runtime State Snapshot
 
-Last updated: 2026-07-09
+Last updated: 2026-07-10
 
 ## Latest Observed Validation Output
 
@@ -57,6 +57,12 @@ Last updated: 2026-07-09
   `execve` never appears in the syscall trace after `vfork`, and the child's syscalls
   are still attributed to the parent's pid. Needs its own investigation into
   `process::fork_from`/`active_linux_pid`. Full detail in `status.md`.
+- Implemented the candidate fix for that fork/exec attribution bug: newly spawned
+  child user threads now start with `saved_active_exec_pid = Some(child_pid)`, so the
+  scheduler restores the child's pid before the child resumes ring3 execution after
+  `fork`/`vfork`. Build validation passed (`cargo check`, release loader/kernel build,
+  ISO rebuild); live `ash -> ls` verification remains pending because no QEMU/VBox CLI
+  is available on PATH in this environment.
 
 ## Canonical Tracker
 

@@ -541,11 +541,15 @@ pub fn spawn_user_child_thread(
         let mut user_stack = vec![0u8; USER_PROCESS_KERNEL_STACK_SIZE].into_boxed_slice();
         let user_rsp0 = user_stack.as_mut_ptr() as u64
             + USER_PROCESS_KERNEL_STACK_SIZE as u64;
-        scheduler.spawn_internal_with_user_stack(
+        let thread_id = scheduler.spawn_internal_with_user_stack(
             child_exec_entry,
             Some(user_stack),
             user_rsp0,
-        )
+        );
+        if let Some(record) = scheduler.threads.last_mut() {
+            record.saved_active_exec_pid = Some(child_pid);
+        }
+        thread_id
     })
 }
 

@@ -1412,10 +1412,21 @@ pub fn map(
             return Err("vmm: kernel mappings must be in higher-half range");
         }
 
-        for existing in &state.mappings {
-            let (start, end) = mapping_range(existing);
-            if ranges_overlap(virt_start, new_end, start, end) {
-                return Err("vmm: overlapping virtual mapping");
+        // Skip the global overlap check when running inside `with_address_space`
+        // (cr3 != kernel cr3).  Each isolated address space has its own page
+        // tables and may legitimately map the same user virtual addresses as
+        // other isolated spaces (e.g. every process maps USER_STACK_BASE).
+        let in_isolated_space = {
+            let current_cr3 = paging::read_cr3() & ADDR_MASK;
+            state.cr3 != 0 && current_cr3 != state.cr3
+        };
+
+        if !in_isolated_space {
+            for existing in &state.mappings {
+                let (start, end) = mapping_range(existing);
+                if ranges_overlap(virt_start, new_end, start, end) {
+                    return Err("vmm: overlapping virtual mapping");
+                }
             }
         }
 
