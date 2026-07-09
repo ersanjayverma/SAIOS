@@ -65,10 +65,11 @@ Last updated: 2026-07-10
   is available on PATH in this environment.
 - Latest serial log moved the failure forward: `ash` now reaches the child exec/load
   path for `ls`, but the ET_EXEC replacement image collided with inherited low-half
-  mappings at `0x400000` and returned `EINVAL`. Fixed isolated ELF execution to use a
-  fresh user address-space root (`create_user_address_space_root`) instead of cloning
-  the current CR3, so exec replacement starts with an empty user half. Build validation
-  passed and `saios.iso` was rebuilt; live boot retest is pending.
+  mappings at `0x400000` and returned `EINVAL`. A totally fresh user root failed the
+  loader's source/stack reachability probes (`image=0 stack=0`), so the current fix
+  keeps cloned roots for loader reachability but clears inherited user pages in each
+  replacement PT_LOAD range before mapping the exec image. `cargo check` passed and
+  `saios.iso` was rebuilt; live boot retest is pending.
 
 ## Canonical Tracker
 

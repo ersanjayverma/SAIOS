@@ -318,13 +318,17 @@ That clone carried the already-mapped busybox/`ash` low-half image into the chil
 root, so mapping the replacement busybox image at the same ET_EXEC virtual address
 failed with `vmm: page already mapped`/`EINVAL`.
 
-Implemented fix: isolated ET_EXEC/ET_DYN execution now uses
-`vmm::create_user_address_space_root()` instead of
-`vmm::clone_current_address_space_root()`. A fresh user root shares the live kernel
-high half but starts with an empty user low half, matching exec semantics: the new image
-replaces the old one instead of inheriting its mappings. Validation completed here:
-`cargo check` passed and the release UEFI loader/kernel plus `saios.iso` rebuilt
-successfully. Live `ash -> ls` retest is still pending on the user's boot environment.
+The first attempted fix -- using a totally fresh user address-space root -- did not work
+on this kernel yet: the next serial log showed `image=0 stack=0` in the loader's
+source/stack probes, so the loader fell back to the shared path and hit the same
+conflict. Current fix: isolated ET_EXEC/ET_DYN execution again clones the current root
+so the loader's low-half stack and source buffers remain reachable, but isolated
+`map_and_load` now clears inherited user pages in each replacement PT_LOAD range before
+mapping the new image. That preserves loader reachability while still giving `execve`
+the key semantic it needs: the old user image pages are removed before the replacement
+image is mapped at the same virtual addresses. Validation completed here: `cargo check`
+passed, and the release UEFI loader/kernel plus `saios.iso` rebuilt successfully. Live
+`ash -> ls` retest is still pending on the user's boot environment.
 
 ## Notes
 - Keep this file updated after every substantial change.
