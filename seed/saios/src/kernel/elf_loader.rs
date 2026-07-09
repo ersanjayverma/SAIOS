@@ -806,6 +806,13 @@ fn log_mapping(label: &str, virt: u64) {
 }
 
 fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> Result<i32, &'static str> {
+    // Save the currently-active user exec pid so we can restore it when this
+    // nested execution completes.  For a top-level exec (ash launched from
+    // init, saved_pid=None) we end the exec epoch.  For a nested exec (busybox
+    // spawned by ash-as-child, saved_pid=Some(ash_child_pid)) we restore the
+    // outer pid so the calling ring-3 process can still make syscalls (e.g.
+    // its own _exit) after execve returns.
+    let saved_pid = crate::kernel::fault::active_exec_pid();
     crate::kernel::fault::begin_user_exec(pid);
     elf_trace!(
         "elf: user-enter pid={} rip=0x{:x} rsp=0x{:x}",
@@ -853,7 +860,14 @@ fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> 
             hal::arch::x86_64::seed_support::restore_fault_recovery_context(&outer_recovery);
         }
         let faulted = crate::kernel::fault::take_active_exec_faulted();
-        crate::kernel::fault::end_user_exec();
+        // Restore the exec-pid epoch: if this was a nested exec (e.g. busybox
+        // inside ash-as-child), restore the outer pid so the parent ring-3
+        // process can still call exit/other syscalls.  If this was the
+        // outermost exec, end the epoch.
+        match saved_pid {
+            Some(old_pid) => crate::kernel::fault::begin_user_exec(old_pid),
+            None          => crate::kernel::fault::end_user_exec(),
+        }
 
         // Restore the outer process's kernel transition stack.
         hal::arch::x86_64::tss::set_rsp0(saved_rsp0);

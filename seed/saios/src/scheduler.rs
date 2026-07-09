@@ -91,6 +91,10 @@ struct ThreadRecord {
     waiting_for_pid: Option<u64>,
     /// Saved fault-recovery statics for per-thread user-mode execution context.
     fault_recovery: FaultRecoveryContext,
+    /// `ACTIVE_EXEC_PID` at the time this thread was last context-switched out.
+    /// Restored when the thread is switched back in so syscalls can resolve
+    /// the correct process pid.
+    saved_active_exec_pid: Option<u64>,
 }
 
 struct Scheduler {
@@ -166,6 +170,7 @@ impl Scheduler {
             user_kernel_rsp0: user_rsp0,
             waiting_for_pid: None,
             fault_recovery: FaultRecoveryContext::default(),
+            saved_active_exec_pid: None,
         });
 
         let idx = self.threads.len() - 1;
@@ -291,9 +296,13 @@ fn do_schedule() {
         return;
     }
 
-    // Save the outgoing thread's user-mode fault recovery context.
+    // Save the outgoing thread's user-mode fault recovery context and the
+    // currently-active exec pid so they can be restored on the next switch
+    // back to this thread.
     scheduler.threads[old_idx].fault_recovery =
         hal::arch::x86_64::seed_support::save_fault_recovery_context();
+    scheduler.threads[old_idx].saved_active_exec_pid =
+        crate::kernel::fault::active_exec_pid();
 
     if scheduler.threads[old_idx].thread.state == ThreadState::Running && old_idx != scheduler.idle
     {
@@ -313,16 +322,24 @@ fn do_schedule() {
         hal::arch::x86_64::syscall::set_kernel_rsp0(new_rsp0);
     }
 
-    // Restore the incoming thread's fault recovery context.
+    // Restore the incoming thread's fault recovery context and exec pid.
     let new_recovery = scheduler.threads[next_idx].fault_recovery;
+    let new_exec_pid = scheduler.threads[next_idx].saved_active_exec_pid;
 
     let old_ctx = &mut scheduler.threads[old_idx].thread.context as *mut CpuContext;
     let new_ctx = &scheduler.threads[next_idx].thread.context as *const CpuContext;
 
-    // Restore the incoming thread's recovery context BEFORE the context
-    // switch so it is in effect as soon as that thread resumes.
+    // Restore the incoming thread's recovery context and exec pid BEFORE the
+    // context switch so they are in effect as soon as that thread resumes.
     unsafe {
         hal::arch::x86_64::seed_support::restore_fault_recovery_context(&new_recovery);
+    }
+    match new_exec_pid {
+        Some(pid) => crate::kernel::fault::begin_user_exec(pid),
+        None      => crate::kernel::fault::end_user_exec(),
+    }
+
+    unsafe {
         hal::arch::x86_64::seed_support::context_switch(
             old_ctx.cast::<u8>(),
             new_ctx.cast::<u8>(),
@@ -354,6 +371,7 @@ pub fn init() {
             user_kernel_rsp0: 0,
             waiting_for_pid: None,
             fault_recovery: FaultRecoveryContext::default(),
+            saved_active_exec_pid: None,
         });
         scheduler.current = 0;
 
