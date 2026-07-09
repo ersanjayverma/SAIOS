@@ -410,38 +410,44 @@ fn map_page_hw(virt: VirtAddr, phys: PhysAddr, flags: u64) -> Result<(), &'stati
         let pt_view_va = pt_table_ptr(l4, l3, l2) as u64;
         invlpg(pt_view_va);
 
-        // For user mappings, start from an empty PT to avoid carrying any
-        // stale/placeholder identity entries into low-half user ranges.
-        // For kernel mappings, preserve previous huge-page coverage.
+        // Always preserve the huge page's previous coverage across all 512
+        // entries, regardless of whether *this* new mapping is FLAG_USER.
+        //
+        // This used to start from an empty PT for FLAG_USER mappings
+        // specifically, on the theory that a fresh, empty PT avoids "leaking"
+        // stale kernel identity entries into a low-half user range. But the
+        // inherited entries come from a kernel-owned huge PDE and so never
+        // carry FLAG_USER themselves -- ring3 code still can't touch them
+        // (any access faults on the missing user bit, exactly as if they
+        // were never mapped for user purposes at all), so there was never
+        // an isolation gain from clearing them. What clearing *did* do is
+        // destroy every other 4 KiB page inside this same 2 MiB window that
+        // happened to be in active use for something else entirely -- e.g.
+        // the kernel heap, if a heap chunk's identity-mapped address
+        // happened to land in the same window as a low-address ET_EXEC
+        // segment being mapped here. That's not a hypothetical: it produced
+        // a reproducible page fault deep inside kernel-mode `vfs::TmpFs`
+        // code (reading a `Vec` whose backing pages had been silently
+        // unmapped by an unrelated, earlier call into this function),
+        // confirmed by cross-referencing the exact 2 MiB window boundaries
+        // against the faulting address.
         let inherited_flags = (huge_pde & !ADDR_MASK) & !paging::FLAG_HUGE;
         let new_pt = unsafe { &mut *pt_table_ptr(l4, l3, l2) };
-        if (flags & FLAG_USER) != 0 {
-            unsafe { (&mut *pt_table_ptr(l4, l3, l2)).clear() };
-        } else {
-            for i in 0..512usize {
-                let page_phys = huge_phys_base.saturating_add((i as u64).saturating_mul(PAGE_SIZE));
-                new_pt.entries[i].set_page(page_phys, inherited_flags);
-            }
+        for i in 0..512usize {
+            let page_phys = huge_phys_base.saturating_add((i as u64).saturating_mul(PAGE_SIZE));
+            new_pt.entries[i].set_page(page_phys, inherited_flags);
         }
 
         crate::console::println!(
             "vmm: split huge PDE l2={} virt={:#x} huge_base={:#x} new_pt={:#x}",
             l2, virt, huge_phys_base, new_page
         );
-        if (flags & FLAG_USER) != 0 {
-            crate::console::println!(
-                "vmm: split huge user-map zeroed-pt sample_pte0={:#x} sample_pte511={:#x}",
-                new_pt.entries[0].0,
-                new_pt.entries[511].0
-            );
-        } else {
-            crate::console::println!(
-                "vmm: split huge inherit_flags={:#x} sample_pte0={:#x} sample_pte511={:#x}",
-                inherited_flags,
-                new_pt.entries[0].0,
-                new_pt.entries[511].0
-            );
-        }
+        crate::console::println!(
+            "vmm: split huge inherit_flags={:#x} sample_pte0={:#x} sample_pte511={:#x}",
+            inherited_flags,
+            new_pt.entries[0].0,
+            new_pt.entries[511].0
+        );
 
         // Flush the stale global 2 MiB TLB entry for the entire split window.
         invlpg(align_down(virt, HUGE_PAGE_SIZE_2M));
