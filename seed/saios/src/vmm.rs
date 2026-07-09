@@ -1103,10 +1103,33 @@ pub fn set_active_cr3(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
     })
 }
 
-/// Creates a deep-cloned page-table root of the current address space.
+/// Creates a cloned page-table root of the current address space.
 ///
-/// All table pages are duplicated, while leaf mappings continue to point at
-/// the same underlying physical frames.
+/// The low half (user range, PML4 indices 0..256) is deep-cloned: every
+/// table page down to the leaf PTEs is duplicated, so per-process user
+/// mappings are fully isolated (leaf mappings still point at the same
+/// underlying physical frames as the source).
+///
+/// The high half (kernel range, PML4 indices 256..511, excluding the
+/// recursive slot) is instead *shared*: the PML4 entries are copied by
+/// value, so the new root's PDPT/PD/PT tables for kernel memory are the
+/// exact same physical pages the kernel itself uses (matching
+/// [`create_user_address_space_root`]). This is deliberate, not an
+/// oversight: an earlier version of this function deep-cloned the kernel
+/// half too, which meant every kernel-half table was a point-in-time
+/// snapshot frozen at clone time. Any kernel heap growth (or other kernel
+/// mapping change) that happened *after* a process was cloned -- e.g. a
+/// `Vec` inside a VFS structure reallocating to service a later syscall --
+/// was invisible to that process's cloned tables, so kernel code running
+/// under that CR3 during syscall handling would #PF on perfectly valid
+/// kernel memory. That #PF, taken while CR3 was the isolated root, then
+/// cascaded #PF -> #SS -> #DF -> #SS -> triple fault and silently halted
+/// the whole kernel (observed as `busybox ash` triple-faulting in VirtualBox
+/// a few syscalls into startup, non-deterministically vs. QEMU depending on
+/// the exact kernel heap state at clone time). Sharing the high half by
+/// reference instead of by value eliminates that class of bug entirely,
+/// since every process's high-half tables are then the kernel's own live
+/// tables, not copies.
 pub fn clone_current_address_space_root() -> Result<PhysAddr, &'static str> {
     with_state(|state| {
         if !state.initialized {
@@ -1118,10 +1141,51 @@ pub fn clone_current_address_space_root() -> Result<PhysAddr, &'static str> {
             return Err("vmm: current cr3 is invalid");
         }
 
-        let new_root = clone_table_recursive(src_root, 4)?;
-        let root = unsafe { &mut *(new_root as *mut paging::Table) };
-        root.entries[RECURSIVE_SLOT as usize]
-            .set_page(new_root, paging::FLAG_WRITABLE);
+        let new_root = alloc_zeroed_table()?;
+        let src = unsafe { &*(src_root as *const paging::Table) };
+
+        for i in 0..256usize {
+            let entry = src.entries[i];
+            if !entry.is_present() {
+                continue;
+            }
+            let is_huge = (entry.0 & paging::FLAG_HUGE) != 0;
+            let dst_entry = if is_huge {
+                entry
+            } else {
+                match clone_table_recursive(entry.address(), 3) {
+                    Ok(child_dst) => paging::Entry((entry.0 & !ADDR_MASK) | child_dst),
+                    Err(e) => {
+                        let dst = unsafe { &mut *(new_root as *mut paging::Table) };
+                        for j in 0..i {
+                            let done = dst.entries[j];
+                            if done.is_present() && (done.0 & paging::FLAG_HUGE) == 0 {
+                                destroy_table_recursive(done.address(), 3);
+                            }
+                        }
+                        let _ = pmm::free_page(new_root);
+                        return Err(e);
+                    }
+                }
+            };
+            let dst = unsafe { &mut *(new_root as *mut paging::Table) };
+            dst.entries[i] = dst_entry;
+        }
+
+        // High half: share the kernel's own tables by reference (see
+        // doc-comment above) rather than deep-cloning them.
+        let dst = unsafe { &mut *(new_root as *mut paging::Table) };
+        for i in 256..paging::ENTRY_COUNT {
+            if i == RECURSIVE_SLOT as usize {
+                continue;
+            }
+            let entry = src.entries[i];
+            if entry.is_present() {
+                dst.entries[i] = entry;
+            }
+        }
+
+        dst.entries[RECURSIVE_SLOT as usize].set_page(new_root, paging::FLAG_WRITABLE);
         Ok(new_root)
     })
 }
@@ -1171,6 +1235,13 @@ pub fn create_user_address_space_root() -> Result<PhysAddr, &'static str> {
 
 /// Destroys a page-table root previously created by
 /// [`clone_current_address_space_root`].
+///
+/// Only the low half (PML4 0..256) is recursively freed -- that's the part
+/// [`clone_current_address_space_root`] deep-cloned for this process. The
+/// high half (256..511, excluding the recursive slot) holds entries shared
+/// by reference with the kernel's own tables; recursing into those would
+/// free page tables the kernel itself still uses. The PML4 page itself is
+/// always this process's own allocation and is freed unconditionally.
 pub fn destroy_address_space_root(root_phys: PhysAddr) -> Result<(), &'static str> {
     if !is_page_aligned(root_phys) || root_phys == 0 {
         return Err("vmm: root page table must be page aligned and non-zero");
@@ -1179,7 +1250,14 @@ pub fn destroy_address_space_root(root_phys: PhysAddr) -> Result<(), &'static st
         if !state.initialized {
             return Err("vmm: not initialized");
         }
-        destroy_table_recursive(root_phys, 4);
+        let root = unsafe { &*(root_phys as *const paging::Table) };
+        for i in 0..256usize {
+            let entry = root.entries[i];
+            if entry.is_present() && (entry.0 & paging::FLAG_HUGE) == 0 {
+                destroy_table_recursive(entry.address(), 3);
+            }
+        }
+        let _ = pmm::free_page(root_phys);
         Ok(())
     })
 }

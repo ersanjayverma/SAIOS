@@ -473,19 +473,26 @@ pub fn init() {
     register_raw(6, saios_invalid_opcode_stub as *const () as usize);
     register_raw(8, saios_double_fault_stub as *const () as usize);
     set_ist(8, 1);
-    // Task-switch, segment-not-present, and stack-segment faults commonly
-    // surface during CPL3 entry via iretq and use the same error-code frame
-    // shape as #GP, so route them through the same logging/recovery path.
+    // Task-switch, segment-not-present, stack-segment, and general-
+    // protection faults commonly surface during CPL3 entry via iretq and
+    // use the same error-code frame shape, so route them through the same
+    // logging/recovery path. They are NOT given a dedicated IST, matching
+    // #PF below: an IST forces a stack switch unconditionally, even when
+    // the fault occurs in ring0 already (no privilege change, so no switch
+    // is actually needed) -- and that forced switch was confirmed, for
+    // #PF, to fail outright under VirtualBox's NEM backend specifically
+    // (silently cascading to a triple fault before a single instruction of
+    // our own handler ran), while working correctly under QEMU. Falling
+    // back to TSS.RSP0-based switching (a real CPL3->CPL0 transition) or no
+    // switch at all (already CPL0) avoids that mechanism. #DF (above) is
+    // deliberately kept on a dedicated IST regardless -- it exists
+    // specifically to run on a known-good stack when the current one may
+    // itself be corrupt, which is architecturally different from these.
     register_raw(10, saios_invalid_tss_stub as *const () as usize);
-    set_ist(10, 2);
     register_raw(11, saios_segment_not_present_stub as *const () as usize);
-    set_ist(11, 2);
     register_raw(12, saios_stack_segment_stub as *const () as usize);
-    set_ist(12, 2);
     register_raw(13, saios_general_protection_stub as *const () as usize);
-    set_ist(13, 2);
     register_raw(14, saios_page_fault_stub as *const () as usize);
-    set_ist(14, 2);
 
     // The PIT timer IRQ (vector 32) also needs IST slot 3 (irq_top, tss
     // index 2) — see IRQ_IST_STACK above for why. It can't be wired up here:

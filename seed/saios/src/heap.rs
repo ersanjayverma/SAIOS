@@ -82,12 +82,17 @@ static DEALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static ALLOC_REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
 static DEALLOC_REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
 
-fn lock() {
-    hal::arch::x86_64::sync::spinlock_acquire(&LOCK);
+// IRQ-safe: the kernel heap allocator is reachable from interrupt context
+// (e.g. the timer watchdog's `console::println!` allocates), and is also
+// held across VFS operations that can themselves be preempted by a tick.
+// See `spinlock_acquire_irqsave`'s doc-comment for the VirtualBox/NEM-only
+// crash this class of bug caused.
+fn lock() -> bool {
+    hal::arch::x86_64::sync::spinlock_acquire_irqsave(&LOCK)
 }
 
-fn unlock() {
-    hal::arch::x86_64::sync::spinlock_release(&LOCK);
+fn unlock(was_enabled: bool) {
+    hal::arch::x86_64::sync::spinlock_release_irqrestore(&LOCK, was_enabled);
 }
 
 fn align_up(value: usize, align: usize) -> usize {
@@ -243,16 +248,16 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_REQUESTED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
 
-        lock();
+        let was_enabled = lock();
         let state = unsafe { &mut *STATE.get() };
 
         if !state.initialized {
-            unlock();
+            unlock(was_enabled);
             return core::ptr::null_mut();
         }
 
         if let Some(ptr) = try_alloc_from_chunks(state, layout) {
-            unlock();
+            unlock(was_enabled);
             return ptr as *mut u8;
         }
 
@@ -270,7 +275,7 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
             .map(|p| p as *mut u8)
             .unwrap_or(core::ptr::null_mut());
 
-        unlock();
+        unlock(was_enabled);
         ptr
     }
 
@@ -293,7 +298,7 @@ pub struct LeakStats {
 
 /// Initializes the kernel heap.
 pub fn init() {
-    lock();
+    let was_enabled = lock();
     let state = unsafe { &mut *STATE.get() };
 
     state.chunks = [HeapChunk::empty(); MAX_HEAP_CHUNKS];
@@ -326,16 +331,16 @@ pub fn init() {
         state.initialized,
         "heap: failed to allocate initial heap pages"
     );
-    unlock();
+    unlock(was_enabled);
 }
 
 /// Returns current heap usage statistics.
 pub fn stats() -> HeapStats {
-    lock();
+    let was_enabled = lock();
     let state = unsafe { &*STATE.get() };
 
     if !state.initialized {
-        unlock();
+        unlock(was_enabled);
         return HeapStats {
             total: 0,
             used: 0,
@@ -347,7 +352,7 @@ pub fn stats() -> HeapStats {
     let used = compute_used_bytes(state);
     let free = total.saturating_sub(used);
 
-    unlock();
+    unlock(was_enabled);
     HeapStats { total, used, free }
 }
 

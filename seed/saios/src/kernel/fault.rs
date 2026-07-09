@@ -148,6 +148,27 @@ fn handle_page_fault(fault_addr: usize, error_code: usize, stack_ptr: usize) -> 
         return false;
     }
 
+    // `active_exec_pid()` stays set for the whole time a process's syscall is
+    // being serviced, including deep in ordinary ring0 kernel code (e.g. a
+    // VFS lookup) -- not just while actual ring3 user code is executing. A
+    // fault must ALSO be confirmed to have actually originated in ring3
+    // (PF_ERR_USER set in the error code) before it's treated as a
+    // recoverable "active user execution" fault; otherwise this routes a
+    // genuine kernel-mode bug into `abort_active_exec`, which jumps to the
+    // `hal_user_fault_return_rip`/`rsp` recorded at the *original* ring3
+    // entry -- a completely stale target several call frames away from
+    // wherever the kernel-mode fault actually happened. That stale jump is
+    // what produced a VirtualBox/NEM-only triple fault (confirmed via
+    // VBox's internal trace logging the resulting PC as equal to the
+    // original faulting CR2, i.e. jumping into garbage) inside a `vfs`
+    // lookup running in kernel mode during syscall handling -- not
+    // reproducible under QEMU, whose different heap/allocator timing simply
+    // never triggered the underlying (also-real, separately fixed) VFS bug
+    // in the first place, masking this handler bug too.
+    if (error_code & PF_ERR_USER) == 0 {
+        return false;
+    }
+
     let _ = stack_ptr;
 
     // Proof marker: page fault occurred during active user execution window.

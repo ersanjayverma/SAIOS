@@ -701,16 +701,12 @@ pub fn set_event_logging_enabled(enabled: bool) -> bool {
     EVENT_LOGGING_ENABLED.swap(enabled, Ordering::AcqRel)
 }
 
-fn lock() {
-    hal::arch::x86_64::sync::spinlock_acquire(&LOCK);
-}
-
-fn unlock() {
-    hal::arch::x86_64::sync::spinlock_release(&LOCK);
-}
-
 fn with_vfs<R>(f: impl FnOnce(&mut VfsState) -> R) -> R {
-    lock();
+    // IRQ-safe: VFS state can otherwise be observed mid-mutation by an
+    // interrupt handler that shares this lock (see spinlock_acquire_irqsave
+    // doc-comment) -- root-caused as the cause of a VirtualBox/NEM-only
+    // triple fault inside TmpFs's node lookup.
+    let was_enabled = hal::arch::x86_64::sync::spinlock_acquire_irqsave(&LOCK);
     let out = {
         let state = unsafe {
             let slot = &mut *VFS.get();
@@ -721,7 +717,7 @@ fn with_vfs<R>(f: impl FnOnce(&mut VfsState) -> R) -> R {
         };
         f(state)
     };
-    unlock();
+    hal::arch::x86_64::sync::spinlock_release_irqrestore(&LOCK, was_enabled);
     out
 }
 

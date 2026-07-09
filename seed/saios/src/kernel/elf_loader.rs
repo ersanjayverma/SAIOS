@@ -683,27 +683,39 @@ fn map_initial_user_stack(
     sp = stack_align_down(sp, 16);
 
     // auxv: minimal Linux-compatible vector.
-    sp = stack_push_u64(sp, random_ptr)?;
-    sp = stack_push_u64(sp, AT_RANDOM)?;
-    sp = stack_push_u64(sp, arg0_ptr)?;
-    sp = stack_push_u64(sp, AT_EXECFN)?;
-    sp = stack_push_u64(sp, entry)?;
-    sp = stack_push_u64(sp, AT_ENTRY)?;
-    sp = stack_push_u64(sp, h.e_phnum as u64)?;
-    sp = stack_push_u64(sp, AT_PHNUM)?;
-    sp = stack_push_u64(sp, h.e_phentsize as u64)?;
-    sp = stack_push_u64(sp, AT_PHENT)?;
+    //
+    // Each stack_push_u64 call moves sp *down*, so whichever pair is pushed
+    // *last* ends up at the *lowest* address -- and since _start scans the
+    // auxv array upward from low to high addresses, that last-pushed pair is
+    // the *first* one libc actually sees. The terminator (AT_NULL, 0) must
+    // therefore be pushed *first* (landing at the highest address, read
+    // last) -- pushing it last (landing at the lowest address, read first)
+    // makes libc see an auxv array that terminates immediately, silently
+    // hiding every real entry including AT_RANDOM. That's what caused the
+    // canary-init pointer to stay NULL and busybox to fault/hang before
+    // main() ever ran.
+
+    // auxv terminator (AT_NULL, 0) -- pushed first so it lands last in memory.
+    sp = stack_push_u64(sp, 0)?;
+    sp = stack_push_u64(sp, AT_NULL)?;
+
+    sp = stack_push_u64(sp, vmm::PAGE_SIZE)?;
+    sp = stack_push_u64(sp, AT_PAGESZ)?;
     sp = stack_push_u64(
         sp,
         auxv_phdr_addr(phs, h, base).ok_or("elf: failed to compute AT_PHDR")?,
     )?;
     sp = stack_push_u64(sp, AT_PHDR)?;
-    sp = stack_push_u64(sp, vmm::PAGE_SIZE)?;
-    sp = stack_push_u64(sp, AT_PAGESZ)?;
-
-    // auxv terminator (AT_NULL, 0)
-    sp = stack_push_u64(sp, 0)?;
-    sp = stack_push_u64(sp, AT_NULL)?;
+    sp = stack_push_u64(sp, h.e_phentsize as u64)?;
+    sp = stack_push_u64(sp, AT_PHENT)?;
+    sp = stack_push_u64(sp, h.e_phnum as u64)?;
+    sp = stack_push_u64(sp, AT_PHNUM)?;
+    sp = stack_push_u64(sp, entry)?;
+    sp = stack_push_u64(sp, AT_ENTRY)?;
+    sp = stack_push_u64(sp, arg0_ptr)?;
+    sp = stack_push_u64(sp, AT_EXECFN)?;
+    sp = stack_push_u64(sp, random_ptr)?;
+    sp = stack_push_u64(sp, AT_RANDOM)?;
 
     // envp terminator
     sp = stack_push_u64(sp, 0)?;
