@@ -20,6 +20,52 @@ pub static SAIOS_SYSCALL_RSP0: AtomicU64 = AtomicU64::new(0);
 #[unsafe(no_mangle)]
 pub static SAIOS_SYSCALL_USER_RSP: AtomicU64 = AtomicU64::new(0);
 
+/// Pointer to the saved user register frame on the kernel transition stack.
+/// Set by `saios_syscall_entry` before calling `saios_linux_syscall` so that
+/// fork/clone handlers can capture a full ring-3 snapshot for child threads.
+#[unsafe(no_mangle)]
+pub static SAIOS_CURRENT_USER_CTX_FRAME: AtomicU64 = AtomicU64::new(0);
+
+/// Full ring-3 register state saved on the kernel transition stack by
+/// `saios_syscall_entry`.  The layout matches the push sequence in the asm:
+/// r15..rax (GPRs), then the iretq frame (user_rip, user_cs, user_rflags,
+/// user_rsp, user_ss).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct UserSyscallFrame {
+    pub r15:         u64,  // +0
+    pub r14:         u64,  // +8
+    pub r13:         u64,  // +16
+    pub r12:         u64,  // +24
+    pub r10:         u64,  // +32
+    pub r9:          u64,  // +40
+    pub r8:          u64,  // +48
+    pub rbp:         u64,  // +56
+    pub rdi:         u64,  // +64
+    pub rsi:         u64,  // +72
+    pub rdx:         u64,  // +80
+    pub rbx:         u64,  // +88
+    pub rax:         u64,  // +96  (syscall nr / fork return value)
+    pub user_rip:    u64,  // +104 (rcx at SYSCALL)
+    pub user_cs:     u64,  // +112
+    pub user_rflags: u64,  // +120 (r11 at SYSCALL)
+    pub user_rsp:    u64,  // +128
+    pub user_ss:     u64,  // +136
+}
+
+/// Capture the saved user register frame from the *current* syscall.
+/// Safe to call only from within `saios_linux_syscall` while the syscall
+/// entry frame is live on the kernel transition stack.
+pub fn capture_user_syscall_frame() -> UserSyscallFrame {
+    let ptr = SAIOS_CURRENT_USER_CTX_FRAME.load(Ordering::Acquire);
+    if ptr == 0 {
+        return UserSyscallFrame::default();
+    }
+    // SAFETY: pointer into the live kernel transition stack, valid for the
+    // duration of the syscall.
+    unsafe { core::ptr::read_volatile(ptr as *const UserSyscallFrame) }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct SyscallMsrSnapshot {
     pub efer: u64,
@@ -68,6 +114,11 @@ global_asm!(
     "push r13",
     "push r14",
     "push r15",
+    // Save pointer to the saved user-register frame for fork context capture.
+    // rsp now points to the saved r15 field; the full UserSyscallFrame layout
+    // starts here.  Use rax as a scratch register (it is restored below).
+    "lea rax, [rsp]",
+    "mov [rip + SAIOS_CURRENT_USER_CTX_FRAME], rax",
     // Linux x86_64 syscall ABI at entry: rax=nr, rdi/rsi/rdx/r10/r8/r9=args.
     // Rust SysV call target: saios_linux_syscall(nr,a0,a1,a2,a3,a4,a5)
     // -> rdi,rsi,rdx,rcx,r8,r9 and 7th arg on stack.
@@ -161,6 +212,13 @@ pub fn init() -> Result<(), &'static str> {
     msr::wrmsr(MSR_IA32_LSTAR, lstar);
     msr::wrmsr(MSR_IA32_FMASK, RFLAGS_IF);
     msr::wrmsr(MSR_IA32_EFER, efer);
+
+    // Prime the default kernel transition stack so `saios_syscall_entry`
+    // has a valid destination from the very first ring-3 syscall.
+    SAIOS_SYSCALL_RSP0.store(
+        crate::arch::x86_64::seed_support::user_transition_kernel_rsp0(),
+        Ordering::Release,
+    );
 
     Ok(())
 }

@@ -2,9 +2,11 @@
 //!
 //! Maintains a set of kernel threads, a run queue and a simple round-robin
 //! policy driven by timer ticks. Context switch is performed in assembly by
-//! [`switch_context`].
+//! [`switch_context`].  Each user-mode capable thread owns a dedicated kernel
+//! transition stack; `TSS.RSP0` and `SAIOS_SYSCALL_RSP0` are updated on every
+//! context switch so ring3→ring0 transitions always land on the correct stack.
 
-use crate::kernel::constants::KERNEL_THREAD_STACK_SIZE;
+use crate::kernel::constants::{KERNEL_THREAD_STACK_SIZE, USER_PROCESS_KERNEL_STACK_SIZE};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec;
@@ -12,6 +14,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use hal::arch::x86_64::interrupt;
+use hal::arch::x86_64::seed_support::FaultRecoveryContext;
+use hal::arch::x86_64::syscall::UserSyscallFrame;
 use hal::arch::x86_64::sync::StaticCell;
 
 const STACK_SIZE: usize = KERNEL_THREAD_STACK_SIZE;
@@ -76,6 +80,17 @@ struct ThreadRecord {
     thread: Thread,
     entry: ThreadEntry,
     _stack: Box<[u8]>,
+    /// Dedicated kernel transition stack for ring3→ring0 (syscall/interrupt).
+    /// `None` for pure kernel threads that never enter ring 3.
+    #[allow(dead_code)]  // owned for its lifetime; drop frees the memory
+    user_kernel_stack: Option<Box<[u8]>>,
+    /// Top of `user_kernel_stack`; written to TSS.RSP0 and SAIOS_SYSCALL_RSP0
+    /// when this thread is scheduled. 0 = no user-mode stack.
+    user_kernel_rsp0: u64,
+    /// Non-None when this thread is `Blocked` waiting for a specific pid.
+    waiting_for_pid: Option<u64>,
+    /// Saved fault-recovery statics for per-thread user-mode execution context.
+    fault_recovery: FaultRecoveryContext,
 }
 
 struct Scheduler {
@@ -114,6 +129,15 @@ impl Scheduler {
     }
 
     fn spawn_internal(&mut self, entry: ThreadEntry) -> ThreadId {
+        self.spawn_internal_with_user_stack(entry, None, 0)
+    }
+
+    fn spawn_internal_with_user_stack(
+        &mut self,
+        entry: ThreadEntry,
+        user_stack: Option<Box<[u8]>>,
+        user_rsp0: u64,
+    ) -> ThreadId {
         let mut stack = vec![0u8; STACK_SIZE].into_boxed_slice();
         let stack_base = stack.as_mut_ptr() as usize;
         let stack_top = stack_base + STACK_SIZE;
@@ -138,6 +162,10 @@ impl Scheduler {
             thread,
             entry,
             _stack: stack,
+            user_kernel_stack: user_stack,
+            user_kernel_rsp0: user_rsp0,
+            waiting_for_pid: None,
+            fault_recovery: FaultRecoveryContext::default(),
         });
 
         let idx = self.threads.len() - 1;
@@ -175,6 +203,17 @@ impl Scheduler {
 
 static SCHEDULER: StaticCell<Option<Scheduler>> = StaticCell::new(None);
 static USER_SESSION_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Data passed from `spawn_user_child_thread` to `child_exec_entry`.
+/// A single global suffices because the parent blocks until the child exits
+/// (cooperative single-CPU model).
+struct PendingChildSpawn {
+    child_pid:        u64,
+    #[allow(dead_code)]  // reserved for future multi-session diagnostics
+    parent_thread_id: ThreadId,
+    child_frame:      UserSyscallFrame,
+}
+static PENDING_CHILD_SPAWN: StaticCell<Option<PendingChildSpawn>> = StaticCell::new(None);
 
 fn scheduler_mut() -> Option<&'static mut Scheduler> {
     unsafe { (&mut *SCHEDULER.get()).as_mut() }
@@ -252,6 +291,10 @@ fn do_schedule() {
         return;
     }
 
+    // Save the outgoing thread's user-mode fault recovery context.
+    scheduler.threads[old_idx].fault_recovery =
+        hal::arch::x86_64::seed_support::save_fault_recovery_context();
+
     if scheduler.threads[old_idx].thread.state == ThreadState::Running && old_idx != scheduler.idle
     {
         scheduler.threads[old_idx].thread.state = ThreadState::Ready;
@@ -263,10 +306,23 @@ fn do_schedule() {
     scheduler.needs_reschedule = false;
     scheduler.ticks_since_switch = 0;
 
+    // Update the ring3→ring0 transition stack for the incoming thread.
+    let new_rsp0 = scheduler.threads[next_idx].user_kernel_rsp0;
+    if new_rsp0 != 0 {
+        hal::arch::x86_64::tss::set_rsp0(new_rsp0);
+        hal::arch::x86_64::syscall::set_kernel_rsp0(new_rsp0);
+    }
+
+    // Restore the incoming thread's fault recovery context.
+    let new_recovery = scheduler.threads[next_idx].fault_recovery;
+
     let old_ctx = &mut scheduler.threads[old_idx].thread.context as *mut CpuContext;
     let new_ctx = &scheduler.threads[next_idx].thread.context as *const CpuContext;
 
+    // Restore the incoming thread's recovery context BEFORE the context
+    // switch so it is in effect as soon as that thread resumes.
     unsafe {
+        hal::arch::x86_64::seed_support::restore_fault_recovery_context(&new_recovery);
         hal::arch::x86_64::seed_support::context_switch(
             old_ctx.cast::<u8>(),
             new_ctx.cast::<u8>(),
@@ -294,6 +350,10 @@ pub fn init() {
             thread: bootstrap,
             entry: || {},
             _stack: Box::from([]),
+            user_kernel_stack: None,
+            user_kernel_rsp0: 0,
+            waiting_for_pid: None,
+            fault_recovery: FaultRecoveryContext::default(),
         });
         scheduler.current = 0;
 
@@ -315,6 +375,138 @@ pub fn spawn(entry: ThreadEntry) -> ThreadId {
     interrupt::without_interrupts(|| {
         let scheduler = scheduler_mut().expect("scheduler not initialized");
         scheduler.spawn_internal(entry)
+    })
+}
+
+/// Returns the current thread's identifier, if the scheduler is active.
+pub fn current_thread_id() -> Option<ThreadId> {
+    interrupt::without_interrupts(|| {
+        scheduler_ref().map(|s| s.threads[s.current].thread.id)
+    })
+}
+
+/// Returns the user-mode kernel transition stack top for the current thread,
+/// or the global default if the current thread has none.
+pub fn current_user_rsp0() -> u64 {
+    let rsp0 = interrupt::without_interrupts(|| {
+        scheduler_ref().and_then(|s| {
+            let rsp0 = s.threads[s.current].user_kernel_rsp0;
+            if rsp0 != 0 { Some(rsp0) } else { None }
+        })
+    });
+    rsp0.unwrap_or_else(hal::arch::x86_64::seed_support::user_transition_kernel_rsp0)
+}
+
+/// Record `rsp0` as the current thread's user-mode kernel transition stack
+/// top so that future `do_schedule` calls restore it correctly.
+pub fn set_current_user_rsp0(rsp0: u64) {
+    interrupt::without_interrupts(|| {
+        if let Some(s) = scheduler_mut() {
+            s.threads[s.current].user_kernel_rsp0 = rsp0;
+        }
+    });
+}
+
+/// Block the current thread until the process with `pid` exits.
+/// Returns immediately once `unblock_waiters_for_pid(pid)` is called.
+pub fn block_current_waiting_for_pid(pid: u64) {
+    interrupt::without_interrupts(|| {
+        let scheduler = match scheduler_mut() {
+            Some(s) if s.initialized => s,
+            _ => return,
+        };
+        let current_idx = scheduler.current;
+        if scheduler.threads[current_idx].thread.state == ThreadState::Running {
+            scheduler.threads[current_idx].thread.state = ThreadState::Blocked;
+            scheduler.threads[current_idx].waiting_for_pid = Some(pid);
+        }
+    });
+    yield_now();
+}
+
+/// Wake all threads that are `Blocked` waiting for `pid`.
+pub fn unblock_waiters_for_pid(pid: u64) {
+    interrupt::without_interrupts(|| {
+        let scheduler = match scheduler_mut() {
+            Some(s) if s.initialized => s,
+            _ => return,
+        };
+        for i in 0..scheduler.threads.len() {
+            if scheduler.threads[i].waiting_for_pid == Some(pid)
+                && scheduler.threads[i].thread.state == ThreadState::Blocked
+            {
+                scheduler.threads[i].thread.state = ThreadState::Ready;
+                scheduler.threads[i].waiting_for_pid = None;
+                scheduler.run_queue.push_back(i);
+            }
+        }
+    });
+}
+
+/// Entry function for a child-exec kernel thread spawned by `fork`.
+/// Reads startup data from `PENDING_CHILD_SPAWN`, enters the child's
+/// ring-3 context, and unblocks the parent when done.
+fn child_exec_entry() {
+    // Read and clear the pending spawn data atomically (no real concurrency,
+    // but keeps the pattern clear).
+    let data = interrupt::without_interrupts(|| {
+        unsafe { (*PENDING_CHILD_SPAWN.get()).take() }
+    })
+    .expect("child_exec_entry: no pending spawn data");
+
+    let child_pid = data.child_pid;
+    let frame     = data.child_frame;
+
+    // Enter ring 3 as the child (fork returns 0 in rax).
+    crate::kernel::fault::begin_user_exec(child_pid);
+    let _returned = unsafe {
+        hal::arch::x86_64::seed_support::enter_user_mode_from_frame(&frame)
+    };
+    crate::kernel::fault::end_user_exec();
+
+    // The child has exited (exit syscall already marked it via exit_quiet /
+    // linux_exit_now).  Ensure the process record is exited just in case.
+    if crate::kernel::process::record(child_pid)
+        .map(|r| r.state != crate::kernel::process::ProcessState::Exited)
+        .unwrap_or(false)
+    {
+        let _ = crate::kernel::process::exit_quiet(child_pid, -1);
+    }
+
+    // Unblock the parent thread that was blocked waiting for this pid.
+    unblock_waiters_for_pid(child_pid);
+}
+
+/// Spawn a new kernel thread to execute the child side of a `fork`.
+/// The parent (`parent_thread_id`) must call `block_current_waiting_for_pid`
+/// immediately after.  Returns the new kernel thread's id.
+pub fn spawn_user_child_thread(
+    child_pid:        u64,
+    parent_thread_id: ThreadId,
+    child_frame:      UserSyscallFrame,
+) -> ThreadId {
+    interrupt::without_interrupts(|| {
+        // Store spawn data for child_exec_entry to read.
+        unsafe {
+            *PENDING_CHILD_SPAWN.get() = Some(PendingChildSpawn {
+                child_pid,
+                parent_thread_id,
+                child_frame,
+            });
+        }
+
+        let scheduler = scheduler_mut().expect("scheduler not initialized");
+
+        // Allocate a dedicated kernel transition stack for the child.
+        let mut user_stack = vec![0u8; USER_PROCESS_KERNEL_STACK_SIZE].into_boxed_slice();
+        let user_rsp0 = user_stack.as_mut_ptr() as u64
+            + USER_PROCESS_KERNEL_STACK_SIZE as u64;
+
+        scheduler.spawn_internal_with_user_stack(
+            child_exec_entry,
+            Some(user_stack),
+            user_rsp0,
+        )
     })
 }
 

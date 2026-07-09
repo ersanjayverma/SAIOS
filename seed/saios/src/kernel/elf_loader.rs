@@ -3,9 +3,10 @@ use crate::kernel::constants::{
     ELFCLASS64, ELFDATA2LSB, EM_X86_64, ET_DYN, ET_EXEC, EV_CURRENT, ELF_MAGIC,
     DT_NULL, DT_RELA, DT_RELASZ, DT_RELAENT, DT_RELACOUNT, R_X86_64_RELATIVE,
     PF_R, PF_W, PF_X, PT_DYNAMIC, PT_INTERP, PT_LOAD,
-    USER_STACK_BASE, USER_STACK_PAGES,
+    USER_STACK_BASE, USER_STACK_PAGES, USER_PROCESS_KERNEL_STACK_SIZE,
 };
 use alloc::format;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::pmm;
@@ -541,7 +542,10 @@ fn jump_to_entry(entry: u64) -> i32 {
 
 fn jump_to_entry_with_rsp_recoverable(entry: u64, rsp: u64) -> bool {
     let returned = unsafe {
-        let kernel_rsp0 = hal::arch::x86_64::seed_support::user_transition_kernel_rsp0();
+        // SAIOS_SYSCALL_RSP0 and TSS.RSP0 were already set to this process's
+        // dedicated kernel transition stack by jump_to_entry_recoverable.
+        let kernel_rsp0 = hal::arch::x86_64::syscall::SAIOS_SYSCALL_RSP0
+            .load(core::sync::atomic::Ordering::Acquire);
         hal::arch::x86_64::tss::set_rsp0(kernel_rsp0);
         hal::arch::x86_64::syscall::set_kernel_rsp0(kernel_rsp0);
         hal::arch::x86_64::seed_support::enter_user_mode(entry, rsp)
@@ -816,21 +820,46 @@ fn jump_to_entry_recoverable(entry: u64, pid: u64, initial_rsp: Option<u64>) -> 
         hal::arch::paging::read_cr3()
     );
     if let Some(sp) = initial_rsp {
-        let kernel_rsp0 = hal::arch::x86_64::seed_support::user_transition_kernel_rsp0();
-        let gdt = hal::arch::x86_64::cpu::read_gdt_ptr();
-        let idt = hal::arch::x86_64::cpu::read_idt_ptr();
-        hal::arch::x86_64::tss::set_rsp0(kernel_rsp0);
-        hal::arch::x86_64::syscall::set_kernel_rsp0(kernel_rsp0);
+        // Allocate a dedicated kernel transition stack for this process.
+        // Every call to jump_to_entry_recoverable gets its own fresh stack so
+        // that nested execve calls (ash-as-child calling execve for ls) don't
+        // corrupt each other: the outer call's stack frames live on the outer
+        // thread's K_child, while ls's syscalls use this fresh stack.
+        let mut proc_kstack = vec![0u8; USER_PROCESS_KERNEL_STACK_SIZE].into_boxed_slice();
+        let proc_rsp0 = proc_kstack.as_mut_ptr() as u64
+            + USER_PROCESS_KERNEL_STACK_SIZE as u64;
+
+        let saved_rsp0 = hal::arch::x86_64::syscall::SAIOS_SYSCALL_RSP0
+            .load(core::sync::atomic::Ordering::Acquire);
+        hal::arch::x86_64::tss::set_rsp0(proc_rsp0);
+        hal::arch::x86_64::syscall::set_kernel_rsp0(proc_rsp0);
+        crate::scheduler::set_current_user_rsp0(proc_rsp0);
         if ELF_TRACE_LOGS {
             log_mapping("entry", entry);
             log_mapping("user-rsp", sp);
-            log_mapping("rsp0", kernel_rsp0);
+            log_mapping("rsp0", proc_rsp0);
+            let gdt = hal::arch::x86_64::cpu::read_gdt_ptr();
+            let idt = hal::arch::x86_64::cpu::read_idt_ptr();
             log_mapping("gdt", gdt.base);
             log_mapping("idt", idt.base);
         }
+        // Save the outer fault-recovery context so that a nested exec (e.g.
+        // ash-as-child calling execve for ls) can restore it after ls exits.
+        let outer_recovery = hal::arch::x86_64::seed_support::save_fault_recovery_context();
         let fault_returned = jump_to_entry_with_rsp_recoverable(entry, sp);
+        // Restore the outer context so that resume_from_user_fault from the
+        // caller's ring-3 execution still works correctly.
+        unsafe {
+            hal::arch::x86_64::seed_support::restore_fault_recovery_context(&outer_recovery);
+        }
         let faulted = crate::kernel::fault::take_active_exec_faulted();
         crate::kernel::fault::end_user_exec();
+
+        // Restore the outer process's kernel transition stack.
+        hal::arch::x86_64::tss::set_rsp0(saved_rsp0);
+        hal::arch::x86_64::syscall::set_kernel_rsp0(saved_rsp0);
+        crate::scheduler::set_current_user_rsp0(saved_rsp0);
+        drop(proc_kstack);
         crate::console::println!(
             "elf: user-return pid={} returned={} faulted={}",
             pid,

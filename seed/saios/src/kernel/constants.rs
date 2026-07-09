@@ -35,6 +35,8 @@ pub const HEAP_MAX_BYTES: usize = 1024 * 1024 * 1024;
 pub const HEAP_FALLBACK_MAX_BYTES: usize = 32 * 1024 * 1024;
 pub const HEAP_IDENTITY_MAX_PHYS: u64 = EARLY_TABLE_MAX_PHYS;
 pub const KERNEL_THREAD_STACK_SIZE: usize = 64 * 1024;
+/// Per-process kernel stack for ring3→ring0 syscall/interrupt transitions.
+pub const USER_PROCESS_KERNEL_STACK_SIZE: usize = 64 * 1024;
 pub const USER_ELF_LOAD_BASE: u64 = 0x0040_0000;
 pub const USER_STACK_BASE: u64 = 0x0000_4000_0000_0000;
 pub const USER_STACK_PAGES: usize = 64;

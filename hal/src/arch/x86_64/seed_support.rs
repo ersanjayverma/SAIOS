@@ -252,23 +252,32 @@ global_asm!(
 
     ".section .bss, \"aw\", @nobits",
     ".balign 8",
+    ".global hal_user_fault_return_rsp",
     "hal_user_fault_return_rsp:",
     ".quad 0",
+    ".global hal_user_fault_return_rip",
     "hal_user_fault_return_rip:",
     ".quad 0",
+    ".global hal_user_fault_saved_rbx",
     "hal_user_fault_saved_rbx:",
     ".quad 0",
+    ".global hal_user_fault_saved_rbp",
     "hal_user_fault_saved_rbp:",
     ".quad 0",
+    ".global hal_user_fault_saved_r12",
     "hal_user_fault_saved_r12:",
     ".quad 0",
+    ".global hal_user_fault_saved_r13",
     "hal_user_fault_saved_r13:",
     ".quad 0",
+    ".global hal_user_fault_saved_r14",
     "hal_user_fault_saved_r14:",
     ".quad 0",
+    ".global hal_user_fault_saved_r15",
     "hal_user_fault_saved_r15:",
     ".quad 0",
     ".balign 1",
+    ".global hal_user_fault_return_active",
     "hal_user_fault_return_active:",
     ".byte 0",
     ".section .text.boot, \"ax\"",
@@ -334,6 +343,61 @@ global_asm!(
     "2:",
     "hlt",
     "jmp 2b",
+
+    // enter_user_mode_from_frame: jump to ring 3 using a saved UserSyscallFrame.
+    // rdi = *const UserSyscallFrame
+    // UserSyscallFrame byte offsets:
+    //   r15=+0, r14=+8, r13=+16, r12=+24, r10=+32, r9=+40, r8=+48,
+    //   rbp=+56, rdi=+64, rsi=+72, rdx=+80, rbx=+88, rax=+96 (return value),
+    //   user_rip=+104, user_cs=+112, user_rflags=+120, user_rsp=+128, user_ss=+136
+    ".global hal_enter_user_mode_from_frame",
+    "hal_enter_user_mode_from_frame:",
+    // Record recovery so that resume_from_user_fault returns here.
+    "mov [rip + hal_user_fault_return_rsp], rsp",
+    "lea rax, [rip + 3f]",
+    "mov [rip + hal_user_fault_return_rip], rax",
+    "mov [rip + hal_user_fault_saved_rbx], rbx",
+    "mov [rip + hal_user_fault_saved_rbp], rbp",
+    "mov [rip + hal_user_fault_saved_r12], r12",
+    "mov [rip + hal_user_fault_saved_r13], r13",
+    "mov [rip + hal_user_fault_saved_r14], r14",
+    "mov [rip + hal_user_fault_saved_r15], r15",
+    "mov byte ptr [rip + hal_user_fault_return_active], 1",
+    // Build iretq frame (SS, RSP, RFLAGS, CS, RIP – pushed in reverse).
+    "push qword ptr [rdi + 136]",
+    "push qword ptr [rdi + 128]",
+    "push qword ptr [rdi + 120]",
+    "push qword ptr [rdi + 112]",
+    "push qword ptr [rdi + 104]",
+    // Load all GPRs; rdi and rax are last.
+    "mov rax, rdi",
+    "mov rbx, [rax + 88]",
+    "mov rcx, [rax + 104]",
+    "mov rdx, [rax + 80]",
+    "mov rsi, [rax + 72]",
+    "mov rbp, [rax + 56]",
+    "mov r8,  [rax + 48]",
+    "mov r9,  [rax + 40]",
+    "mov r10, [rax + 32]",
+    "mov r11, [rax + 120]",
+    "mov r12, [rax + 24]",
+    "mov r13, [rax + 16]",
+    "mov r14, [rax + 8]",
+    "mov r15, [rax + 0]",
+    "mov rdi, [rax + 64]",
+    "mov rax, [rax + 96]",
+    "iretq",
+    // Recovery path — reached via hal_resume_from_user_fault.
+    "3:",
+    "mov byte ptr [rip + hal_user_fault_return_active], 0",
+    "mov rbx, [rip + hal_user_fault_saved_rbx]",
+    "mov rbp, [rip + hal_user_fault_saved_rbp]",
+    "mov r12, [rip + hal_user_fault_saved_r12]",
+    "mov r13, [rip + hal_user_fault_saved_r13]",
+    "mov r14, [rip + hal_user_fault_saved_r14]",
+    "mov r15, [rip + hal_user_fault_saved_r15]",
+    "mov eax, 1",
+    "ret",
 );
 
 unsafe extern "C" {
@@ -347,6 +411,18 @@ unsafe extern "C" {
         user_cs: u64,
     ) -> u64;
     fn hal_resume_from_user_fault() -> !;
+    fn hal_enter_user_mode_from_frame(frame: *const u8) -> u64;
+
+    // BSS statics written/read by the user-mode entry / recovery asm.
+    static mut hal_user_fault_return_rsp:    u64;
+    static mut hal_user_fault_return_rip:    u64;
+    static mut hal_user_fault_saved_rbx:     u64;
+    static mut hal_user_fault_saved_rbp:     u64;
+    static mut hal_user_fault_saved_r12:     u64;
+    static mut hal_user_fault_saved_r13:     u64;
+    static mut hal_user_fault_saved_r14:     u64;
+    static mut hal_user_fault_saved_r15:     u64;
+    static mut hal_user_fault_return_active: u8;
 }
 
 #[inline(always)]
@@ -389,9 +465,75 @@ pub fn user_transition_stack_layout() -> (u64, u64, u64, u64) {
     }
 }
 
+/// Snapshot of the global fault-recovery statics for per-thread save/restore.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct FaultRecoveryContext {
+    pub return_rsp: u64,
+    pub return_rip: u64,
+    pub saved_rbx:  u64,
+    pub saved_rbp:  u64,
+    pub saved_r12:  u64,
+    pub saved_r13:  u64,
+    pub saved_r14:  u64,
+    pub saved_r15:  u64,
+    pub active:     u8,
+}
+
+/// Capture the current global fault-recovery statics.  Call only from kernel
+/// context (e.g., inside `without_interrupts`).
+pub fn save_fault_recovery_context() -> FaultRecoveryContext {
+    unsafe {
+        FaultRecoveryContext {
+            return_rsp: hal_user_fault_return_rsp,
+            return_rip: hal_user_fault_return_rip,
+            saved_rbx:  hal_user_fault_saved_rbx,
+            saved_rbp:  hal_user_fault_saved_rbp,
+            saved_r12:  hal_user_fault_saved_r12,
+            saved_r13:  hal_user_fault_saved_r13,
+            saved_r14:  hal_user_fault_saved_r14,
+            saved_r15:  hal_user_fault_saved_r15,
+            active:     hal_user_fault_return_active,
+        }
+    }
+}
+
+/// Restore the global fault-recovery statics from a saved context.
+///
+/// # Safety
+/// The caller must ensure the saved `return_rsp`/`return_rip` still point
+/// to a live kernel call frame.
+pub unsafe fn restore_fault_recovery_context(ctx: &FaultRecoveryContext) {
+    unsafe {
+        hal_user_fault_return_rsp    = ctx.return_rsp;
+        hal_user_fault_return_rip    = ctx.return_rip;
+        hal_user_fault_saved_rbx     = ctx.saved_rbx;
+        hal_user_fault_saved_rbp     = ctx.saved_rbp;
+        hal_user_fault_saved_r12     = ctx.saved_r12;
+        hal_user_fault_saved_r13     = ctx.saved_r13;
+        hal_user_fault_saved_r14     = ctx.saved_r14;
+        hal_user_fault_saved_r15     = ctx.saved_r15;
+        hal_user_fault_return_active = ctx.active;
+    }
+}
+
 #[inline(always)]
 pub fn resume_from_user_fault() -> ! {
     unsafe { hal_resume_from_user_fault() }
+}
+
+/// Enter ring 3 using a fully-saved `UserSyscallFrame` (e.g. the child after
+/// a fork).  Sets up the fault-recovery context so that `exit` / any fault
+/// returns here with value `true`.  The caller is responsible for ensuring
+/// `SAIOS_SYSCALL_RSP0` and `TSS.RSP0` already point to this thread's own
+/// kernel transition stack.
+///
+/// # Safety
+/// `frame` must be a valid pointer to a `UserSyscallFrame`.
+pub unsafe fn enter_user_mode_from_frame(
+    frame: *const crate::arch::x86_64::syscall::UserSyscallFrame,
+) -> bool {
+    unsafe { hal_enter_user_mode_from_frame(frame as *const u8) != 0 }
 }
 
 #[inline(always)]

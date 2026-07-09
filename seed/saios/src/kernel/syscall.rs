@@ -1591,6 +1591,8 @@ fn linux_clock_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<u64, i64> {
 fn linux_exit_now(pid: u64, code: u64) -> ! {
     crate::console::println!("[syscall] exit_now pid={} code={}", pid, code);
     let _ = process::exit_quiet(pid, code as i32);
+    // Wake any thread blocked in waitpid for this pid.
+    crate::scheduler::unblock_waiters_for_pid(pid);
     hal::arch::x86_64::seed_support::resume_from_user_fault()
 }
 
@@ -2402,6 +2404,15 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                 if (options & WAIT_NOHANG) != 0 {
                     return Ok(0);
                 }
+                // Block until any child exits.
+                // We don't know which pid will exit first; use 0 as sentinel.
+                crate::scheduler::block_current_waiting_for_pid(0);
+                // Re-attempt after unblock.
+                if let Some((pid, code)) = process::first_exited_child(ctx.pid) {
+                    let status = encode_wait_status(code);
+                    let _ = process::reap_child(ctx.pid, pid);
+                    return Ok((pid << 32) | (status & 0xFFFF_FFFF));
+                }
                 return Err(SyscallError::WouldBlock);
             }
 
@@ -2411,7 +2422,14 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                 if (options & WAIT_NOHANG) != 0 {
                     return Ok(0);
                 }
-                return Err(SyscallError::WouldBlock);
+                // Block until this specific child exits.
+                drop(rec);
+                crate::scheduler::block_current_waiting_for_pid(pid);
+                // Re-check after unblock.
+                let rec = process::child_record(ctx.pid, pid).ok_or(SyscallError::NoChild)?;
+                if rec.state != process::ProcessState::Exited {
+                    return Err(SyscallError::WouldBlock);
+                }
             }
 
             let code =
@@ -2852,20 +2870,50 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             if exit_signal != 0 && exit_signal != SIGCHLD {
                 return Err(SyscallError::InvalidArgument);
             }
-            if (flags & UNSUPPORTED_CLONE_FLAGS) != 0 {
+
+            if (flags & CLONE_THREAD) != 0 {
+                // Thread-level clone: just create a process record, no fork semantics.
+                if (flags & (CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID)) != 0 {
+                    return Err(SyscallError::Unimplemented);
+                }
+                let child =
+                    process::fork_from(ctx.pid, flags).map_err(|_| SyscallError::InvalidArgument)?;
+                return Ok(child);
+            }
+
+            // Process-level clone / vfork.
+            // CLONE_VM, CLONE_VFORK, CLONE_FS, CLONE_FILES, CLONE_SIGHAND are
+            // all effectively true in our shared-address-space model — accept
+            // and ignore them.  Reject only flags that need kernel TID pointer
+            // operations we do not implement.
+            if (flags & (CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID)) != 0 {
                 return Err(SyscallError::Unimplemented);
             }
-            let child =
+
+            let child_pid =
                 process::fork_from(ctx.pid, flags).map_err(|_| SyscallError::InvalidArgument)?;
-            if (flags & CLONE_THREAD) == 0 {
-                let _ = process::set_process_group(child, child);
-            }
-            Ok(child)
+            let _ = process::set_process_group(child_pid, child_pid);
+            let parent_frame = hal::arch::x86_64::syscall::capture_user_syscall_frame();
+            let mut child_frame = parent_frame;
+            child_frame.rax = 0; // fork returns 0 in child
+            let parent_tid = crate::scheduler::current_thread_id().unwrap_or(0);
+            crate::scheduler::spawn_user_child_thread(child_pid, parent_tid, child_frame);
+            // Block parent until child exits (vfork-style cooperative execution).
+            crate::scheduler::block_current_waiting_for_pid(child_pid);
+            // Parent resumes here after child has exited.
+            Ok(child_pid)
         }
         SyscallNumber::Fork => {
-            let child =
+            let child_pid =
                 process::fork_from(ctx.pid, SIGCHLD).map_err(|_| SyscallError::InvalidArgument)?;
-            Ok(child)
+            let parent_frame = hal::arch::x86_64::syscall::capture_user_syscall_frame();
+            let mut child_frame = parent_frame;
+            child_frame.rax = 0; // fork returns 0 in child
+            let parent_tid = crate::scheduler::current_thread_id().unwrap_or(0);
+            crate::scheduler::spawn_user_child_thread(child_pid, parent_tid, child_frame);
+            // Block parent until child exits.
+            crate::scheduler::block_current_waiting_for_pid(child_pid);
+            Ok(child_pid)
         }
         SyscallNumber::Kill => {
             // args[0]=pid args[1]=signal
