@@ -305,6 +305,7 @@ const LINUX_EINVAL: i64 = -22;
 const LINUX_EFAULT: i64 = -14;
 const LINUX_ENOENT: i64 = -2;
 const LINUX_ENOEXEC: i64 = -8;
+const LINUX_ENOTEMPTY: i64 = -39;
 
 const O_ACCMODE: u64 = 0o3;
 const O_WRONLY: u64 = 0o1;
@@ -689,6 +690,16 @@ fn linux_open_path(pid: u64, path: &str, flags: u64) -> Result<u64, i64> {
     }
 
     let opts = decode_open_options(flags);
+    // Only apply the busybox-applet redirect for reads: a write/create open
+    // (e.g. shell redirection `> /bin/ls`) must create/touch a real file at
+    // that exact path, not silently open busybox instead.
+    let resolved = if opts.write || opts.create || opts.truncate || opts.append {
+        path.to_string()
+    } else {
+        process::stat_redirect_path(path)
+    };
+    let path = resolved.as_str();
+
     if let Ok(stat) = vfs::stat(path)
         && stat.kind == vfs::FileType::Directory
     {
@@ -1163,6 +1174,7 @@ fn linux_newfstatat(pid: u64, dirfd: u64, path_ptr: u64, stat_ptr: u64, flags: u
     } else {
         resolve_at_path_str(pid, dirfd, path.as_str())?
     };
+    let resolved = process::stat_redirect_path(resolved.as_str());
     let st = vfs::stat(resolved.as_str()).map_err(|_| LINUX_ENOENT)?;
     let linux_st = linux_stat_from_vfs(&st);
     write_user_struct(stat_ptr, &linux_st)?;
@@ -1190,7 +1202,8 @@ fn linux_linkat(pid: u64, olddirfd: u64, old_ptr: u64, newdirfd: u64, new_ptr: u
 
 fn linux_faccessat(pid: u64, dirfd: u64, path_ptr: u64) -> Result<u64, i64> {
     let path = resolve_at_path(pid, dirfd, path_ptr)?;
-    vfs::stat(path.as_str()).map(|_| 0).map_err(|_| LINUX_ENOENT)
+    let resolved = process::stat_redirect_path(path.as_str());
+    vfs::stat(resolved.as_str()).map(|_| 0).map_err(|_| LINUX_ENOENT)
 }
 
 fn linux_dup3(pid: u64, oldfd: u64, newfd: u64) -> Result<u64, i64> {
@@ -1423,6 +1436,29 @@ fn linux_mkdir(path_ptr: u64) -> Result<u64, i64> {
 
 fn linux_unlink(path_ptr: u64) -> Result<u64, i64> {
     let path = read_user_cstr(path_ptr, 4096)?;
+    let resolved = process::stat_redirect_path(path.as_str());
+    let st = vfs::stat(resolved.as_str()).map_err(|_| LINUX_ENOENT)?;
+    if st.kind == vfs::FileType::Directory {
+        return Err(LINUX_EISDIR);
+    }
+    vfs::unlink(resolved.as_str()).map(|_| 0).map_err(|_| LINUX_EINVAL)
+}
+
+/// Real `rmdir()`: unlike `unlink()`, POSIX requires the target to be a
+/// directory and empty. `vfs::unlink` removes files and directories alike
+/// with no such checks, so both must be enforced here rather than aliasing
+/// straight to `vfs::unlink` (see the syscall-84-vs-87 note at the dispatch
+/// table below).
+fn linux_rmdir(path_ptr: u64) -> Result<u64, i64> {
+    let path = read_user_cstr(path_ptr, 4096)?;
+    let st = vfs::stat(path.as_str()).map_err(|_| LINUX_ENOENT)?;
+    if st.kind != vfs::FileType::Directory {
+        return Err(LINUX_ENOTDIR);
+    }
+    let entries = vfs::readdir(path.as_str()).map_err(|_| LINUX_ENOTDIR)?;
+    if !entries.is_empty() {
+        return Err(LINUX_ENOTEMPTY);
+    }
     vfs::unlink(path.as_str()).map(|_| 0).map_err(|_| LINUX_EINVAL)
 }
 
@@ -1776,7 +1812,11 @@ pub extern "C" fn saios_linux_syscall(
         81 => linux_fchdir(pid, a0),
         82 => linux_rename(a0, a1),
         83 => linux_mkdir(a0),
-        84 => linux_unlink(a0),
+        // Real x86-64 Linux ABI: 84 is rmdir, not unlink (87 is unlink) --
+        // both used to alias to the same linux_unlink call, so rmdir() on a
+        // real program silently ran unlink() semantics on directories with
+        // no is-directory/is-empty checks.
+        84 => linux_rmdir(a0),
         85 => linux_creat(pid, a0),
         86 => linux_link(a0, a1),
         87 => linux_unlink(a0),

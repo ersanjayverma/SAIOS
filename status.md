@@ -1,6 +1,114 @@
 # SAIOS v0.4 Status
 
-Last updated: 2026-07-10 (ash fork/exec now reaches exec path; ET_EXEC replacement map-conflict fix implemented)
+Last updated: 2026-07-10 (ring3 login shell reaches a real interactive `/root #` prompt end-to-end for the first time; several real ABI/fault-handling bugs found and fixed; one new kernel-mode `#SS` bug found in nested fork+exec, not yet fixed)
+
+## 2026-07-10 (continued): interactive ring3 login shell verified working; nested fork+exec crash found
+
+Verified live via a scripted QEMU serial+monitor harness (bidirectional TCP to the
+serial chardev for output, HMP `sendkey` for input) that automates what previously
+required a human at a GUI. Removed the hardcoded `is_deferred_interactive_ring3_shell`
+gate in `seed/saios/src/kernel/init_runtime.rs` that unconditionally routed
+`ash`/`busybox`/`shell` logins to the kernel-native SNSH fallback regardless of the
+real ring3 path's actual state -- that gate, not an actual instability, was the reason
+the shell "wasn't stable yet". With it removed, login -> `busybox ash` now reaches a
+real `/root #` prompt, echoes typed input live, and runs `echo` correctly.
+
+Bugs found and fixed while getting there:
+
+1. **`hal/src/arch/x86_64/idt.rs`, `#TS`/`#NP`/`#SS`/`#GP` stubs** -- read the
+   CPU-pushed error code and frame pointer at `[rsp+64]`, but 9 registers (72 bytes)
+   are pushed before that read, not 8. `page_fault`'s stub already documented and used
+   the correct `+72`; these four didn't. Every `#GP`/`#SS`/`#TS`/`#NP` diagnostic was
+   reading garbage (the last-pushed register's value) as the error code, and the
+   "frame pointer" passed to `general_protection()`/`selector_fault()` was off by one
+   stack slot, so `saved_rip`/`saved_rsp` were wrong too. This produced exactly the
+   nonsensical `error=0xffffffff80215aae, selector_index=2901`-style output seen in
+   earlier debugging sessions. Fixed all four stubs to use `+72`.
+2. **`seed/saios/src/kernel/fault.rs`, `handle_general_protection`/`handle_invalid_opcode`**
+   -- unlike `handle_page_fault` (which explicitly checks `PF_ERR_USER` before treating
+   a fault as recoverable), these two recovered *any* fault while a process had an
+   active exec, with no check that the fault actually originated in ring3. A genuine
+   kernel-mode `#GP`/`#UD` hit while servicing a syscall (the exact bug class already
+   found and fixed for `#PF`) would still route into `abort_active_exec`'s stale-jump
+   recovery instead of panicking normally. Added `frame_is_from_ring3()` (checks the
+   saved CS selector's CPL bits) and gated both handlers on it, mirroring the `#PF` fix.
+3. **`seed/saios/src/kernel/syscall.rs`, `ioctl` `TIOCGPGRP`/`TIOCSPGRP`** -- real
+   `ioctl(fd, TIOCGPGRP, &pgrp)` semantics write the pgid into the caller's pointer and
+   return 0; ours returned the pgid as the syscall's `rax` and, for `TIOCSPGRP`, treated
+   the pointer's raw address as if it were the pgid value. This made ash's job-control
+   setup (`tcgetpgrp() == getpgrp()`?) compare a real pgid against uninitialized/garbage
+   memory, which never converges -- ash looped forever sending itself `SIGTTIN` and
+   rechecking, hanging the whole (single-core, cooperative) kernel with no crash and no
+   output. Fixed both to read/write the pointer per real ioctl semantics; also fixed
+   `TIOCGWINSZ` the same way (was returning a packed row/col in `rax` instead of writing
+   a real `struct winsize`).
+4. **`seed/saios/src/kernel/init_runtime.rs`, login exec path** -- `env` was `&[]` for
+   every login shell exec, so `ash` had no `PATH` (or `HOME`/`USER`/`SHELL`/`TERM`) at
+   all. Its own command lookup found nothing and reported `not found` for every external
+   command before ever calling `execve`. Added a real login environment.
+5. **`seed/saios/src/kernel/syscall.rs`, `newfstatat`/`faccessat`** -- the busybox-applet
+   redirect (`ls`/`cat`/etc. -> `/bin/busybox`, see `process::resolve_program_name`) was
+   only applied inside `execve`'s own resolution and the legacy `stat`/`access` syscalls.
+   musl's libc actually issues `newfstatat`/`faccessat` for `stat()`/`access()`, which
+   didn't have the redirect, so ash's own pre-exec existence check on `/bin/ls` failed
+   and it never even tried `execve`. Added `process::stat_redirect_path()` (redirect
+   only, no PATH search) and applied it to both `*at` syscalls too.
+
+**New bug found, root-caused as far as ground-truth GDB evidence allows, NOT yet fixed:**
+running any external command that requires a nested fork+exec from inside the
+interactive shell (e.g. typing `ls`, which now correctly resolves and reaches
+`execve("/bin/busybox")`) panics with a kernel-mode `#SS`, `cr3` equal to the plain
+kernel root (not an isolated per-process root) at fault time.
+
+Verified live via a QEMU gdbstub (`-s`) attached from WSL `gdb` (connect to the Windows
+host IP as seen from WSL, e.g. `target remote 192.168.32.1:1234` -- `127.0.0.1` from
+WSL does not reach the Windows-side QEMU), with a breakpoint on `selector_fault` hit
+*before* the `panic!` macro runs, so these are real register/memory reads, not printed
+values trusted at face value:
+- `rdi=0xc` (vector 12 = `#SS`, correct), `rsi=0x0` (error_code, correct), `rdx` = the
+  frame pointer, and the 6 qwords at that frame pointer are `[error_code=0, rip, cs=0x8,
+  rflags=0x10286, rsp, ss=0x10]` -- this **independently confirms the `idt.rs` offset-72
+  fix above is reading the correct frame**; it is not a repeat of that bug.
+- The frame itself is entirely sane: `cs=8`/`ss=0x10` are both valid kernel selectors
+  (not null, not garbage), `rflags` is plausible, and `rsp` is an ordinary in-range
+  address -- ruling out "corrupted/aliased stack pointer" and "null segment" theories.
+- `error_code=0` decodes (per the Intel SDM) to "not associated with a specific
+  selector" -- i.e. this is a stack-limit/non-canonical-address violation on a push, not
+  a bad-selector load. But the recorded `rip` disassembles (`objdump`, confirmed byte-
+  for-byte, reproduced identically across multiple runs with the same binary) to a bare
+  `mov $imm64, %rdi` in the once-only boot-completion sequence right before the call
+  into `idle_loop()` -- an instruction that can **never** fault (no memory/segment
+  access at all).
+
+That combination -- a synchronous-looking, well-formed exception frame whose `rip`
+cannot possibly be the faulting instruction -- is the classic signature of an
+**asynchronous hardware interrupt (almost certainly the PIT timer, vector 32, the only
+other vector with a forced IST stack-switch besides `#DF`) whose own IST-based
+stack-switch failed while some unrelated kernel code happened to be running**, with the
+interrupted `rip` just reflecting whatever ordinary code was executing at the moment
+the timer fired -- not a bug in that code itself. This is architecturally adjacent to,
+but distinct from, the already-known `USER_ENTRY_ENABLE_INTERRUPTS`/ring3-timer-IST
+issue in `hal/src/arch/x86_64/constants.rs`: this reproduction has `cs=8` (already
+ring0, no privilege-level change), so it cannot be that exact bug -- it needs its own
+investigation.
+
+**Recommended next step (not done here):** boot with `-s -S` (stopped at entry) so a
+breakpoint can be set on the timer ISR/IST entry path itself *before* first hitting it,
+then single-step across the exact IST stack-switch to see which specific write goes
+non-canonical, rather than inferring from the post-fault frame. This is a narrower,
+more targeted session than what was done here and needs dedicated time, not more
+log/disassembly inference. This remains the primary blocker for real multiprocess
+command execution (as opposed to shell builtins) from the interactive login shell.
+
+Repro: boot the ISO, log in as `root`/`root`, type `ls` at the `/root #` prompt.
+Deterministic -- reproduced identically (same `rip`, same preceding `vmm: map conflict`
+line, which is an unrelated, harmless first-ever-call artifact of
+`vmm::map_physical_anywhere`'s virtual address allocator, not a cause) across every
+attempt with the current binary.
+
+Also still true from before (not re-verified this session, no evidence they regressed):
+the isolated-CR3 exception-delivery containment work described below, VBox/NEM
+divergence notes, and the huge-page-split/stdin/tty fixes.
 
 ## Objective
 Finish v0.4 foundation with stable static ELF execution, realistic Linux ABI behavior, and init/session correctness.

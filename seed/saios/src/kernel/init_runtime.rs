@@ -382,11 +382,22 @@ pub fn boot_to_login_shell() -> ! {
             }
         }
 
+        let login_env = [
+            (
+                "PATH".to_string(),
+                "/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin".to_string(),
+            ),
+            ("HOME".to_string(), user_home.clone()),
+            ("USER".to_string(), username.clone()),
+            ("SHELL".to_string(), shell_name.to_string()),
+            ("TERM".to_string(), "linux".to_string()),
+        ];
+
         let exec_result = if is_busybox_shell(shell_name) {
-            process::exec_path_in_place(shell_pid, shell_name, "ash", &[], &[])
+            process::exec_path_in_place(shell_pid, shell_name, "ash", &[], &login_env)
                 .map_err(|_| -22)
         } else {
-            process::exec_in_place(shell_pid, shell_name, candidate_args, &[])
+            process::exec_in_place(shell_pid, shell_name, candidate_args, &login_env)
                 .map_err(|_| -22)
         };
 
