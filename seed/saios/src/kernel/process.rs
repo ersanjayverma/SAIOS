@@ -626,6 +626,7 @@ pub fn spawn_from(
     env: &[(String, String)],
 ) -> Result<u64, &'static str> {
     let resolved = resolve_program_name(name)?;
+    let presented_argv0 = name;
     let program_name = resolved.rsplit('/').next().unwrap_or(resolved.as_str());
     let startup = crt::prepare_startup_block(program_name, args, env);
     let metadata = programs::binary_metadata_checked(resolved.as_str())?;
@@ -634,6 +635,7 @@ pub fn spawn_from(
     let exit_code = execute_in_pid(
         pid,
         resolved.as_str(),
+        presented_argv0,
         program_name,
         args,
         env,
@@ -660,6 +662,7 @@ pub fn exec_in_place(
     env: &[(String, String)],
 ) -> Result<i32, &'static str> {
     let resolved = resolve_program_name(name)?;
+    let presented_argv0 = name;
     let program_name = resolved.rsplit('/').next().unwrap_or(resolved.as_str());
     let startup = crt::prepare_startup_block(program_name, args, env);
     let metadata = programs::binary_metadata_checked(resolved.as_str())?;
@@ -667,6 +670,7 @@ pub fn exec_in_place(
     execute_in_pid(
         pid,
         resolved.as_str(),
+        presented_argv0,
         program_name,
         args,
         env,
@@ -678,6 +682,7 @@ pub fn exec_in_place(
 fn execute_in_pid(
     pid: u64,
     resolved: &str,
+    presented_argv0: &str,
     program_name: &str,
     args: &[&str],
     env: &[(String, String)],
@@ -766,7 +771,13 @@ fn execute_in_pid(
     );
 
     let run = if metadata.load_segments > 0 {
-        crate::kernel::elf_loader::load_and_run(resolved, image_base, pid, args)
+        crate::kernel::elf_loader::load_and_run(
+            resolved,
+            presented_argv0,
+            image_base,
+            pid,
+            args,
+        )
     } else {
         programs::execute_path(resolved, program_name, args, env)
     };

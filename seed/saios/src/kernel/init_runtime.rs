@@ -11,9 +11,10 @@ use crate::saifs;
 use crate::shell;
 
 const DEFAULT_INIT_SCRIPT: &str = "/system/init";
-const DEFAULT_LOGIN_SHELL: &str = "ash";
+const DEFAULT_LOGIN_SHELL: &str = "/bin/busybox";
 const DEFAULT_ROOT_USER: &str = "root";
 const DEFAULT_ROOT_PASSWORD: &str = "root";
+const DEFAULT_ROOT_HOME: &str = "/root";
 
 #[derive(Clone, Debug)]
 pub struct UserSummary {
@@ -145,17 +146,21 @@ fn parse_passwd(text: &str, cfg: &InitConfig) -> Vec<Account> {
     }
 
     if out.is_empty() {
-        out.push(Account {
-            username: cfg.root_user.clone(),
-            password: cfg.root_password.clone(),
-            uid: 0,
-            gid: 0,
-            role: "superuser".to_string(),
-            home: "/root".to_string(),
-            shell: "/bin/busybox".to_string(),
-        });
+        out.push(default_root_account(cfg));
     }
     out
+}
+
+fn default_root_account(cfg: &InitConfig) -> Account {
+    Account {
+        username: cfg.root_user.clone(),
+        password: cfg.root_password.clone(),
+        uid: 0,
+        gid: 0,
+        role: "superuser".to_string(),
+        home: DEFAULT_ROOT_HOME.to_string(),
+        shell: DEFAULT_LOGIN_SHELL.to_string(),
+    }
 }
 
 fn ensure_default_init_files() {
@@ -174,9 +179,11 @@ fn ensure_default_init_files() {
     let _ = vfs_touch("/etc/passwd");
     if saifs::read_text("/etc/passwd").is_err() {
         let default_passwd = alloc::format!(
-            "{}:{}:0:0:superuser:/root:/bin/busybox\n",
+            "{}:{}:0:0:superuser:{}:{}\n",
             DEFAULT_ROOT_USER,
-            DEFAULT_ROOT_PASSWORD
+            DEFAULT_ROOT_PASSWORD,
+            DEFAULT_ROOT_HOME,
+            DEFAULT_LOGIN_SHELL,
         );
         let _ = crate::vfs::write_path("/etc/passwd", default_passwd.as_bytes());
     }
@@ -217,15 +224,7 @@ fn read_runtime_state() -> RuntimeState {
     let mut accounts = parse_passwd(passwd.as_str(), &cfg);
 
     if !accounts.iter().any(|a| a.username == cfg.root_user) {
-        accounts.push(Account {
-            username: cfg.root_user.clone(),
-            password: cfg.root_password.clone(),
-            uid: 0,
-            gid: 0,
-            role: "superuser".to_string(),
-            home: "/root".to_string(),
-            shell: "/bin/busybox".to_string(),
-        });
+        accounts.push(default_root_account(&cfg));
     }
 
     RuntimeState {
@@ -260,6 +259,26 @@ fn login_shell_args(shell: &str) -> &'static [&'static str] {
     } else {
         &[]
     }
+}
+
+fn selected_account<'a>(state: &'a RuntimeState, username: &str) -> Option<&'a Account> {
+    state.accounts.iter().find(|a| a.username == username)
+}
+
+fn account_home(account: Option<&Account>) -> String {
+    account
+        .map(|a| a.home.as_str())
+        .filter(|home| !home.trim().is_empty())
+        .unwrap_or(DEFAULT_ROOT_HOME)
+        .to_string()
+}
+
+fn account_shell(account: Option<&Account>, config: &InitConfig) -> String {
+    account
+        .map(|a| a.shell.as_str())
+        .filter(|shell| !shell.trim().is_empty())
+        .unwrap_or(config.login_shell.as_str())
+        .to_string()
 }
 
 fn prompt_line(prompt: &str) -> String {
@@ -321,16 +340,14 @@ pub fn boot_to_login_shell() -> ! {
     loop {
         let username;
         let user_home;
+        let user_shell;
         loop {
             let user = prompt_line("login: ");
             let pass = prompt_line("password: ");
             if authenticate(&state, user.as_str(), pass.as_str()) {
-                user_home = state
-                    .accounts
-                    .iter()
-                    .find(|a| a.username == user)
-                    .map(|a| a.home.clone())
-                    .unwrap_or_else(|| "/root".to_string());
+                let account = selected_account(&state, user.as_str());
+                user_home = account_home(account);
+                user_shell = account_shell(account, &state.config);
                 username = user;
                 break;
             }
@@ -340,7 +357,7 @@ pub fn boot_to_login_shell() -> ! {
         ensure_user_home_files(user_home.as_str());
         let _ = crate::saifs::cd(user_home.as_str());
 
-        let shell_name = state.config.login_shell.as_str();
+        let shell_name = user_shell.as_str();
         let shell_pid = process::ensure_shell_process(shell_name);
         let _ = process::create_session(shell_pid);
         let _ = process::set_foreground_process_group(shell_pid);

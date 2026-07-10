@@ -604,6 +604,7 @@ fn auxv_phdr_addr(phs: &[ProgramHeader], h: &ElfHeader, base: u64) -> Option<u64
 
 fn map_initial_user_stack(
     path: &str,
+    argv0: &str,
     extra_args: &[&str],
     h: &ElfHeader,
     phs: &[ProgramHeader],
@@ -661,7 +662,7 @@ fn map_initial_user_stack(
     let mut sp = stack_top;
 
     let mut arg0 = Vec::new();
-    arg0.extend_from_slice(path.as_bytes());
+    arg0.extend_from_slice(argv0.as_bytes());
     arg0.push(0);
     sp = stack_push_bytes(sp, arg0.as_slice())?;
     let arg0_ptr = sp;
@@ -917,7 +918,13 @@ fn can_use_isolated_address_space() -> bool {
     crate::heap::dynamic_mappings_available()
 }
 
-pub fn load_and_run(path: &str, image_base: u64, pid: u64, args: &[&str]) -> Result<i32, &'static str> {
+pub fn load_and_run(
+    path: &str,
+    argv0: &str,
+    image_base: u64,
+    pid: u64,
+    args: &[&str],
+) -> Result<i32, &'static str> {
     let handle = saifs::open(path).map_err(|_| "elf: open failed")?;
     let bytes = handle.read().map_err(|_| "elf: read failed")?;
     let image_ptr = bytes.as_ptr() as u64;
@@ -1086,6 +1093,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64, args: &[&str]) -> Res
 
             let initial_rsp = match map_initial_user_stack(
                 path,
+                argv0,
                 args,
                 &header,
                 phs.as_slice(),
@@ -1149,6 +1157,7 @@ pub fn load_and_run(path: &str, image_base: u64, pid: u64, args: &[&str]) -> Res
 
         let initial_rsp = match map_initial_user_stack(
             path,
+            argv0,
             args,
             &header,
             phs.as_slice(),
