@@ -186,6 +186,12 @@ fn frame_is_from_ring3(stack_ptr: usize, has_error_code: bool) -> bool {
     (cs & 0x3) == 0x3
 }
 
+fn frame_has_user_rip(stack_ptr: usize, has_error_code: bool) -> bool {
+    let rip_index = if has_error_code { 1 } else { 0 };
+    let rip = unsafe { *((stack_ptr as *const usize).add(rip_index)) } as u64;
+    rip < crate::kernel::constants::KERNEL_VIRT_BASE
+}
+
 fn handle_invalid_opcode(stack_ptr: usize) -> bool {
     if active_exec_pid().is_none() {
         return false;
@@ -213,7 +219,7 @@ fn handle_general_protection(_error_code: usize, stack_ptr: usize) -> bool {
     // See `handle_invalid_opcode` above: only recover faults that actually
     // originated in ring3, not kernel-mode #GP/#SS/#TS/#NP taken while
     // servicing this process's syscall.
-    if !frame_is_from_ring3(stack_ptr, true) {
+    if !frame_is_from_ring3(stack_ptr, true) && !frame_has_user_rip(stack_ptr, true) {
         return false;
     }
 

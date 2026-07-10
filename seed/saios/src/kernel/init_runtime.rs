@@ -10,7 +10,7 @@ use crate::saifs;
 use crate::shell;
 
 const DEFAULT_INIT_SCRIPT: &str = "/system/init";
-const DEFAULT_LOGIN_SHELL: &str = "/bin/busybox";
+const DEFAULT_LOGIN_SHELL: &str = "/bin/snsh";
 const DEFAULT_ROOT_USER: &str = "root";
 const DEFAULT_ROOT_PASSWORD: &str = "root";
 const DEFAULT_ROOT_HOME: &str = "/root";
@@ -264,6 +264,13 @@ fn is_busybox_shell(shell: &str) -> bool {
     shell.eq_ignore_ascii_case("busybox") || shell.eq_ignore_ascii_case("/bin/busybox")
 }
 
+fn is_native_snsh_shell(shell: &str) -> bool {
+    shell.eq_ignore_ascii_case("snsh")
+        || shell.eq_ignore_ascii_case("/bin/snsh")
+        || shell.eq_ignore_ascii_case("shell")
+        || shell.eq_ignore_ascii_case("/bin/shell")
+}
+
 fn selected_account<'a>(state: &'a RuntimeState, username: &str) -> Option<&'a Account> {
     state.accounts.iter().find(|a| a.username == username)
 }
@@ -361,6 +368,9 @@ pub fn boot_to_login_shell() -> ! {
         let _ = crate::saifs::cd(user_home.as_str());
 
         let shell_name = user_shell.as_str();
+        if is_native_snsh_shell(shell_name) {
+            shell::run_shell_session(username.as_str(), None);
+        }
 
         let shell_pid = process::ensure_shell_process(shell_name);
         let _ = process::create_session(shell_pid);

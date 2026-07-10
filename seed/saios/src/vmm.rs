@@ -17,7 +17,7 @@ use crate::pmm;
 
 use crate::kernel::constants::{
     EARLY_TABLE_MIN_PHYS, EARLY_TABLE_MAX_PHYS, EARLY_TABLE_FALLBACK_MIN_PHYS,
-    HUGE_PAGE_SIZE_2M,
+    HUGE_PAGE_SIZE_2M, HUGE_PAGE_SIZE_1G,
 };
 
 pub use crate::kernel::constants::{
@@ -1039,16 +1039,18 @@ pub fn init(kernel_pml4_phys: PhysAddr) -> Result<(), &'static str> {
 
         state.cr3 = kernel_pml4_phys;
         state.initialized = true;
-        // Advance dynamic kernel mappings past the whole 2 MiB region that
-        // contains the image. The boot trampoline maps the higher-half image
-        // with huge PDEs, and splitting the tail PDE for MMIO would otherwise
-        // unmap live kernel data that still resides in that span.
+        // Advance dynamic kernel mappings past the boot trampoline's whole
+        // higher-half 1 GiB huge-page mirror. Starting immediately after the
+        // image can still land inside an inherited huge PDE, producing a map
+        // conflict when MMIO/DMA mappings try to reuse that virtual page.
         let (ks, ke) = kernel_image_range();
-        state.next_kernel_virt = if ke > ks && ks >= KERNEL_VIRT_BASE {
+        let boot_mirror_end = KERNEL_IMAGE_MIRROR_BASE.saturating_add(HUGE_PAGE_SIZE_1G);
+        let after_image = if ke > ks && ks >= KERNEL_VIRT_BASE {
             align_up(ke, HUGE_PAGE_SIZE_2M)
         } else {
             KERNEL_VIRT_BASE
         };
+        state.next_kernel_virt = core::cmp::max(after_image, boot_mirror_end);
         Ok(())
     })
 }

@@ -162,6 +162,10 @@ const CLONE_SETTLS:         u64 = 0x0008_0000;
 const CLONE_PARENT_SETTID:  u64 = 0x0010_0000;
 const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
 
+const MAP_FIXED: u64 = 0x10;
+const MAP_ANONYMOUS: u64 = 0x20;
+const MAP_ANON: u64 = MAP_ANONYMOUS;
+
 // Kept for documentation; individual flags above are tested directly now.
 #[allow(dead_code)]
 const UNSUPPORTED_CLONE_FLAGS: u64 = CLONE_VM
@@ -329,7 +333,7 @@ const F_DUPFD_CLOEXEC: u64 = 1030;
 
 const ARCH_SET_FS: u64 = 0x1002;
 const ARCH_GET_FS: u64 = 0x1003;
-const IA32_FS_BASE: u32 = 0xC000_0100;
+pub(crate) const IA32_FS_BASE: u32 = 0xC000_0100;
 
 const SEEK_SET: u64 = 0;
 const DT_DIR: u8 = 4;
@@ -1488,6 +1492,31 @@ fn linux_setsid(pid: u64) -> Result<u64, i64> {
     process::create_session(pid).map_err(|_| LINUX_EINVAL)
 }
 
+fn linux_kill_all(caller_pid: u64, signo: u64) -> Result<u64, i64> {
+    if signo > 64 {
+        return Err(LINUX_EINVAL);
+    }
+
+    let mut deliverable = 0usize;
+    for rec in process::jobs() {
+        if rec.pid == caller_pid || rec.pid == 1 || rec.state == process::ProcessState::Exited {
+            continue;
+        }
+        if signo == 0 {
+            deliverable = deliverable.saturating_add(1);
+            continue;
+        }
+        if process::send_signal(rec.pid, signo as u8).is_ok() {
+            deliverable = deliverable.saturating_add(1);
+        }
+    }
+
+    if deliverable == 0 {
+        return Err(LINUX_EINVAL);
+    }
+    Ok(0)
+}
+
 fn linux_getpgid(target: u64, pid: u64) -> Result<u64, i64> {
     let q = if target == 0 { pid } else { target };
     process::process_group(q).ok_or(LINUX_EINVAL)
@@ -1717,7 +1746,7 @@ pub extern "C" fn saios_linux_syscall(
         6 => linux_path_stat(a0, a1),
         7 => linux_poll(pid, a0, a1, a2),
         8 => dispatch_custom(SyscallNumber::Lseek, [a0, a1, a2, 0, 0, 0], pid),
-        9 => dispatch_custom(SyscallNumber::Mmap, [a1, 0, 0, 0, 0, 0], pid),
+        9 => dispatch_custom(SyscallNumber::Mmap, [a0, a1, a2, a3, a4, a5], pid),
         10 => Ok(0),
         11 => dispatch_custom(SyscallNumber::Munmap, [a0, a1, 0, 0, 0, 0], pid),
         12 => dispatch_custom(SyscallNumber::Brk, [a0, 0, 0, 0, 0, 0], pid),
@@ -2791,26 +2820,64 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                 .map_err(|_| SyscallError::InvalidArgument)
         }
         SyscallNumber::Mmap => {
-            // args[0] = len bytes (0 defaults to one page). Returns synthetic VA.
-            let mut len = req.args[0];
+            // Legacy SAIOS ABI accepted only args[0]=len. Linux ABI uses
+            // addr,len,prot,flags,fd,offset; support both shapes.
+            let linux_shape = req.args[1] != 0;
+            let requested_addr = if linux_shape { req.args[0] } else { 0 };
+            let mut len = if linux_shape { req.args[1] } else { req.args[0] };
+            let flags = if linux_shape { req.args[3] } else { MAP_ANONYMOUS };
+            let fd = if linux_shape { req.args[4] as i64 } else { -1 };
             if len == 0 {
                 len = 4096;
             }
             let len_aligned = (len + 4095) & !4095;
+
+            if requested_addr != 0 && (requested_addr & (vmm::PAGE_SIZE - 1)) != 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            if (flags & (MAP_ANONYMOUS | MAP_ANON)) == 0 && fd < 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
+
             let addr = with_state_mut(|state| {
-                let base = state.next_mmap;
-                state.next_mmap = state.next_mmap.saturating_add(len_aligned);
+                let base = if requested_addr != 0 { requested_addr } else { state.next_mmap };
+                if requested_addr == 0 || (flags & MAP_FIXED) == 0 {
+                    state.next_mmap = base.saturating_add(len_aligned);
+                }
                 base
             });
             let pages = (len_aligned / vmm::PAGE_SIZE) as usize;
             map_user_anon_pages(addr, pages, "linux-mmap")
                 .map_err(|_| SyscallError::InvalidArgument)?;
+            if (flags & (MAP_ANONYMOUS | MAP_ANON)) == 0 {
+                let vfd = with_state_mut(|state| {
+                    resolve_vfs_fd(state, ctx.pid, fd as u64)
+                })?;
+                let current = vfs::seek(vfd, vfs::SeekFrom::Current(0))
+                    .map_err(|_| SyscallError::InvalidArgument)?;
+                let offset = usize::try_from(req.args[5])
+                    .map_err(|_| SyscallError::InvalidArgument)?;
+                let _ = vfs::seek(vfd, vfs::SeekFrom::Start(offset))
+                    .map_err(|_| SyscallError::InvalidArgument)?;
+                let file_data = vfs::read(vfd, len as usize)
+                    .map_err(|_| SyscallError::InvalidArgument)?;
+                let _ = vfs::seek(vfd, vfs::SeekFrom::Start(current));
+                let dst = user_slice_rw(addr, file_data.len())?;
+                dst.copy_from_slice(file_data.as_slice());
+            }
             Ok(addr)
         }
         SyscallNumber::Munmap => {
-            // args[0] = addr, args[1] = len. No-op in this build.
-            let _addr = req.args[0];
-            let _len = req.args[1];
+            // args[0] = addr, args[1] = len.
+            let addr = req.args[0];
+            let len = req.args[1];
+            if addr == 0 || len == 0 || (addr & (vmm::PAGE_SIZE - 1)) != 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            let len_aligned = (len + 4095) & !4095;
+            let pages = (len_aligned / vmm::PAGE_SIZE) as usize;
+            vmm::unmap_pages_untracked(addr, pages)
+                .map_err(|_| SyscallError::InvalidArgument)?;
             Ok(0)
         }
         SyscallNumber::Brk => {
@@ -3030,13 +3097,28 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                 return Err(SyscallError::InvalidArgument);
             }
 
+            let child_fs_base = if (flags & CLONE_SETTLS) != 0 {
+                Some(req.args[4])
+            } else {
+                None
+            };
+
             if (flags & CLONE_THREAD) != 0 {
                 // Thread-level clone: just create a process record, no fork semantics.
-                if (flags & (CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID)) != 0 {
-                    return Err(SyscallError::Unimplemented);
-                }
                 let child =
                     process::fork_from(ctx.pid, flags).map_err(|_| SyscallError::InvalidArgument)?;
+                if (flags & CLONE_PARENT_SETTID) != 0 && req.args[2] != 0 {
+                    write_user_struct(req.args[2], &(child as i32))
+                        .map_err(|_| SyscallError::InvalidArgument)?;
+                }
+                if (flags & CLONE_CHILD_CLEARTID) != 0 && req.args[3] != 0 {
+                    with_state_mut(|state| {
+                        state.proc_mut(child).clear_child_tid = req.args[3];
+                    });
+                }
+                if let Some(fs_base) = child_fs_base {
+                    hal::arch::x86_64::msr::wrmsr(IA32_FS_BASE, fs_base);
+                }
                 return Ok(child);
             }
 
@@ -3045,18 +3127,31 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             // all effectively true in our shared-address-space model — accept
             // and ignore them.  Reject only flags that need kernel TID pointer
             // operations we do not implement.
-            if (flags & (CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID)) != 0 {
-                return Err(SyscallError::Unimplemented);
-            }
-
             let child_pid =
                 process::fork_from(ctx.pid, flags).map_err(|_| SyscallError::InvalidArgument)?;
+            if (flags & CLONE_PARENT_SETTID) != 0 && req.args[2] != 0 {
+                write_user_struct(req.args[2], &(child_pid as i32))
+                    .map_err(|_| SyscallError::InvalidArgument)?;
+            }
+            if (flags & CLONE_CHILD_CLEARTID) != 0 && req.args[3] != 0 {
+                with_state_mut(|state| {
+                    state.proc_mut(child_pid).clear_child_tid = req.args[3];
+                });
+            }
             let _ = process::set_process_group(child_pid, child_pid);
             let parent_frame = hal::arch::x86_64::syscall::capture_user_syscall_frame();
             let mut child_frame = parent_frame;
             child_frame.rax = 0; // fork returns 0 in child
+            if req.args[1] != 0 {
+                child_frame.user_rsp = req.args[1];
+            }
             let parent_tid = crate::scheduler::current_thread_id().unwrap_or(0);
-            crate::scheduler::spawn_user_child_thread(child_pid, parent_tid, child_frame);
+            crate::scheduler::spawn_user_child_thread(
+                child_pid,
+                parent_tid,
+                child_frame,
+                child_fs_base,
+            );
             // Block parent until child exits (vfork-style cooperative execution).
             crate::scheduler::block_current_waiting_for_pid(child_pid);
             // Parent resumes here after child has exited.
@@ -3073,7 +3168,7 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             let mut child_frame = parent_frame;
             child_frame.rax = 0; // fork returns 0 in child
             let parent_tid = crate::scheduler::current_thread_id().unwrap_or(0);
-            crate::scheduler::spawn_user_child_thread(child_pid, parent_tid, child_frame);
+            crate::scheduler::spawn_user_child_thread(child_pid, parent_tid, child_frame, None);
             // Block parent until child exits.
             crate::scheduler::block_current_waiting_for_pid(child_pid);
             Ok(child_pid)
@@ -3117,7 +3212,8 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             }
 
             if target == -1 {
-                return Err(SyscallError::Unimplemented);
+                return linux_kill_all(ctx.pid, signo)
+                    .map_err(|_| SyscallError::InvalidArgument);
             }
 
             let pgid = (-target) as u64;

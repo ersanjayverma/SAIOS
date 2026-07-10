@@ -222,6 +222,7 @@ struct PendingChildSpawn {
     #[allow(dead_code)]  // reserved for future multi-session diagnostics
     parent_thread_id: ThreadId,
     child_frame:      UserSyscallFrame,
+    child_fs_base:    Option<u64>,
 }
 static PENDING_CHILD_SPAWN: StaticCell<Option<PendingChildSpawn>> = StaticCell::new(None);
 
@@ -466,7 +467,8 @@ pub fn unblock_waiters_for_pid(pid: u64) {
             _ => return,
         };
         for i in 0..scheduler.threads.len() {
-            if scheduler.threads[i].waiting_for_pid == Some(pid)
+            let waiting_for_pid = scheduler.threads[i].waiting_for_pid;
+            if (waiting_for_pid == Some(pid) || waiting_for_pid == Some(0))
                 && scheduler.threads[i].thread.state == ThreadState::Blocked
             {
                 scheduler.threads[i].thread.state = ThreadState::Ready;
@@ -509,9 +511,14 @@ fn child_exec_entry() {
 
     // Enter ring 3 as the child (fork returns 0 in rax).
     crate::kernel::fault::begin_user_exec(child_pid);
+    let saved_fs_base = hal::arch::x86_64::msr::rdmsr(crate::kernel::syscall::IA32_FS_BASE);
+    if let Some(fs_base) = data.child_fs_base {
+        hal::arch::x86_64::msr::wrmsr(crate::kernel::syscall::IA32_FS_BASE, fs_base);
+    }
     let _returned = unsafe {
         hal::arch::x86_64::seed_support::enter_user_mode_from_frame(&frame)
     };
+    hal::arch::x86_64::msr::wrmsr(crate::kernel::syscall::IA32_FS_BASE, saved_fs_base);
     crate::kernel::fault::end_user_exec();
 
     // Restore the outer kernel transition stack before any further kernel work.
@@ -540,6 +547,7 @@ pub fn spawn_user_child_thread(
     child_pid:        u64,
     parent_thread_id: ThreadId,
     child_frame:      UserSyscallFrame,
+    child_fs_base:    Option<u64>,
 ) -> ThreadId {
     interrupt::without_interrupts(|| {
         // Store spawn data for child_exec_entry to read.
@@ -548,6 +556,7 @@ pub fn spawn_user_child_thread(
                 child_pid,
                 parent_thread_id,
                 child_frame,
+                child_fs_base,
             });
         }
 
