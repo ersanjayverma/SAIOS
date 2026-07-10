@@ -679,6 +679,29 @@ pub fn exec_in_place(
     )
 }
 
+pub fn exec_path_in_place(
+    pid: u64,
+    path: &str,
+    presented_argv0: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Result<i32, &'static str> {
+    let program_name = path.rsplit('/').next().unwrap_or(path);
+    let startup = crt::prepare_startup_block(program_name, args, env);
+    let metadata = programs::binary_metadata_checked(path)?;
+
+    execute_in_pid(
+        pid,
+        path,
+        presented_argv0,
+        program_name,
+        args,
+        env,
+        &startup,
+        &metadata,
+    )
+}
+
 fn execute_in_pid(
     pid: u64,
     resolved: &str,

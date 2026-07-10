@@ -6,7 +6,6 @@ use hal::arch::x86_64::sync::StaticCell;
 
 use crate::console;
 use crate::kernel::process;
-use crate::kernel::syscall;
 use crate::saifs;
 use crate::shell;
 
@@ -261,6 +260,10 @@ fn login_shell_args(shell: &str) -> &'static [&'static str] {
     }
 }
 
+fn is_busybox_shell(shell: &str) -> bool {
+    shell.eq_ignore_ascii_case("busybox") || shell.eq_ignore_ascii_case("/bin/busybox")
+}
+
 fn selected_account<'a>(state: &'a RuntimeState, username: &str) -> Option<&'a Account> {
     state.accounts.iter().find(|a| a.username == username)
 }
@@ -378,7 +381,15 @@ pub fn boot_to_login_shell() -> ! {
             }
         }
 
-        match syscall::linux_execve_for_pid(shell_pid, shell_name, candidate_args) {
+        let exec_result = if is_busybox_shell(shell_name) {
+            process::exec_path_in_place(shell_pid, shell_name, "ash", &[], &[])
+                .map_err(|_| -22)
+        } else {
+            process::exec_in_place(shell_pid, shell_name, candidate_args, &[])
+                .map_err(|_| -22)
+        };
+
+        match exec_result {
             Ok(code) => {
                 console::println!(
                     "session: ring3 shell '{}' exited code={}",
