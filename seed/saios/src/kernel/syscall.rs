@@ -1808,7 +1808,7 @@ pub extern "C" fn saios_linux_syscall(
                 Ok(argv) => argv,
                 Err(code) => return code,
             };
-            let arg_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+            let arg_refs: Vec<&str> = argv.iter().skip(1).map(|s| s.as_str()).collect();
             // execve replaces the calling process: on success the process must
             // never return to ring-3.  Exit the child immediately with the
             // child program's own exit code so the parent sees a clean exit.
