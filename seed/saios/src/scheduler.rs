@@ -562,8 +562,21 @@ pub fn spawn_user_child_thread(
             Some(user_stack),
             user_rsp0,
         );
+        // `spawn_internal_with_user_stack` seeds `saved_cr3` with the plain
+        // kernel root (`vmm::stats().cr3`), correct for an ordinary kernel
+        // thread but wrong here: a forked child must resume sharing the
+        // parent's address space (isolated per-process root included), not
+        // the kernel's own root. Without this override, `do_schedule()`
+        // switches the child onto the kernel root on its first-ever
+        // schedule, so its first instruction fetch after vfork/fork returns
+        // executes user code under a table where that range is mapped
+        // supervisor-only -- a `#PF` (present + user + instruction-fetch)
+        // that looks exactly like a bad ELF mapping but is really just
+        // resuming under the wrong CR3 entirely.
+        let parent_cr3 = hal::arch::paging::read_cr3() & crate::vmm::ADDR_MASK;
         if let Some(record) = scheduler.threads.last_mut() {
             record.saved_active_exec_pid = Some(child_pid);
+            record.saved_cr3 = parent_cr3;
         }
         thread_id
     })

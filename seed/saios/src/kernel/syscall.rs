@@ -2236,6 +2236,32 @@ impl SyscallState {
         proc.slots.get(idx).and_then(|s| *s)
     }
 
+    /// Duplicates `parent_pid`'s open-fd table into a fresh table for
+    /// `child_pid`, matching real `fork()`/`vfork()` semantics: the child
+    /// gets its own fd numbers but they alias the *same* underlying
+    /// descriptor objects (ref-counted), not fresh copies. Without this, a
+    /// forked child's fd table starts completely empty (only slots 0..2
+    /// reserved) even though it inherited fd *numbers* like a tty fd from
+    /// the parent conceptually -- any syscall the child makes on such an
+    /// inherited fd (e.g. `ioctl(fd, TIOCSPGRP)` during shell job-control
+    /// setup) fails with EINVAL before ever reaching real handling, since
+    /// `obj_for_fd` is keyed strictly per-pid.
+    fn fork_fd_table(&mut self, parent_pid: u64, child_pid: u64) {
+        let parent_slots = match self.procs.iter().find(|p| p.pid == parent_pid) {
+            Some(p) => p.slots.clone(),
+            None => return,
+        };
+
+        for slot in parent_slots.iter().flatten() {
+            if let Some(obj) = self.objects.get_mut(*slot).and_then(|o| o.as_mut()) {
+                obj.refs = obj.refs.saturating_add(1);
+            }
+        }
+
+        let child = self.proc_mut(child_pid);
+        child.slots = parent_slots;
+    }
+
     fn close_fd(&mut self, pid: u64, fd: u64) -> Result<(), SyscallError> {
         if fd <= 2 {
             return Ok(());
@@ -3039,6 +3065,10 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
         SyscallNumber::Fork => {
             let child_pid =
                 process::fork_from(ctx.pid, SIGCHLD).map_err(|_| SyscallError::InvalidArgument)?;
+            with_state_mut(|state| {
+                state.fork_fd_table(ctx.pid, child_pid);
+                Ok::<(), SyscallError>(())
+            })?;
             let parent_frame = hal::arch::x86_64::syscall::capture_user_syscall_frame();
             let mut child_frame = parent_frame;
             child_frame.rax = 0; // fork returns 0 in child
