@@ -786,7 +786,7 @@ fn candidate_program_paths(name: &str) -> Vec<String> {
 /// left untouched, so busybox's own argv[0]-based applet dispatch picks the
 /// right applet automatically.
 const BUSYBOX_REDIRECT_APPLETS: &[&str] = &[
-    "ls", "cat", "cp", "mv", "rm", "mkdir", "true", "false", "ps", "kill", "top", "uname",
+    "ash", "sh", "ls", "cat", "cp", "mv", "rm", "mkdir", "true", "false", "ps", "kill", "top", "uname",
 ];
 
 fn resolve_busybox_path() -> Option<String> {

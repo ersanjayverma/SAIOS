@@ -24,10 +24,7 @@ const SHARED_LIB_ENTRIES: &[&str] = &[
     "libui.so",
 ];
 
-const BIN_ENTRIES: &[&str] = &[
-    "hello", "calc", "editor", "shell", "ls", "cat", "cp", "mv", "rm", "mkdir", "ps", "kill",
-    "top", "uname", "stress", "cc", "taskman", "diskpart", "busybox",
-];
+const BIN_ENTRIES: &[&str] = &["busybox"];
 
 const EMBEDDED_BUSYBOX: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../busybox"));
 
@@ -176,6 +173,9 @@ fn write_shared_library(path: &str, soname: &str, exports: &str) -> Result<(), &
 
 fn seed_binaries() -> Result<(), &'static str> {
     for b in BIN_ENTRIES {
+        if *b == "busybox" {
+            continue;
+        }
         let path = alloc::format!("/bin/{}", b);
         ensure_file(path.as_str())?;
         write_binary(path.as_str(), b)?;

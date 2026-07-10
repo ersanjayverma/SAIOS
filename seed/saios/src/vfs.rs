@@ -660,20 +660,9 @@ fn seed_standard_tree(fs: &mut TmpFs) {
     // regular file at e.g. `/bin/ls` shows up as a real, listable-but-dead
     // entry, which is strictly more confusing than the path not existing.
     //
-    // SAIOS-native demo programs below are genuinely implemented in
-    // `shell::programs::execute_entry` and get real `SAIOS_BIN_V1` stub
-    // content so they're actually runnable, not just decorative -- an empty
-    // file here previously meant `binary_metadata_checked` couldn't
-    // recognize them as a native stub at all (falls through to ELF
-    // parsing, which fails on 0 bytes), so these have never once worked.
-    let native_programs = ["hello", "calc", "stress", "cc"];
-    for name in native_programs {
-        let path = format!("/bin/{}", name);
-        if fs.create(path.as_str()).is_ok() {
-            let stub = format!("SAIOS_BIN_V1\nentry={}\n", name);
-            let _ = fs.write(path.as_str(), stub.as_bytes());
-        }
-    }
+    // Keep `/bin` empty in tmpfs until the package image mounts BusyBox.
+    // Every shell command that should resolve as an external binary must go
+    // through BusyBox rather than appearing as a separate file in `/bin`.
 }
 
 fn is_sys_path(path: &str) -> bool {

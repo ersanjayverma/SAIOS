@@ -152,7 +152,7 @@ fn parse_passwd(text: &str, cfg: &InitConfig) -> Vec<Account> {
             gid: 0,
             role: "superuser".to_string(),
             home: "/root".to_string(),
-            shell: "/bin/shell".to_string(),
+            shell: "/bin/busybox".to_string(),
         });
     }
     out
@@ -174,7 +174,7 @@ fn ensure_default_init_files() {
     let _ = vfs_touch("/etc/passwd");
     if saifs::read_text("/etc/passwd").is_err() {
         let default_passwd = alloc::format!(
-            "{}:{}:0:0:superuser:/root:/bin/shell\n",
+            "{}:{}:0:0:superuser:/root:/bin/busybox\n",
             DEFAULT_ROOT_USER,
             DEFAULT_ROOT_PASSWORD
         );
@@ -224,7 +224,7 @@ fn read_runtime_state() -> RuntimeState {
             gid: 0,
             role: "superuser".to_string(),
             home: "/root".to_string(),
-            shell: "/bin/shell".to_string(),
+            shell: "/bin/busybox".to_string(),
         });
     }
 
@@ -251,51 +251,15 @@ fn authenticate(state: &RuntimeState, username: &str, password: &str) -> bool {
 }
 
 fn login_shell_args(shell: &str) -> &'static [&'static str] {
-    if shell.eq_ignore_ascii_case("busybox") {
+    if shell.eq_ignore_ascii_case("ash")
+        || shell.eq_ignore_ascii_case("sh")
+        || shell.eq_ignore_ascii_case("busybox")
+        || shell.eq_ignore_ascii_case("/bin/busybox")
+    {
         &["ash"]
     } else {
         &[]
     }
-}
-
-fn is_unstable_shell_stub_candidate(name: &str) -> bool {
-    name.eq_ignore_ascii_case("shell") || name.eq_ignore_ascii_case("/bin/shell")
-}
-
-fn shell_launch_plan(preferred: &str) -> Vec<(String, &'static [&'static str])> {
-    let mut plan: Vec<(String, &'static [&'static str])> = Vec::new();
-    let mut push_unique = |name: &str, args: &'static [&'static str]| {
-        if name.is_empty() {
-            return;
-        }
-        if is_unstable_shell_stub_candidate(name) {
-            // The package-image shell stub currently routes through an unstable
-            // ET_EXEC user-mode path during bring-up and can deadlock session launch.
-            return;
-        }
-        if plan.iter().any(|(existing, _)| existing == name) {
-            return;
-        }
-        plan.push((name.to_string(), args));
-    };
-
-    push_unique(preferred, login_shell_args(preferred));
-
-    // Common ring3 shell fallbacks before dropping to kernel SNSH.
-    push_unique("busybox", &["ash"]);
-    push_unique("/bin/busybox", &["ash"]);
-    push_unique("sh", &[]);
-    push_unique("/bin/sh", &[]);
-    push_unique("/bin/ash", &[]);
-
-    plan
-}
-
-fn is_noninteractive_shell_stub(candidate: &str, code: i32) -> bool {
-    if code != 0 {
-        return false;
-    }
-    candidate.eq_ignore_ascii_case("shell") || candidate.eq_ignore_ascii_case("/bin/shell")
 }
 
 fn prompt_line(prompt: &str) -> String {
@@ -380,67 +344,45 @@ pub fn boot_to_login_shell() -> ! {
         let shell_pid = process::ensure_shell_process(shell_name);
         let _ = process::create_session(shell_pid);
         let _ = process::set_foreground_process_group(shell_pid);
-        let mut launched = false;
-        let mut last_errno = 0i64;
-        for (candidate, candidate_args) in shell_launch_plan(shell_name) {
-            if candidate.contains('/') {
-                if let Ok(meta) = crate::shell::programs::binary_metadata_checked(candidate.as_str()) {
-                    if let Some(interp) = meta.interpreter.as_ref() {
-                        console::println!(
-                            "session: ring3 shell '{}' deferred (PT_INTERP='{}' not yet supported)",
-                            candidate,
-                            interp
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            match syscall::linux_execve_for_pid(shell_pid, candidate.as_str(), candidate_args) {
-                Ok(code) => {
-                    if is_noninteractive_shell_stub(candidate.as_str(), code) {
-                        console::println!(
-                            "session: ring3 shell '{}' exited immediately (non-interactive stub); trying next candidate",
-                            candidate
-                        );
-                        continue;
-                    }
-                    if code != 0 {
-                        console::println!(
-                            "session: ring3 shell '{}' exited code={} (trying fallback candidate)",
-                            candidate,
-                            code
-                        );
-                        continue;
-                    }
+        let candidate_args = login_shell_args(shell_name);
+        if shell_name.contains('/') {
+            if let Ok(meta) = crate::shell::programs::binary_metadata_checked(shell_name) {
+                if let Some(interp) = meta.interpreter.as_ref() {
                     console::println!(
-                        "session: ring3 shell '{}' exited code={}",
-                        candidate,
-                        code
+                        "session: ring3 shell '{}' deferred (PT_INTERP='{}' not yet supported)",
+                        shell_name,
+                        interp
                     );
-                    launched = true;
-                    break;
-                }
-                Err(errno) => {
-                    last_errno = errno;
                     console::println!(
-                        "session: ring3 shell '{}' failed errno={} (trying fallback candidate)",
-                        candidate,
-                        errno
+                        "session: ring3 shell launch failed (fallback to kernel SNSH)"
                     );
+                    shell::run_shell_session(username.as_str(), None);
+                    continue;
                 }
             }
         }
 
-        if launched {
-            console::println!("session: returning to login prompt");
-            continue;
+        match syscall::linux_execve_for_pid(shell_pid, shell_name, candidate_args) {
+            Ok(code) => {
+                console::println!(
+                    "session: ring3 shell '{}' exited code={}",
+                    shell_name,
+                    code
+                );
+                console::println!("session: returning to login prompt");
+            }
+            Err(errno) => {
+                console::println!(
+                    "session: ring3 shell '{}' failed errno={}",
+                    shell_name,
+                    errno
+                );
+                console::println!(
+                    "session: ring3 shell launch failed (last errno={}) (fallback to kernel SNSH)",
+                    errno
+                );
+                shell::run_shell_session(username.as_str(), None);
+            }
         }
-
-        console::println!(
-            "session: ring3 shell launch failed (last errno={}) (fallback to kernel SNSH)",
-            last_errno
-        );
-        shell::run_shell_session(username.as_str(), None);
     }
 }
