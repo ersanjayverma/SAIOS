@@ -264,13 +264,6 @@ fn is_busybox_shell(shell: &str) -> bool {
     shell.eq_ignore_ascii_case("busybox") || shell.eq_ignore_ascii_case("/bin/busybox")
 }
 
-fn is_native_snsh_shell(shell: &str) -> bool {
-    shell.eq_ignore_ascii_case("snsh")
-        || shell.eq_ignore_ascii_case("/bin/snsh")
-        || shell.eq_ignore_ascii_case("shell")
-        || shell.eq_ignore_ascii_case("/bin/shell")
-}
-
 fn selected_account<'a>(state: &'a RuntimeState, username: &str) -> Option<&'a Account> {
     state.accounts.iter().find(|a| a.username == username)
 }
@@ -339,10 +332,9 @@ pub fn boot_to_login_shell() -> ! {
 
     if let Err(e) = shell::run_init_script(state.config.init_script.as_str()) {
         console::println!("init: script failed: {}", e);
-        console::println!("init: entering emergency shell");
+        console::println!("init: continuing to login prompt");
         ensure_user_home_files("/root");
         let _ = crate::saifs::cd("/root");
-        shell::run_shell_session(state.config.root_user.as_str(), None);
     }
 
     console::println!("init: ready (hostname={})", state.config.hostname);
@@ -368,9 +360,6 @@ pub fn boot_to_login_shell() -> ! {
         let _ = crate::saifs::cd(user_home.as_str());
 
         let shell_name = user_shell.as_str();
-        if is_native_snsh_shell(shell_name) {
-            shell::run_shell_session(username.as_str(), None);
-        }
 
         let shell_pid = process::ensure_shell_process(shell_name);
         let _ = process::create_session(shell_pid);
@@ -384,10 +373,8 @@ pub fn boot_to_login_shell() -> ! {
                         shell_name,
                         interp
                     );
-                    console::println!(
-                        "session: ring3 shell launch failed (fallback to kernel SNSH)"
-                    );
-                    shell::run_shell_session(username.as_str(), None);
+                    console::println!("session: returning to login prompt");
+                    continue;
                 }
             }
         }
@@ -426,11 +413,7 @@ pub fn boot_to_login_shell() -> ! {
                     shell_name,
                     errno
                 );
-                console::println!(
-                    "session: ring3 shell launch failed (last errno={}) (fallback to kernel SNSH)",
-                    errno
-                );
-                shell::run_shell_session(username.as_str(), None);
+                console::println!("session: returning to login prompt");
             }
         }
     }
