@@ -631,6 +631,59 @@ pub fn spawn_from(
     let metadata = programs::binary_metadata_checked(resolved.as_str())?;
 
     let pid = with_manager_mut(|m| m.spawn(resolved.as_str(), parent_pid));
+    let exit_code = execute_in_pid(
+        pid,
+        resolved.as_str(),
+        program_name,
+        args,
+        env,
+        &startup,
+        &metadata,
+    )?;
+    with_manager_mut(|m| {
+        let _ = m.set_running(pid);
+        let _ = m.exit(pid, exit_code);
+    });
+    event::publish(
+        EventKind::ProcessStopped,
+        "process",
+        alloc::format!("pid={} exit={}", pid, exit_code).as_str(),
+    );
+
+    Ok(pid)
+}
+
+pub fn exec_in_place(
+    pid: u64,
+    name: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Result<i32, &'static str> {
+    let resolved = resolve_program_name(name)?;
+    let program_name = resolved.rsplit('/').next().unwrap_or(resolved.as_str());
+    let startup = crt::prepare_startup_block(program_name, args, env);
+    let metadata = programs::binary_metadata_checked(resolved.as_str())?;
+
+    execute_in_pid(
+        pid,
+        resolved.as_str(),
+        program_name,
+        args,
+        env,
+        &startup,
+        &metadata,
+    )
+}
+
+fn execute_in_pid(
+    pid: u64,
+    resolved: &str,
+    program_name: &str,
+    args: &[&str],
+    env: &[(String, String)],
+    startup: &crt::CrtStartupBlock,
+    metadata: &programs::BinaryMetadata,
+) -> Result<i32, &'static str> {
     let (image_base, load_bias, pie_enabled) = if metadata.pie {
         let (base, bias) = compute_pie_layout(pid, metadata.preferred_base);
         (base, bias, true)
@@ -640,16 +693,28 @@ pub fn spawn_from(
 
     with_manager_mut(|m| {
         if let Some(rec) = m.records.iter_mut().find(|r| r.pid == pid) {
+            rec.name = resolved.to_string();
+            rec.state = ProcessState::Running;
+            rec.exit_code = None;
             rec.image_base = image_base;
             rec.load_bias = load_bias;
             rec.pie_enabled = pie_enabled;
+            rec.linked_interpreter = None;
+            rec.linked_libraries.clear();
+            rec.resolved_symbols.clear();
             rec.readable_segments = metadata.readable_segments;
             rec.writable_segments = metadata.writable_segments;
             rec.executable_segments = metadata.executable_segments;
+        } else {
+            return;
         }
     });
 
-    let link_report = match crate::kernel::dynamic_linker::link_image(resolved.as_str(), &metadata)
+    if record(pid).is_none() {
+        return Err("exec: pid not found");
+    }
+
+    let link_report = match crate::kernel::dynamic_linker::link_image(resolved, &metadata)
     {
         Ok(report) => report,
         Err(e) => {
@@ -701,9 +766,9 @@ pub fn spawn_from(
     );
 
     let run = if metadata.load_segments > 0 {
-        crate::kernel::elf_loader::load_and_run(resolved.as_str(), image_base, pid, args)
+        crate::kernel::elf_loader::load_and_run(resolved, image_base, pid, args)
     } else {
-        programs::execute_path(resolved.as_str(), program_name, args, env)
+        programs::execute_path(resolved, program_name, args, env)
     };
 
     let mut run_error: Option<&'static str> = None;
@@ -726,15 +791,10 @@ pub fn spawn_from(
     );
 
     if let Some(e) = run_error {
-        event::publish(
-            EventKind::ProcessStopped,
-            "process",
-            alloc::format!("pid={} exec-failed {}", pid, e).as_str(),
-        );
         return Err(e);
     }
 
-    Ok(pid)
+    Ok(exit_code)
 }
 
 fn candidate_program_paths(name: &str) -> Vec<String> {

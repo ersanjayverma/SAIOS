@@ -357,7 +357,6 @@ pub fn boot_to_login_shell() -> ! {
                         "session: ring3 shell launch failed (fallback to kernel SNSH)"
                     );
                     shell::run_shell_session(username.as_str(), None);
-                    continue;
                 }
             }
         }

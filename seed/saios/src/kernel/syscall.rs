@@ -515,7 +515,7 @@ fn map_exec_error_to_linux(err: &'static str) -> i64 {
 }
 
 pub fn linux_execve_for_pid(pid: u64, path: &str, argv: &[&str]) -> Result<i32, i64> {
-    process::exec_from(Some(pid), path, argv, &[]).map_err(map_exec_error_to_linux)
+    process::exec_in_place(pid, path, argv, &[]).map_err(map_exec_error_to_linux)
 }
 
 fn write_user_bytes(ptr: u64, data: &[u8]) -> Result<(), i64> {
@@ -1719,7 +1719,7 @@ pub extern "C" fn saios_linux_syscall(
             // execve replaces the calling process: on success the process must
             // never return to ring-3.  Exit the child immediately with the
             // child program's own exit code so the parent sees a clean exit.
-            match process::exec_from(Some(pid), path.as_str(), arg_refs.as_slice(), &[]) {
+            match process::exec_in_place(pid, path.as_str(), arg_refs.as_slice(), &[]) {
                 Ok(exit_code) => linux_exit_now(pid, exit_code as u64),
                 Err(e) => Err(map_exec_error_to_linux(e)),
             }
@@ -2485,7 +2485,7 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                 Vec::new()
             };
             let argv_refs: Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
-            let code = process::exec_from(Some(ctx.pid), name.as_str(), argv_refs.as_slice(), &[])
+            let code = process::exec_in_place(ctx.pid, name.as_str(), argv_refs.as_slice(), &[])
                 .map_err(|_| SyscallError::InvalidArgument)?;
             Ok(code as u64)
         }
