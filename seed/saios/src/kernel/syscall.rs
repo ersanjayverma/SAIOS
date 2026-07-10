@@ -134,6 +134,23 @@ const TIOCGWINSZ: u64 = 0x5413;
 const FIONREAD: u64 = 0x541B;
 const FIONBIO: u64 = 0x5421;
 
+/// `struct winsize { ws_row, ws_col, ws_xpixel, ws_ypixel }` (all `u16`), the
+/// Linux ABI layout expected by `TIOCGWINSZ`.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct WinSize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+const WINSIZE_DEFAULT: WinSize = WinSize {
+    ws_row: 24,
+    ws_col: 80,
+    ws_xpixel: 0,
+    ws_ypixel: 0,
+};
+
 const SIGCHLD: u64 = 17;
 
 #[allow(dead_code)] const CLONE_VM:       u64 = 0x0000_0100;
@@ -529,6 +546,15 @@ fn write_user_struct<T: Copy>(ptr: u64, value: &T) -> Result<(), i64> {
         core::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>())
     };
     write_user_bytes(ptr, bytes)
+}
+
+fn read_user_struct<T: Copy>(ptr: u64) -> Result<T, i64> {
+    let src = unsafe { user_slice(ptr, size_of::<T>())? };
+    let mut out = core::mem::MaybeUninit::<T>::uninit();
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), out.as_mut_ptr().cast::<u8>(), size_of::<T>());
+        Ok(out.assume_init())
+    }
 }
 
 fn zero_user_bytes(ptr: u64, len: usize) -> Result<(), i64> {
@@ -1331,7 +1357,8 @@ fn linux_getcwd(buf_ptr: u64, size: u64) -> Result<u64, i64> {
 
 fn linux_path_stat(path_ptr: u64, stat_ptr: u64) -> Result<u64, i64> {
     let path = read_user_cstr(path_ptr, 4096)?;
-    let st = vfs::stat(path.as_str()).map_err(|_| LINUX_ENOENT)?;
+    let resolved = process::stat_redirect_path(path.as_str());
+    let st = vfs::stat(resolved.as_str()).map_err(|_| LINUX_ENOENT)?;
     let linux_st = linux_stat_from_vfs(&st);
     write_user_struct(stat_ptr, &linux_st)?;
     Ok(0)
@@ -1372,7 +1399,8 @@ fn linux_fstat(pid: u64, fd: u64, stat_ptr: u64) -> Result<u64, i64> {
 
 fn linux_access(path_ptr: u64) -> Result<u64, i64> {
     let path = read_user_cstr(path_ptr, 4096)?;
-    vfs::stat(path.as_str()).map(|_| 0).map_err(|_| LINUX_ENOENT)
+    let resolved = process::stat_redirect_path(path.as_str());
+    vfs::stat(resolved.as_str()).map(|_| 0).map_err(|_| LINUX_ENOENT)
 }
 
 fn linux_chdir(path_ptr: u64) -> Result<u64, i64> {
@@ -2824,13 +2852,23 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
             if fd <= 2 {
                 return match request {
                     TCGETS => Ok(0),
-                    TIOCGPGRP => Ok(process::foreground_process_group().unwrap_or(ctx.pid)),
+                    TIOCGPGRP => {
+                        let pgid = process::foreground_process_group().unwrap_or(ctx.pid) as u32;
+                        write_user_struct(value, &pgid).map_err(|_| SyscallError::InvalidArgument)?;
+                        Ok(0)
+                    }
                     TIOCSPGRP => {
-                        process::set_foreground_process_group(value)
+                        let pgid: u32 =
+                            read_user_struct(value).map_err(|_| SyscallError::InvalidArgument)?;
+                        process::set_foreground_process_group(pgid as u64)
                             .map_err(|_| SyscallError::InvalidArgument)?;
                         Ok(0)
                     }
-                    TIOCGWINSZ => Ok((24u64 << 16) | 80u64),
+                    TIOCGWINSZ => {
+                        write_user_struct(value, &WINSIZE_DEFAULT)
+                            .map_err(|_| SyscallError::InvalidArgument)?;
+                        Ok(0)
+                    }
                     FIONREAD => Ok(0),
                     FIONBIO => Ok(0),
                     _ => Err(SyscallError::NotTty),
@@ -2864,13 +2902,23 @@ pub fn dispatch(req: SyscallRequest, ctx: SyscallContext) -> Result<u64, Syscall
                         _ => Ok(0),
                     },
                     TCGETS => Ok(0),
-                    TIOCGPGRP => Ok(process::foreground_process_group().unwrap_or(ctx.pid)),
+                    TIOCGPGRP => {
+                        let pgid = process::foreground_process_group().unwrap_or(ctx.pid) as u32;
+                        write_user_struct(value, &pgid).map_err(|_| SyscallError::InvalidArgument)?;
+                        Ok(0)
+                    }
                     TIOCSPGRP => {
-                        process::set_foreground_process_group(value)
+                        let pgid: u32 =
+                            read_user_struct(value).map_err(|_| SyscallError::InvalidArgument)?;
+                        process::set_foreground_process_group(pgid as u64)
                             .map_err(|_| SyscallError::InvalidArgument)?;
                         Ok(0)
                     }
-                    TIOCGWINSZ => Ok((24u64 << 16) | 80u64),
+                    TIOCGWINSZ => {
+                        write_user_struct(value, &WINSIZE_DEFAULT)
+                            .map_err(|_| SyscallError::InvalidArgument)?;
+                        Ok(0)
+                    }
                     _ => Err(SyscallError::NotTty),
                 }
             })

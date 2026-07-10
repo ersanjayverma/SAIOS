@@ -361,6 +361,7 @@ pub fn boot_to_login_shell() -> ! {
         let _ = crate::saifs::cd(user_home.as_str());
 
         let shell_name = user_shell.as_str();
+
         let shell_pid = process::ensure_shell_process(shell_name);
         let _ = process::create_session(shell_pid);
         let _ = process::set_foreground_process_group(shell_pid);

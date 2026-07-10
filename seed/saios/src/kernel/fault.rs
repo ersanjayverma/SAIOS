@@ -175,12 +175,32 @@ fn handle_page_fault(fault_addr: usize, error_code: usize, stack_ptr: usize) -> 
     true
 }
 
+/// Reads the saved CS selector from a `(error_code, RIP, CS, RFLAGS, RSP,
+/// SS)`-shaped frame and returns true only if it encodes CPL3 (the low 2
+/// selector bits). Faults without a CPU-pushed error code (e.g. #UD) instead
+/// receive a `(RIP, CS, RFLAGS, RSP, SS)` frame with no leading error_code
+/// slot, selected via `has_error_code`.
+fn frame_is_from_ring3(stack_ptr: usize, has_error_code: bool) -> bool {
+    let cs_index = if has_error_code { 2 } else { 1 };
+    let cs = unsafe { *((stack_ptr as *const usize).add(cs_index)) };
+    (cs & 0x3) == 0x3
+}
+
 fn handle_invalid_opcode(stack_ptr: usize) -> bool {
     if active_exec_pid().is_none() {
         return false;
     }
 
-    let _ = stack_ptr;
+    // Mirror the #PF containment fix: only a fault that actually originated
+    // in ring3 is safe to route into `abort_active_exec`'s stale-jump
+    // recovery. A genuine kernel-mode #UD (e.g. hit deep inside a VFS/syscall
+    // helper while a process's syscall is being serviced, exactly the class
+    // of bug documented on `handle_page_fault` above) must panic normally
+    // instead of jumping to a stale ring3 recovery target.
+    if !frame_is_from_ring3(stack_ptr, false) {
+        return false;
+    }
+
     mark_active_exec_faulted();
     true
 }
@@ -190,7 +210,13 @@ fn handle_general_protection(_error_code: usize, stack_ptr: usize) -> bool {
         return false;
     }
 
-    let _ = stack_ptr;
+    // See `handle_invalid_opcode` above: only recover faults that actually
+    // originated in ring3, not kernel-mode #GP/#SS/#TS/#NP taken while
+    // servicing this process's syscall.
+    if !frame_is_from_ring3(stack_ptr, true) {
+        return false;
+    }
+
     mark_active_exec_faulted();
     true
 }

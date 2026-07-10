@@ -909,6 +909,25 @@ fn resolve_program_name(name: &str) -> Result<String, &'static str> {
     Err("exec: program not found")
 }
 
+/// Applies just the busybox-applet basename redirect (no PATH search) to
+/// `path`, returning it unchanged for anything else. `execve` resolves
+/// applet names like `ls`/`cat` straight to `/bin/busybox` via
+/// `resolve_program_name` above so they run for real, but a shell's PATH
+/// search calls `stat`/`access` on the exact candidate path *first* and
+/// only calls `execve` if that succeeds -- so `stat("/bin/ls")` must see the
+/// same virtual redirect `execve("/bin/ls")` does, or every applet name
+/// looks like a dangling path and the shell reports "not found" before ever
+/// attempting to run it.
+pub fn stat_redirect_path(path: &str) -> String {
+    let base_name = path.rsplit('/').next().unwrap_or(path);
+    if BUSYBOX_REDIRECT_APPLETS.contains(&base_name) {
+        if let Some(busybox_path) = resolve_busybox_path() {
+            return busybox_path;
+        }
+    }
+    path.to_string()
+}
+
 fn compute_pie_layout(pid: u64, preferred_base: u64) -> (u64, u64) {
     let aslr_window = 0x0100_0000u64;
     let granularity = 0x1000u64;
