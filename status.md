@@ -106,6 +106,72 @@ line, which is an unrelated, harmless first-ever-call artifact of
 `vmm::map_physical_anywhere`'s virtual address allocator, not a cause) across every
 attempt with the current binary.
 
+## 2026-07-10 (continued): root-caused and FIXED the `#SS` kernel panic on `ls`
+
+Followed the recommended next step above: got a `qemu -d int` interrupt trace (not
+just the kernel's own fault log) across the exact `ls` repro, which showed
+`Servicing hardware INT=0x20` (the PIT timer) immediately followed by
+`check_exception old: 0xffffffff new 0xc` at the *same* RIP/RSP -- i.e. the timer
+interrupt's own hardware delivery was aborting mid-vector and re-raising as `#SS`
+*before* it ever pushed a frame for itself. That pointed straight at the IST-based
+stack-switch mechanism the timer IRQ depends on (`idt::set_ist(32, 3)`, see
+`seed/saios/src/timer.rs`), not at whatever code happened to be running when the timer
+fired (explaining why the reported `rip` always looked like unrelated, unfaultable
+code -- it was simply the interrupted context, not a faulting instruction).
+
+Confirmed via a live GDB session against the QEMU gdbstub (connect from WSL to the
+Windows host IP, not `127.0.0.1` -- see below) reading the TSS's raw bytes directly:
+`hal/src/arch/x86_64/tss.rs`'s `TaskStateSegment` was declared plain `#[repr(C)]`.
+Rust's default layout rules insert 4 bytes of padding after the leading
+`reserved1: u32` to naturally 8-byte-align the following `[u64; 3]`/`[u64; 7]` arrays --
+but the **hardware** x86_64 TSS64 format has no such padding; `RSP0` sits at byte
+offset 4 and `IST1..IST7` at byte offset 36, packed tight. Every IST/RSP0 pointer this
+kernel ever wrote via `tss::set_ist`/`set_rsp0` landed 4 bytes further into the
+structure than where the CPU's own microcode reads them for an IST-based stack switch
+-- silently corrupting exactly the mechanism that had been carefully built and
+commented in `idt.rs` (`IRQ_IST_STACK`, `DF_IST_STACK`, `GP_IST_STACK`) without ever
+being caught, because nothing had exercised a *second* real context switch (the
+timer firing during actual kernel-mode work post-fork) until `ls`'s fork+exec was the
+first scenario to do so live in this session.
+
+**Fix:** `hal/src/arch/x86_64/tss.rs` -- `#[repr(C)]` -> `#[repr(C, packed(4))]` on
+`TaskStateSegment`, which caps field alignment at 4 bytes and eliminates the inserted
+padding, making the Rust layout byte-for-byte match the hardware spec (confirmed by
+recomputing offsets: `ist` now starts at byte 36, not 40).
+
+**Verified fixed:** rebuilt, booted, logged in, typed `ls` -- the kernel-panicking
+`#SS` is completely gone. `ls` (and a nested `busybox ash -c '...'`) now surfaces a
+*contained*, recoverable ring3 `#PF` (`err=0x15` = present + user + instruction-fetch,
+i.e. an NX-bit/exec-permission violation inside busybox's own mapped image, cr2==rip)
+that the existing fault-recovery path (`fault.rs::abort_active_exec`, already fixed
+earlier this session to check ring3 origin) correctly catches, kills only that one
+process, and returns control to a live, still-interactive `/root #` prompt --
+`echo`/`pwd` keep working immediately after. This is real process-level fault
+isolation actually working end-to-end for the first time in this session's testing.
+
+**New, separate, much narrower bug surfaced by this fix (not yet investigated):**
+busybox's *own* code now segfaults on an instruction fetch (`cr2` == faulting `rip`,
+inside its mapped `.text`-range address, e.g. `0x4db378`) when invoked a second time
+(nested exec via `ls`'s busybox-redirect, or `busybox ash -c '...'`) in the same boot.
+Likely a stale/incorrect executable-segment mapping specific to the *second* ELF load
+under an isolated address space (possibly the same class of issue as the earlier-fixed
+"clear inherited PT_LOAD ranges before remap", but for the exec bit specifically) --
+worth a focused ELF-loader mapchk trace on the second load's PT_LOAD flags next.
+
+**Debugging note for next time:** this machine runs QEMU natively on Windows but only
+has `gdb` inside WSL. WSL2's `127.0.0.1` does **not** reach a QEMU gdbstub bound on the
+Windows side -- connect to the Windows host IP as seen from WSL instead (`ip route |
+grep default` inside WSL gives it, e.g. `target remote 192.168.32.1:1234`). Also: WSL
+has `grub-mkrescue`/`xorriso`/`mkfs.fat`/`mtools`/`gdb`/`addr2line`/`objdump`/`nm` and a
+full rustup toolchain (`source ~/.cargo/env` first, then `rustup target add
+x86_64-unknown-uefi x86_64-unknown-none` once) -- `scripts/createiso.sh --rebuild` runs
+correctly from there even though native Windows has none of those ISO/ELF tools. QEMU
+itself (`C:\Program Files\qemu\qemu-system-x86_64.exe`) and OVMF firmware
+(`C:\Program Files\qemu\share\edk2-x86_64-code.fd`) are Windows-native. Driving the
+console headlessly (no human at a GUI) works via a bidirectional TCP connection to a
+`-chardev socket` serial device or a `-monitor tcp:...` HMP socket using `sendkey` --
+see `tools/qemu_drive_test.py`.
+
 Also still true from before (not re-verified this session, no evidence they regressed):
 the isolated-CR3 exception-delivery containment work described below, VBox/NEM
 divergence notes, and the huge-page-split/stdin/tty fixes.

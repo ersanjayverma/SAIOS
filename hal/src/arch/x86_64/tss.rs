@@ -1,5 +1,16 @@
 use crate::arch::x86_64::sync::StaticCell;
-#[repr(C)]
+// The hardware x86_64 TSS has no padding: `rsp`/`ist` (u64 fields) sit at
+// byte offsets 4/36 respectively, not 8/40. Plain `#[repr(C)]` would let the
+// compiler insert 4 bytes of padding after `reserved1` to naturally
+// 8-byte-align the u64 arrays, silently shifting every field the CPU
+// actually reads (RSP0, IST1..IST7, io_map_base) by 4 bytes relative to
+// where we write them -- the IST stack pointers we set are never at the
+// offset the CPU's own IST-based interrupt stack-switch reads, so any
+// vector configured to use an IST (the timer IRQ, `#DF`) silently switches
+// to garbage/zero and raises `#SS` mid-delivery instead. `packed(4)` caps
+// field alignment at 4 bytes, matching the real hardware layout exactly
+// with no inserted padding.
+#[repr(C, packed(4))]
 pub struct TaskStateSegment {
     pub reserved1: u32,
     pub rsp: [u64; 3],
