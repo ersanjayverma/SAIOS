@@ -2,7 +2,15 @@
 
 Status: Implemented (service-based runtime)
 Owner: Shell and platform architecture
-Last updated: 2026-07-03
+Last updated: 2026-08-25
+
+## Default shell
+
+**SNSH is the canonical default interactive shell for SAIOS.**
+
+The kernel shell service exports `DEFAULT_SHELL = "snsh"`, records the interactive shell process under that identity, and launches the SNSH session after `/system/init` completes. This keeps boot initialization separate from the operator shell.
+
+The shell service is implemented in [`seed/saios/src/shell/service.rs`](../seed/saios/src/shell/service.rs).
 
 ## Purpose
 
@@ -174,32 +182,6 @@ Primary object-first interface:
 - recover, rcv
 - shutdown, reboot
 
-Service subcommands:
-
-- service list
-- service start <name>
-- service stop <name>
-- service restart <name>
-- service health
-- service info <name>
-
-Validation commands:
-
-- test
-- test memory
-- test scheduler
-- test console
-- test object
-- test saifs
-- test all
-- verify memory
-- verify scheduler
-- verify console
-- verify object
-- verify service
-- verify saifs
-- verify all
-
 ### Compatibility Commands
 
 POSIX-like compatibility surface:
@@ -216,7 +198,7 @@ Compatibility commands are intentionally isolated from the native command set im
 
 ## Process Execution Contract
 
-`exec` is now the primary process execution entry point.
+`exec` is the primary process execution entry point.
 
 Capabilities:
 
@@ -228,83 +210,30 @@ Capabilities:
 
 `spawn` starts a process and returns PID through shell output.
 
-Examples:
-
-- `exec hello one two`
-- `exec MODE=debug hello world`
-- `exec false` then `status`
-- `spawn shell`
-
-Current binary-backed programs seeded in package image include:
-
-- `hello`
-- `calc`
-- `editor`
-- `shell`
-- `ls`
-- `cat`
-- `cp`
-- `mv`
-- `rm`
-- `mkdir`
-- `ps`
-- `kill`
-- `top`
-- `uname`
-- `stress`
-- `cc`
-
-Runtime note:
-
-- Execution is binary-metadata driven and no longer dependent on demo-only `run` flow.
+The compatibility `shell` binary is **not** the default interactive shell. Interactive sessions belong to the SNSH service and are recorded as process name `snsh`.
 
 ## SISH Language Features
 
-The SNSH parser supports a small but complete command language:
+The SNSH parser supports:
 
-- **Statements**: Multiple statements on one line separated by `;`.
-  - Example: `echo a; echo b; echo c`
-- **Pipelines**: Commands connected by `|` with stdin capture via `SISH_STDIN`.
-  - Example: `ls | grep txt | wc`
-- **Redirection**:
-  - `>` write stdout to file
-  - `>>` append stdout to file
-  - `<` read file as stdin (`SISH_STDIN`)
-  - Example: `cat < /etc/hostname`, `echo hi > /tmp/out.txt`
-- **Environment expansion**: `$VAR` and `${VAR}` are expanded from the session environment.
-  - Example: `echo $PATH`
-- **Inline environment overlay**: `KEY=VALUE` prefixes on `exec` set temporary variables.
-  - Example: `exec MODE=debug hello world`
-- **Aliases**: User-defined command shortcuts.
-  - `alias ll ls -l`
-  - `aliases`, `unalias ll`
-- **Source scripts**: Execute a file in the current shell context.
-  - `source /etc/profile` or `. /etc/profile`
-- **Tab completion**: The console completion engine suggests registered commands and aliases.
+- statements separated by `;`
+- pipelines using `|`
+- stdout/stdin redirection
+- environment expansion
+- inline environment overlays
+- aliases
+- sourced scripts
+- tab completion
 
 ## Execution Flow
 
-1. KSF starts shell service and spawns shell thread.
-2. Engine renders prompt via PromptProvider.
-3. Engine receives console input events.
-4. Parser splits input into statements and pipelines, tokenizes words, and extracts redirections.
-5. Dispatcher resolves each command in the registry.
-6. Command executes with mutable CommandContext; pipeline stdin is passed via `SISH_STDIN`.
-7. If no command matches, dispatcher attempts program execution fallback (`/bin/<name>` or explicit path).
-8. Exit code is persisted in session state for `status` and diagnostics.
-
-## Error Model
-
-Shell commands return:
-
-```rust
-pub type ShellResult = Result<(), &'static str>;
-```
-
-Guideline:
-
-- Return concise operator-facing errors.
-- Avoid manager/provider internals leaking into shell UX.
+1. KSF starts the shell service and spawns the shell thread.
+2. `/system/init` is started as PID 1 and sourced for system initialization.
+3. PID 1 is completed.
+4. The process manager creates the canonical shell process with name `snsh`.
+5. SNSH renders the prompt and owns the interactive console session.
+6. The parser and dispatcher execute native commands or fall back to `/bin/<name>` / explicit paths.
+7. Exit status is retained in the session for diagnostics.
 
 ## Integration Rules
 
@@ -313,45 +242,17 @@ Guideline:
 - Shell commands should never call HAL-level APIs except explicit system control commands such as reboot/shutdown.
 - Shell runtime should not own boot control flow.
 
-## Command Modules
-
-Built-ins are modular command plugins under `shell/commands/` and each module implements only command behavior.
-
-Current core modules include:
-
-- help
-- clear
-- version
-- objects
-- inspect
-- health
-- shutdown
-- reboot
-
-## How To Add a Command
-
-1. Add module under `shell/commands/` (or native/compatibility family as appropriate).
-2. Register a StaticCommand entry in that module's register function.
-3. Keep command description concise and action-oriented.
-4. If it exposes object data, prefer query or inspect contracts over ad hoc traversal.
-
 ## Runtime Placement
 
-Boot runtime shape:
-
+```text
 Firmware
--> Bootloader
--> Kernel init
--> KSF service startup
--> Shell service start
--> Scheduler/idle runtime
+  -> Bootloader
+  -> Kernel init
+  -> KSF service startup
+  -> SNSH shell service
+  -> /system/init
+  -> snsh interactive session
+  -> Scheduler / idle runtime
+```
 
-After this handoff, boot code no longer invokes shell loops directly.
-
-## Planned Extensions
-
-- background jobs (`&`) and job control
-- command permissions and policy checks
-- structured output modes for machine consumers
-- remote shell transport over SIF APIs
-- startup script (`/etc/profile`) auto-sourcing at shell start
+After the `/system/init` handoff, boot code no longer owns the interactive shell loop.
