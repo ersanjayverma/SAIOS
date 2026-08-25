@@ -6,6 +6,13 @@ use crate::scheduler;
 
 use super::engine::ShellEngine;
 
+/// Canonical interactive shell identity for SAIOS.
+///
+/// Keep this name aligned with the user-facing shell contract so process
+/// listings, diagnostics, and future login/session code all agree on the
+/// default shell name.
+pub const DEFAULT_SHELL: &str = "snsh";
+
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 fn sish_thread_entry() {
@@ -13,11 +20,20 @@ fn sish_thread_entry() {
     console::println!("[BOOTCHK] shell.thread.pid1.start");
     let _ = process::start_pid1("/system/init");
     console::println!("[BOOTCHK] shell.thread.pid1.started");
+
+    // PID 1 performs system startup. Once it exits, SNSH owns the
+    // interactive session and is recorded as the canonical shell process.
     let mut engine = ShellEngine::new();
     let _ = engine.execute_line("source /system/init");
     let _ = process::finish_pid1(0);
-    let _ = process::ensure_shell_process("snsh");
-    console::println!("Launching SNSH...");
+
+    let shell_pid = process::ensure_shell_process(DEFAULT_SHELL);
+    console::println!(
+        "Launching {} as default shell (pid={})...",
+        DEFAULT_SHELL,
+        shell_pid
+    );
+
     let _ = engine.execute_line("clear");
     engine.run();
 }
