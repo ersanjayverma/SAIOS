@@ -6,7 +6,7 @@ Status: Engineering investigation
 
 SAIOS has reached deeper kernel phases on real hardware, but early paging and address-space transitions have historically been a major source of opaque resets. This note records the current failure model and the engineering rules that follow from it.
 
-The repository's v0.2 findings identify several related hazards: strict early VMM/CR3 assumptions, CR3 switching during page-table bootstrap, framebuffer remapping while operating under firmware-CR3 fallback, and raw access to physical ACPI addresses. citedocs/SAIOS-0.2-Final-Findings.md
+The repository's v0.2 findings identify several related hazards: strict early VMM/CR3 assumptions, CR3 switching during page-table bootstrap, framebuffer remapping while operating under firmware-CR3 fallback, and raw access to physical ACPI addresses. See `docs/SAIOS-0.2-Final-Findings.md` for the recorded findings.
 
 ## Observed failure pattern
 
